@@ -19,9 +19,24 @@ See ARCHITECTURE.md for the full component map and the current bypass surface.
 
 Building
 --------
-- Open the .sln files with Visual Studio (the projects originate from VB.NET
-  2010, .NET 2.0, x86; a migration to a current toolchain is planned).
-- Starting a block installs and starts the Windows service "MONKMODE".
+- Target framework: .NET 8 (net8.0-windows), VB.NET, SDK-style projects.
+- Open MonkMode.sln (repo root) in Visual Studio 2022, or build from the CLI:
+      dotnet build MonkMode.sln -c Release
+  Output exes land in each project's bin/Release/net8.0-windows/.
+- Requires the .NET 8 SDK. The GUI (MonkMode.exe) requests Administrator
+  elevation (it writes the hosts file and installs the service).
+- Starting a block installs and starts the Windows service "MONKMODE" via the
+  Service Control Manager (see MonkMode/ServiceTools.vb).
+
+Migration note
+--------------
+Originally VB.NET 2010 / .NET Framework 2.0. Migrated to .NET 8:
+- All five projects converted to SDK-style project files.
+- Authored MonkMode/ServiceTools.vb (advapi32 P/Invoke) to replace the
+  third-party "ServiceTools" helper the original referenced but never shipped.
+- Dropped the unused Microsoft.VisualBasic.PowerPacks reference and the dead
+  installutil-based service installer (Class1.vb); the GUI installs the service
+  programmatically.
 
 Removing the service (for development only)
 -------------------------------------------

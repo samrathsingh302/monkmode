@@ -152,7 +152,7 @@ Public Class Add_custom
         iniFile = New IniFile
         iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
 
-        If importfile.ShowDialog() = Windows.Forms.DialogResult.OK Then
+        If importfile.ShowDialog() = System.Windows.Forms.DialogResult.OK Then
             filepath = importfile.FileName
 
             If File.Exists(filepath) Then

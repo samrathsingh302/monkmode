@@ -180,7 +180,7 @@ Public Class MonkMode
         DateTimePicker1.MinDate = Date.Now
         DateTimePicker1.MaxDate = DateAdd("m", 1, Date.Now)
 
-        If Windows.Forms.Screen.PrimaryScreen.Bounds.Height < 700 Then
+        If System.Windows.Forms.Screen.PrimaryScreen.Bounds.Height < 700 Then
             Me.ClientSize = New System.Drawing.Size(451, 530)
             Me.AutoScroll = True
         End If
@@ -1827,7 +1827,7 @@ Public Class MonkMode
 
         Dim filePathS, reader As String
         Dim newKey As String = ""
-        If importfile.ShowDialog() = Windows.Forms.DialogResult.OK Then
+        If importfile.ShowDialog() = System.Windows.Forms.DialogResult.OK Then
             filePathS = importfile.FileName
             If File.Exists(filePathS) Then
                 Try
@@ -1983,7 +1983,7 @@ Public Class MonkMode
 
     Private Sub addProgram(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles Button2.Click
 
-        If addProgramDialog.ShowDialog() = Windows.Forms.DialogResult.OK Then
+        If addProgramDialog.ShowDialog() = System.Windows.Forms.DialogResult.OK Then
 
             Dim filePathS As String = addProgramDialog.FileName
             Dim newKey As String = ""

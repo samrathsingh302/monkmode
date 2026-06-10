@@ -1,0 +1,60 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "MonkMode", "MonkMode\MonkMode.vbproj", "{3C8A95BF-F237-4485-A0EB-DDB1176A927F}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MonkMode_srv", "MonkMode_srv", "{CC7D9ADA-2800-43BE-9D7B-5479338B5196}"
+EndProject
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "MonkMode_srv", "MonkMode_srv\MonkMode_srv\MonkMode_srv.vbproj", "{F61A219D-B5DE-4ADD-9B5B-387D67104E8E}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MM_notify", "MM_notify", "{60BF64F2-716C-491C-97C2-45B71385C6E9}"
+EndProject
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "MM_notify", "MM_notify\MM_notify\MM_notify.vbproj", "{5FADD1BE-859C-4313-ACBC-C27B65B53944}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MM_notify2", "MM_notify2", "{982D6CC2-26E2-4C40-9455-D008EA839CD8}"
+EndProject
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "MM_notify2", "MM_notify2\MM_notify2\MM_notify2.vbproj", "{C98C51B6-7DD1-4AF4-9C14-9E4ADABA89EC}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MM_popup", "MM_popup", "{9321367F-17F5-4910-BD03-C70D1E53BC01}"
+EndProject
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "MM_popup", "MM_popup\MM_popup\MM_popup.vbproj", "{B270F71D-D824-47C3-9F18-86468B980890}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3C8A95BF-F237-4485-A0EB-DDB1176A927F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3C8A95BF-F237-4485-A0EB-DDB1176A927F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3C8A95BF-F237-4485-A0EB-DDB1176A927F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3C8A95BF-F237-4485-A0EB-DDB1176A927F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F61A219D-B5DE-4ADD-9B5B-387D67104E8E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F61A219D-B5DE-4ADD-9B5B-387D67104E8E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F61A219D-B5DE-4ADD-9B5B-387D67104E8E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F61A219D-B5DE-4ADD-9B5B-387D67104E8E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C98C51B6-7DD1-4AF4-9C14-9E4ADABA89EC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C98C51B6-7DD1-4AF4-9C14-9E4ADABA89EC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C98C51B6-7DD1-4AF4-9C14-9E4ADABA89EC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C98C51B6-7DD1-4AF4-9C14-9E4ADABA89EC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B270F71D-D824-47C3-9F18-86468B980890}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B270F71D-D824-47C3-9F18-86468B980890}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B270F71D-D824-47C3-9F18-86468B980890}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B270F71D-D824-47C3-9F18-86468B980890}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{F61A219D-B5DE-4ADD-9B5B-387D67104E8E} = {CC7D9ADA-2800-43BE-9D7B-5479338B5196}
+		{5FADD1BE-859C-4313-ACBC-C27B65B53944} = {60BF64F2-716C-491C-97C2-45B71385C6E9}
+		{C98C51B6-7DD1-4AF4-9C14-9E4ADABA89EC} = {982D6CC2-26E2-4C40-9455-D008EA839CD8}
+		{B270F71D-D824-47C3-9F18-86468B980890} = {9321367F-17F5-4910-BD03-C70D1E53BC01}
+	EndGlobalSection
+EndGlobal
