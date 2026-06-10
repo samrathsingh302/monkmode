@@ -9,3 +9,6 @@
 *.cache
 *.vshost.*
 .vs/
+
+# Assembled run folder
+dist/

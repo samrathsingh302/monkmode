@@ -4,6 +4,14 @@
 > inherited from the open-source Cold Turkey codebase**, then catalogs every
 > realistic way the current design can be bypassed. Phase 2 expands this into a
 > full threat model; Phase 3 closes the holes.
+>
+> **Update (post-Phase-1, .NET 8 + CLI):** The front-end is now a console **CLI
+> (`monkmode.exe`)** instead of a WinForms GUI, and the notifier shows a tray
+> toast (the `MM_notify2` twin and `MM_popup` window were removed). The
+> **enforcement model below — and therefore the entire bypass surface B1–B11 —
+> is unchanged**; only the configuration front-end changed. Identifiers are now
+> the MonkMode names (service `MONKMODE`, `MonkMode_srv.exe`,
+> `monkmode_settings.ini`, key `mm_textbox`, marker `#### MonkMode Entries ####`).
 
 ## 1. Components
 
@@ -11,12 +19,18 @@ The product is **four cooperating VB.NET (.NET 2.0, x86) programs** built from
 five Visual Studio 2010 solutions. There is **no C++** — the "service" is also
 VB.NET.
 
-| Project (orig) | Output exe | Runs as | Role |
+Current (post-migration) components — three cooperating VB.NET (.NET 8,
+net8.0-windows) programs:
+
+| Project | Output exe | Runs as | Role |
 |---|---|---|---|
-| `ColdTurkey` | `ColdTurkey.exe` | User (elevated to write hosts) | GUI. Picks sites/apps + end time, writes the hosts file, installs & starts the service, registers the notifier. |
-| `kasrp_srv` | `kctrp_srv.exe` | **LocalSystem service `KCTRP`** | Enforcer. Holds the hosts file locked, kills blocked processes, restores hosts & stops itself when the timer expires. |
-| `CT_notify` / `CT_notify2` | `ct_notify.exe` / `CT_notify2.exe` | User session (HKCU `Run`) | Background watcher; triggers the popup when time is up. |
-| `CT_popup` | `CT_popup.exe` | User session | The "time's up" popup. |
+| `MonkMode` | `monkmode.exe` | User (elevated, requireAdministrator) | CLI. Parses `block`/`status`/`add`, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
+| `MonkMode_srv` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcer. Holds the hosts file locked, kills blocked session-0 processes, restores hosts & stops itself when the timer expires. |
+| `MM_notify` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, compensates for clock changes, shows a tray-balloon toast when the block ends. |
+
+The original inherited design (described below) was a **four**-program VB.NET
+2.0 set with a WinForms GUI plus `MM_notify2` and an `MM_popup` window; those
+two were removed during the CLI migration.
 
 ## 2. How a block works (control flow)
 
