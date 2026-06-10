@@ -1,18 +1,40 @@
-Hi everyone,
+MonkMode
+========
 
-I have decided to make this project open source in hopes that it will continue to grow and become 
-useful for more people.
+MonkMode is a tamper-resistant website/app self-control blocker for Windows.
+It is a personal fork of the open-source Cold Turkey blocker (GPLv3), rebranded
+and being hardened so that a block, once started, cannot be casually removed
+before its timer expires.
 
-/ColdTurkey   <-- Root-level Main application (writes to hosts file)
-/CT_notify    <-- User-level background process to trigger CT_popup when time is up
-/CT_popup     <-- User-level program that is the popup displayed when the time is up
-/kctrp_srv    <-- Root-level Windows service (lock hosts file) and unblocks user when time is up
+Project layout
+--------------
+  /MonkMode       <-- Main GUI application (writes the hosts file, installs the service)
+  /MonkMode_srv   <-- LocalSystem Windows service "MONKMODE" (locks the hosts file,
+                       kills blocked processes, lifts the block when time is up)
+  /MM_notify      <-- User-level background process: triggers the popup when time is up
+  /MM_notify2     <-- Secondary user-level watcher
+  /MM_popup       <-- The "time's up" popup shown to the user
 
-- Open project files (.sln) with Visual Studio VB.NET 2010
-- Cold Turkey will install a Windows service when started. To remove this service, run this command
-  as an Administrator in the command prompt: 
-  sc delete KCTRP
+See ARCHITECTURE.md for the full component map and the current bypass surface.
 
-Contact:      http://getcoldturkey.com
-              http://felixbelzile.com
-              felixbelzile@rogers.com
+Building
+--------
+- Open the .sln files with Visual Studio (the projects originate from VB.NET
+  2010, .NET 2.0, x86; a migration to a current toolchain is planned).
+- Starting a block installs and starts the Windows service "MONKMODE".
+
+Removing the service (for development only)
+-------------------------------------------
+  Run as Administrator:  sc delete MONKMODE
+
+  NOTE: this removal path is exactly the kind of bypass MonkMode's hardening
+  work (Phase 3) is meant to close. It is documented here only because it is
+  needed while developing.
+
+License
+-------
+GPLv3 (inherited from Cold Turkey). See COPYING.
+
+Upstream
+--------
+Originally based on Cold Turkey by Felix Belzile.

@@ -1,0 +1,11 @@
+# Visual Studio build output & user state
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.suo
+*.user
+*.pdb
+*.cache
+*.vshost.*
+.vs/
