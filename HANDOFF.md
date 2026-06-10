@@ -117,17 +117,37 @@ bypasses the manifest's UAC prompt:
 - GUI → **CLI** conversion + tray-toast notifier; dropped MM_notify2/MM_popup;
   added `tools/build-dist.ps1`.
 
-**Verified:** `dotnet build MonkMode.sln -c Release` succeeds (0 errors). CLI arg
-parsing/validation/status and the assembled `dist\` layout exercised via the
-managed dll (gets through to the SCM call, then correctly requires admin).
+**Verified:** `dotnet build MonkMode.sln -c Release` succeeds (0 errors).
+
+- ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
+  elevated 2-minute block on example.com, verified it was live, waited for the
+  auto-lift, verified cleanup, and tore everything down. Reusable scripts live in
+  `C:\Users\samra\monkmode-smoketest\` (`run-smoketest.ps1`, `cleanup.ps1`, and the
+  `dns-diag*.ps1` root-cause probes). The smoke test found and we FIXED three real
+  bugs that the compile-only verification had hidden:
+  1. **`0.0.0.0` didn't block.** Windows' resolver ignores `0.0.0.0` hosts entries
+     and falls through to real DNS. `Blocker.BuildHostsEntries` now writes
+     `127.0.0.1` (Windows honors it; it suppresses both A and AAAA for the name).
+  2. **The service's persistent hosts file-handle defeated the block.** Opening
+     hosts `FileAccess.Write/FileShare.Read` made the Windows DNS Client fail to
+     (re)read hosts during a block, so any `ipconfig /flushdns` silently un-blocked
+     everything until reboot (it only "worked" via a dnscache cache race).
+     `Service1.vb` no longer holds a persistent handle: it locks via the read-only
+     attribute, re-asserts it every 10s in the timer, and appends `add_to_hosts`
+     on demand. Block now survives `ipconfig /flushdns` (verified in the test).
+  3. **The notifier never ran.** `MM_notify` used `MyType=WindowsForms` with no
+     `MainForm`, so the auto Sub Main exited instantly. Added an explicit
+     `MM_notify/Program.vb` `Sub Main` + `<MyType>WindowsFormsWithCustomSubMain</MyType>`.
+     `mm_notify.exe` now stays alive (toast + user-session app-kill + clock comp).
 
 **NOT done / NOT verified:**
-- ⚠️ **No live elevated runtime test.** Nobody has actually: installed the service,
-  confirmed a site gets blocked, confirmed the block auto-lifts + toasts at expiry,
-  or confirmed app-killing/clock-compensation behave. This is the #1 thing to do
-  next. Suggested smoke test: `dist\monkmode.exe block --sites example.com --for 5m`
-  (elevated) → confirm example.com blocked in a fresh browser → wait 5 min → confirm
-  it unblocks + toast appears. Clean up: `sc delete MONKMODE` (admin) if needed.
+- These source fixes are **not yet committed** (working tree on `monkmode`).
+- The expiry **toast** and **app-kill / clock-change** paths weren't asserted
+  programmatically (mm_notify is confirmed running, but watch for the balloon at
+  expiry and test `--apps` / clock-roll manually if you want belt-and-suspenders).
+- Residual for Phase 3: between 10s re-asserts an admin user can clear read-only
+  and edit hosts; the timer re-asserts the attribute but does NOT yet restore
+  deleted entries (this is the B2 "re-assert hosts" hardening item).
 - Phase 2 (full threat model) — **explicitly deferred by the user; do not start
   without asking.**
 - Phase 3 (hardening) — not started.

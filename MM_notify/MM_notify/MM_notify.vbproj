@@ -4,7 +4,8 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
-    <MyType>WindowsForms</MyType>
+    <MyType>WindowsFormsWithCustomSubMain</MyType>
+    <StartupObject>mm_notify.Program</StartupObject>
     <RootNamespace>mm_notify</RootNamespace>
     <AssemblyName>mm_notify</AssemblyName>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>

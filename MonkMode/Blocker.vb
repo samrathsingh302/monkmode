@@ -126,15 +126,19 @@ Module Blocker
         Return d.Trim()
     End Function
 
+    ' Use 127.0.0.1, NOT 0.0.0.0: Windows' DNS resolver does not honor 0.0.0.0
+    ' (INADDR_ANY) hosts entries and falls through to real DNS, so 0.0.0.0 does
+    ' not block. A loopback hosts entry IS honored and suppresses the real A AND
+    ' AAAA lookups for that name, so a single 127.0.0.1 line fully blocks it.
     Public Function BuildHostsEntries(ByVal domains As IEnumerable(Of String)) As String
         Dim sb As New System.Text.StringBuilder
         For Each raw As String In domains
             Dim d As String = NormalizeDomain(raw)
             If d = "" Then Continue For
-            sb.Append("0.0.0.0 ").Append(d).Append(vbCrLf)
+            sb.Append("127.0.0.1 ").Append(d).Append(vbCrLf)
             If Not d.StartsWith("www.") AndAlso d.IndexOf("."c) = d.LastIndexOf("."c) Then
                 ' bare second-level domain -> also block www.
-                sb.Append("0.0.0.0 www.").Append(d).Append(vbCrLf)
+                sb.Append("127.0.0.1 www.").Append(d).Append(vbCrLf)
             End If
         Next
         Return sb.ToString()

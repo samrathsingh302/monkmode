@@ -42,10 +42,7 @@ Public Class Service1
     Public hostDirS As String = sWinDir + "\system32\drivers\etc\hosts"
     Dim iniDateUntil As DateTime
     Dim iniTimeChanging As String
-    Public fs As FileStream
-    Public sw As StreamWriter
     Dim encryptionW As New Simple3Des("mm_textbox")
-    Dim swStarted As Boolean = False
     Dim culture As CultureInfo = New CultureInfo("en-CA")
 
 #Region " Component Designer generated code "
@@ -167,16 +164,16 @@ Public Class Service1
             iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
         End Try
 
-        If My.Computer.FileSystem.FileExists(hostDirS) Then
-            SetAttr(hostDirS, vbNormal)
-        Else
+        If Not My.Computer.FileSystem.FileExists(hostDirS) Then
             System.IO.File.AppendAllText(hostDirS, "")
-            SetAttr(hostDirS, vbNormal)
         End If
+        ' Do NOT hold a persistent write handle on the hosts file. A handle opened
+        ' FileAccess.Write/FileShare.Read makes the Windows DNS Client (Dnscache)
+        ' fail to (re)read hosts during the block, so blocked sites silently
+        ' resolve to their real IPs again (e.g. after any ipconfig /flushdns).
+        ' We enforce the lock via the read-only attribute, re-asserted by the
+        ' timer, and append on demand (adder_Changed) instead.
         Try
-            fs = New FileStream(hostDirS, FileMode.Append, FileAccess.Write, FileShare.Read)
-            sw = New StreamWriter(fs)
-            swStarted = True
             SetAttr(hostDirS, vbReadOnly)
         Catch ex As Exception
             stopMe()
@@ -219,6 +216,13 @@ Public Class Service1
             iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
         End Try
 
+        ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
+        ' we no longer hold the file open, so this is how the lock is maintained).
+        Try
+            If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbReadOnly)
+        Catch ex As Exception
+        End Try
+
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
             If Proc.SessionId = 0 Then
@@ -251,10 +255,6 @@ Public Class Service1
         Dim original As String = ""
         Dim startpos As Integer = 0
         Dim hostsFileNeedsRemoval As Boolean = False
-
-        If swStarted Then
-            sw.Close()
-        End If
 
         If My.Computer.FileSystem.FileExists(hostDirS) Then
             SetAttr(hostDirS, vbNormal)
@@ -300,8 +300,7 @@ Public Class Service1
             Dim toAdd As String
             toAdd = System.IO.File.ReadAllText(sWinDir & "\system32\drivers\etc\add_to_hosts")
             SetAttr(hostDirS, vbNormal)
-            sw.Write(toAdd)
-            sw.Flush()
+            System.IO.File.AppendAllText(hostDirS, toAdd)
             SetAttr(hostDirS, vbReadOnly)
             Try
                 System.IO.File.Delete(sWinDir & "\system32\drivers\etc\add_to_hosts")
