@@ -64,6 +64,8 @@ two were removed during the CLI migration.
 - The **only** enforcement boundary is: a `LocalSystem` service that (a) keeps
   the hosts file read-only and (b) refuses to stop until its stored end time
   passes. `CanStop=False` blocks the *graceful* SCM stop path only.
+  *(Since 12/06/2026 the service also (c) restores its hosts entries from a
+  CLI-written snapshot every 10s while the block is active — the B2 self-heal.)*
 - Blocking is purely **hosts-file DNS sinkholing** (`0.0.0.0`).
 - The unlock decision trusts **`DateTime.Now`** (system local clock).
 - There is **no watchdog**: nothing restarts the service or the notifier if they
@@ -73,10 +75,14 @@ two were removed during the CLI migration.
 
 Ranked roughly by how easily a motivated user pulls them off.
 
+> **Status update 12/06/2026:** B2 is now **mitigated in software** (self-healing
+> hosts — see its row). Every other row still works as described. Unit-tested
+> (81/81); live elevated smoke test of the repair path still pending.
+
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|
 | B1 | **Force-kill the service** (`taskkill /f`, Process Explorer, `sc` via SYSTEM token, pskill). | `CanStop=False` only blocks graceful stop; a force kill still terminates the process. No watchdog restarts it. Once dead, hosts is just a read-only file. | Critical |
-| B2 | **Clear the read-only attribute and edit/blank hosts.** | Block is only an `attrib +r` flag; any admin clears it and rewrites hosts. If the service is also dead (B1) nothing re-asserts it. | Critical |
+| B2 | **Clear the read-only attribute and edit/blank hosts.** | **MITIGATED 12/06/2026 (software side).** The CLI persists the exact marker block to `monkmode_hosts.block` (next to the exes); while the block is unexpired, the service's 10s timer re-asserts read-only and restores tampered/deleted/blanked entries from that snapshot (`Service1.RepairHostsBlock` — fail-closed expiry gate, user content preserved, no rewrite when intact). **Residuals:** an admin can delete the snapshot file itself (repair then degrades to attribute re-assert only); an edit sticks for up to ~10s until the next tick; and if the service is dead (B1) nothing repairs — B2's fate is chained to B1. | ~~Critical~~ → Low while the service runs (residuals listed; B1 unchanged) |
 | B3 | **Boot into Safe Mode**, then edit hosts / delete files / `sc delete KCTRP`. | Service has no `SafeBoot` registration, so it does **not** run in Safe Mode. Everything is editable. | Critical |
 | B4 | **Roll the system clock forward.** | Unlock compares `Time/Until` to `DateTime.Now`. Set the clock past the end time and the next 10 s tick calls `stopMe()` and lifts the block. `CurrentTime/Now` heartbeat is written but never enforced against rollback. | Critical |
 | B5 | **Change DNS / use DoH / VPN / proxy / Tor.** | Hosts only intercepts the OS resolver. Browser DoH, a public resolver, or a VPN ignores hosts entirely. | Critical |

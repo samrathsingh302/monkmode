@@ -192,6 +192,24 @@ bypasses the manifest's UAC prompt:
      stories, interview Q&A, numbers table, honesty rules (it's a fork; weak
      crypto is B7-owned; never claim "unbreakable").
 
+- ✅ **B2 close-out session (2026-06-12, night)** — docs truth + live-test
+  readiness for B2 (no code changes; suite untouched at 81/81):
+  1. **ARCHITECTURE.md updated**: §4 B2 row → **MITIGATED** with residuals
+     (snapshot deletable by admin; ~10s tick window; dead service = no repair,
+     so B2's fate is chained to B1); §4 status note + §3 trust-model note (c).
+  2. **Smoke test extended for B2** (`C:\Users\samra\monkmode-smoketest\`):
+     fixed the stale dist path (repo moved to `Atlas\repos\`), block 2→3 min,
+     +12 checks → expect **27/27**: snapshot exists + verbatim-in-hosts; T1
+     delete-our-block tamper (restored ≤35s, planted user sentinel preserved,
+     read-only re-asserted, resolves 127.0.0.1 again, no rewrite churn 12s
+     later); T2 blank-hosts tamper (block restored; sentinel intentionally
+     lost — snapshot only owns OUR block); post-lift snapshot deleted. Teardown
+     AND cleanup.ps1 now delete the snapshot (else a reinstalled service
+     self-heals old sites back in). Scripts parse clean (PS 5.1). Fresh-eyes
+     verifier could NOT run (session token limit) — parse-check + author
+     self-review only; the elevated run is the real verification.
+     **NOT yet run — needs Samrath, elevated, after `tools\build-dist.ps1`.**
+
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
   auto-lift, verified cleanup, and tore everything down. Reusable scripts live in
