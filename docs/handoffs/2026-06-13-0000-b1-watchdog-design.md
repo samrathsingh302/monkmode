@@ -1,8 +1,8 @@
 ---
-status: needs-decision
+status: done — decision locked
 agent: b1-watchdog-design
 goal: Phase 3 B1 (watchdog / force-kill resistance) — design the proper service ⇄ guardian restart pair, ship the fence-safe first increment with tests, surface the one architecture decision for layer 2.
-outcome: Layer 1 (SCM auto-restart on force-kill) code-complete + tested (NOT live-verified); layer 2 fail-safe gate (ShouldRestartPeer) tested but unwired; suite 81→95 green; verifier SHIP. Layer-2 guardian form is the open decision (see carry-on).
+outcome: Layer 1 (SCM auto-restart on force-kill) code-complete + tested (NOT live-verified); layer 2 fail-safe gate (ShouldRestartPeer) tested but unwired; suite 81→95 green; verifier SHIP. **LAYER-2 DECISION LOCKED 13/06/2026: option (A) SYSTEM-child guardian** — wire in the NEXT session (new chat, to save tokens).
 gotchas: SCM recovery + the live guardian wiring are NOT live-verified — fence forbids running the service; the elevated smoke test is the real gate (kill service → SCM restarts it; sc qfailure MONKMODE shows policy). ShouldRestartPeer has NO caller yet (additive; timer wiring is the next increment). Recovery policy lives as Friend Consts in ServiceTools — they ARE the policy the SCM gets AND what the tests pin; don't weaken (finite reset / <3 actions / non-crash off all weaken B1). InstallAndStart swallows SetRecoveryOptions failures by design (recovery must never block a block from arming).
 carry-on: "Phase 3 B1, layer 2 (the mutual watchdog pair) needs Samrath's architecture pick before wiring — see the DECISION section below. Once picked: wire the chosen guardian + the service-side timer call to ShouldRestartPeer, then it ALL needs the elevated smoke test (incl. layer 1's SCM restart). Phase 2 (THREATMODEL.md) stays DEFERRED."
 ---
@@ -60,9 +60,13 @@ force-kill and survives reboot re-arm**, raising it Critical → High/Medium.
 3. `MonkMode.Tests/WatchdogTests.cs` — 14 tests (9 gate fail-safe incl. the
    fail-closed BlockHasExpired tie; 5 recovery-policy drift guards). **95/95.**
 
-## DECISION NEEDED — the layer-2 guardian's form (Samrath picks)
-What is the "protected helper"? Trade-off (simplicity ↔ capability, §4.5/4.6):
-- **(A) SYSTEM child process spawned by the service** *(recommended)* — lightest;
+## DECISION — the layer-2 guardian's form → **LOCKED: (A) SYSTEM child process** (13/06/2026)
+Samrath picked (A). Next session wires it: a SYSTEM-session guardian exe the
+service spawns; service↔guardian mutually restart (service's timer gate is the
+already-tested `ShouldRestartPeer`; guardian restarts the service via the SCM);
+guardian also relaunches `mm_notify`. Then smoke-test layer 1 + layer 2 together.
+Do NOT build (B) the second service. Options kept below for the record:
+- **(A) SYSTEM child process spawned by the service** *(CHOSEN)* — lightest;
   no new SCM entry / install-uninstall change. With layer 1's SCM recovery on the
   service, single-kills of either side self-heal (service killed → SCM restarts →
   re-spawns guardian; guardian killed → service re-spawns). Weakest only on a
