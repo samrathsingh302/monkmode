@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 (B1 watchdog layer-1 increment).
+Last updated: 2026-06-13 (B1 watchdog layer-2 guardian wired — mutual pair complete in software, NOT live-verified).
 
 ---
 
@@ -32,20 +32,22 @@ Working branch: **`monkmode`** (all work is here; `master` = original Cold Turke
 
 ## 2. Current architecture (after the CLI migration)
 
-**MonkMode is now a CLI — there is no GUI.** Three VB.NET programs, all
+**MonkMode is now a CLI — there is no GUI.** Four VB.NET programs, all
 **.NET 8 (net8.0-windows)**, SDK-style projects:
 
 | Project | Output | Runs as | Role |
 |---|---|---|---|
-| `MonkMode` | `monkmode.exe` | User, elevated (requireAdministrator) | **CLI.** Verbs `block`/`status`/`add`/`help`. Writes hosts, writes config, installs+starts service, launches notifier. |
-| `MonkMode_srv` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | **Enforcement core (UNCHANGED from inherited design).** Locks hosts read-only, kills blocked session-0 processes, lifts block + stops itself when timer expires. `CanStop=False`. 10s timer. |
+| `MonkMode` | `monkmode.exe` | User, elevated (requireAdministrator) | **CLI.** Verbs `block`/`status`/`add`/`help`. Writes hosts, writes config, installs+starts service (+ SCM recovery policy), launches notifier. |
+| `MonkMode_srv` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | **Enforcement core (inherited design preserved; hardened via tested fail-closed gates).** Locks hosts read-only, restores tampered hosts (B2), kills blocked session-0 processes, keeps the guardian alive (B1), lifts block + stops itself when timer expires. `CanStop=False`. 10s timer. |
 | `MM_notify` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the *user* session, compensates for clock changes, shows a **tray-balloon toast** when the block ends. |
+| `MM_guard` | `mm_guard.exe` | **SYSTEM session** (spawned by the service's timer) | **Watchdog guardian (B1 layer 2).** SCM-restarts the service if it's killed, relaunches `mm_notify` into the interactive session (`WTSQueryUserToken`+`CreateProcessAsUser`), exits only on a genuinely parsed, past end time (unparseable = keep guarding). |
 
-Removed during migration: the WinForms GUI, `MM_notify2` (watchdog twin), and
+Removed during migration: the WinForms GUI, `MM_notify2` (the old weak
+user-session watchdog twin — properly reinstated 13/06/2026 as `MM_guard`), and
 `MM_popup` (popup window).
 
-Root solution: `MonkMode.sln` (3 projects). The old per-project `.sln` files were
-deleted.
+Root solution: `MonkMode.sln` (4 projects + tests). The old per-project `.sln`
+files were deleted.
 
 ---
 
@@ -239,8 +241,40 @@ bypasses the manifest's UAC prompt:
   `Not BlockHasExpired`, no duplicate-spawn, no start of a missing exe. **14 new
   tests, 95/95 green.** ⚠️ NOT live-smoke-tested — the elevated smoke test (kill
   service → SCM restarts it; `sc qfailure MONKMODE` shows the policy) is the real
-  gate before B1 is "mitigated". The layer-2 guardian's form (SYSTEM child vs
-  second service) is an open decision — see `docs/handoffs/2026-06-13-0000-b1-watchdog-design.md`.
+  gate before B1 is "mitigated". ~~The layer-2 guardian's form (SYSTEM child vs
+  second service) is an open decision~~ *(decision locked + wired same day — see
+  next entry)* — see `docs/handoffs/2026-06-13-0000-b1-watchdog-design.md`.
+
+- 🔶 **B1 watchdog — layer 2 wired (2026-06-13, NOT live-verified yet)** — the
+  mutual service ⇄ guardian pair is complete in software (decision (A) locked:
+  SYSTEM child process, NOT a second service). Verifier-confirmed SHIP; its two
+  actionable P3s fixed same-session. Commits `395782c` + `879e24b`.
+  1. **New project `MM_guard` → `mm_guard.exe`**: SYSTEM-session guardian the
+     service spawns. 10s loop (cadence pinned to the service's consts by tests):
+     exits ONLY on a genuinely parsed, past `[Time] Until` (unparseable/missing/
+     undecryptable fails CLOSED = keeps guarding); SCM-restarts `MONKMODE` if
+     not running; relaunches `mm_notify` into the interactive user session via
+     `WTSQueryUserToken`+`CreateProcessAsUser` (winsta0\default, user env block;
+     nobody logged on = skip, retry next tick). All decisions go through pure
+     tested gates (`MM_guard/Guardian.vb`); single-instance `Global\` mutex;
+     per-project `Simple3Des`/`IniFile` copies (guardian's decrypt returns ""
+     on bad Base64 — never `End`).
+  2. **Service wiring** (`Service1.vb`): timer tick calls the already-tested
+     `ShouldRestartPeer` gate → spawns `mm_guard.exe` while the block is active;
+     `stopMe()` best-effort kills the guardian at expiry (it would also
+     self-exit next tick). Cadence promoted to `Friend Const TimerIntervalMs`/
+     `ExpiryGraceSeconds` (used at the timer + all timer-path grace sites) so
+     the guardian tests pin guardian == service.
+  3. **Tests 95 → 123 green**: gate truth tables, fail-closed ties, service ⇄
+     guardian expiry-semantics parity + peer-gate mirror pins, cadence pins,
+     4-copy crypto equivalence. Wiring: sln, Tests refs, `build-dist.ps1`.
+  **Residuals (documented in ARCHITECTURE B1):** near-simultaneous double-kill,
+  `sc failure … reset= 0` + kill, suspend-then-kill, and an *elevated* user
+  pre-pinning the guardian (own `mm_guard.exe` grabs the mutex but lacks SCM
+  rights — layer 1 still covers). ⚠️ The elevated smoke test is the gate before
+  B1 is "mitigated"; it must also check expiry causes NO restart loop
+  (stopMe ⇄ SCM-recovery/guardian interaction was reasoned about + verifier-
+  walked, but never run live).
 
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
@@ -290,11 +324,14 @@ bypasses the manifest's UAC prompt:
 2. **Phase 2 — `THREATMODEL.md`** (deferred; user must green-light): expand the
    B1–B11 bypass surface into a full threat model with mitigations + residual risk.
 3. **Phase 3 — hardening** (closes B1–B11), e.g.:
-   - Watchdog (B1): service ⇄ a protected helper restart each other (the old
-     MM_notify2 twin was a weak version — reinstate properly). *Layer 1 (SCM
-     auto-restart) done 13/06/2026 (code-complete, not live-verified); layer 2
-     (mutual guardian) designed + gate tested, wiring pending Samrath's
-     guardian-form pick — see the 13/06 dated handoff. Then smoke-test the lot.*
+   - ~~Watchdog (B1): service ⇄ a protected helper restart each other (the old
+     MM_notify2 twin was a weak version — reinstate properly).~~ *Both layers
+     code-complete 13/06/2026 (layer 1 SCM auto-restart + layer 2 mutual
+     `mm_guard` pair) — **next step: extend + run the elevated smoke test**
+     (kill service → SCM restarts ≤~1s; `sc qfailure MONKMODE` shows policy;
+     kill guardian → respawned ≤10s; kill service with recovery disabled →
+     guardian restarts it ≤10s; expiry → clean teardown, no restart loop,
+     no stray mm_guard).*
    - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
      ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
      and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
@@ -313,10 +350,12 @@ bypasses the manifest's UAC prompt:
 - `MonkMode/Program.vb` — CLI entry, arg parsing, verbs.
 - `MonkMode/Blocker.vb` — hosts/config/service/notifier orchestration (the contract).
 - `MonkMode/Crypto.vb` — Simple3Des.
-- `MonkMode/ServiceTools.vb` — advapi32 service install/start (authored by us).
+- `MonkMode/ServiceTools.vb` — advapi32 service install/start + SCM recovery policy (authored by us).
 - `MonkMode/IniFileVb.vb` — INI reader/writer (inherited).
-- `MonkMode_srv/MonkMode_srv/Service1.vb` — the enforcement service (UNCHANGED logic).
+- `MonkMode_srv/MonkMode_srv/Service1.vb` — the enforcement service (inherited logic + tested fail-closed gates: strip/repair/expiry/peer-spawn).
 - `MM_notify/MM_notify/Form1.vb` — notifier (toast + app-kill + clock comp).
+- `MM_guard/MM_guard/Guardian.vb` — guardian decision gates (pure, tested).
+- `MM_guard/MM_guard/Program.vb` — guardian loop + SCM restart + CreateProcessAsUser notifier relaunch.
 - `ARCHITECTURE.md` — bypass surface B1–B11 + honest ceiling.
 - `tools/build-dist.ps1` — assemble `dist\`.
 

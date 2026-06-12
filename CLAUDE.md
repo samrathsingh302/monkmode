@@ -7,12 +7,13 @@ If _shared-context is unreachable, say so; key defaults: free tiers only · Brit
 A personal, tamper-resistant website/app self-control blocker for Windows — Samrath's own fork of Cold Turkey (GPLv3), rebranded and being hardened on his own machine. Goal: once a block starts it can't be casually removed before its timer expires. Done = defeat casual→determined bypasses (B1–B9); B10 offline/admin is honestly out of scope.
 
 ## Stack & layout
-- VB.NET / .NET 8 (net8.0-windows), SDK-style projects. Solution: `MonkMode.sln` (3 projects + `MonkMode.Tests`). No GUI — it's a CLI.
-- `MonkMode/` → `monkmode.exe` (CLI: writes hosts + config, installs/starts the service, registers the notifier).
-- `MonkMode_srv/` → `MonkMode_srv.exe` (**LocalSystem service `MONKMODE`**, `CanStop=False`, 10s timer — the enforcement core; logic UNCHANGED).
+- VB.NET / .NET 8 (net8.0-windows), SDK-style projects. Solution: `MonkMode.sln` (4 projects + `MonkMode.Tests`). No GUI — it's a CLI.
+- `MonkMode/` → `monkmode.exe` (CLI: writes hosts + config, installs/starts the service + SCM recovery, registers the notifier).
+- `MonkMode_srv/` → `MonkMode_srv.exe` (**LocalSystem service `MONKMODE`**, `CanStop=False`, 10s timer — the enforcement core; inherited logic preserved, hardened via tested fail-closed gates: B2 hosts self-heal, B1 guardian spawn).
 - `MM_notify/` → `mm_notify.exe` (user-session notifier: app-kill, clock-change comp, tray-toast at expiry).
+- `MM_guard/` → `mm_guard.exe` (SYSTEM-session watchdog guardian spawned by the service: SCM-restarts a killed service, relaunches the notifier; exits only on genuine expiry).
 - Build: `C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release` (SDK is user-scoped, not on PATH).
-- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is still the manual elevated smoke test (last run 15/15, see HANDOFF §5).
+- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is still the manual elevated smoke test (last run 27/27; B1 watchdog layers not yet smoke-tested — see HANDOFF §5).
 
 ## Fences
 - **Never run the service / CLI during dev or audit** — it edits the LIVE hosts file, adds an HKCU `Run` entry, and installs a `CanStop=False` LocalSystem service. Read-only analysis unless Samrath explicitly asks for a live test. Unit tests must never touch real hosts/registry/SCM either.

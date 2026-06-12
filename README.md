@@ -25,13 +25,14 @@ cannot be shortened or replaced until it expires; `add` can only add more sites.
 
 ## How it works
 
-Three cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
+Four cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
 
 | Component | Output | Runs as | Role |
 |---|---|---|---|
 | `MonkMode/` | `monkmode.exe` | User (elevated) | CLI. Parses commands, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
-| `MonkMode_srv/` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcement core. Locks the hosts file, restores it if tampered with, kills blocked processes, lifts the block only when the timer genuinely expires. `CanStop=False`. |
+| `MonkMode_srv/` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcement core. Locks the hosts file, restores it if tampered with, kills blocked processes, keeps the guardian alive, lifts the block only when the timer genuinely expires. `CanStop=False`. |
 | `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, compensates for clock changes, shows a tray toast when the block ends. |
+| `MM_guard/` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Watchdog guardian. Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
 A block is hosts-file DNS sinkholing (`127.0.0.1` entries below a
 `#### MonkMode Entries ####` marker) plus process-kill rules, enforced by the
@@ -49,6 +50,13 @@ service on a 10-second loop.
   fail in the *tamper-resistant* direction.
 - **No graceful stop.** `CanStop=False` blocks the polite SCM stop path; the
   config that says *when* the block ends is encrypted.
+- **Force-kill resistance (two-layer watchdog).** The Service Control Manager
+  is configured to restart the service after any abnormal termination — on
+  every failure, forever (reset period `INFINITE`) — and a SYSTEM-session
+  guardian process and the service mutually restart each other on a 10 s
+  loop, with the guardian also relaunching the notifier if it's killed. Every
+  restart decision goes through a pure, unit-tested, fail-closed gate: nothing
+  is ever resurrected after a block genuinely expires.
 - **Clock-change compensation.** The notifier detects system clock changes and
   rewrites the end time so rolling the clock forward doesn't end the block.
 - **Honest threat model.** [ARCHITECTURE.md](ARCHITECTURE.md) catalogues the
@@ -56,8 +64,8 @@ service on a 10-second loop.
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to
   document the rest honestly rather than claim "unbreakable". Closing the gaps
-  (watchdog, Safe Mode, firewall-layer enforcement, signed config) is the
-  Phase 3 backlog.
+  (Safe Mode, firewall-layer enforcement, signed config, clock hardening) is
+  the Phase 3 backlog.
 
 ## Engineering notes
 
@@ -69,8 +77,9 @@ point, not a product:
   referenced a third-party `ServiceTools` helper that was never shipped;
   replaced with a hand-written advapi32 P/Invoke layer
   ([`MonkMode/ServiceTools.vb`](MonkMode/ServiceTools.vb)).
-- **GUI → CLI:** replaced the WinForms GUI with a console CLI and slimmed four
-  cooperating programs to three.
+- **GUI → CLI:** replaced the WinForms GUI with a console CLI, dropped the
+  inherited popup window and the weak user-session watchdog twin (later
+  reinstated properly as the SYSTEM-session guardian).
 - **Verified live, not just compiled:** an elevated end-to-end smoke test
   (block → enforce → auto-expire → clean teardown) passed 15/15 checks and
   exposed three real bugs the compiler couldn't: `0.0.0.0` sinkholes that
@@ -97,7 +106,7 @@ point, not a product:
 
       dotnet test MonkMode.sln -c Release
 
-- Assemble a runnable folder (all three exes must live together, alongside
+- Assemble a runnable folder (all four exes must live together, alongside
   `monkmode_settings.ini` created at block time):
 
       powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
