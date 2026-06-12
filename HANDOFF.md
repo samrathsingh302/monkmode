@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-12.
+Last updated: 2026-06-13.
 
 ---
 
@@ -178,11 +178,11 @@ bypasses the manifest's UAC prompt:
      deletes it. Verifier-confirmed SHIP; its P2 (apps-only block must delete a
      stale snapshot or old sites resurrect — `Program.vb` DoBlock) and two P3s
      (Using/Finally on the repair write; best-effort CLI snapshot write) were
-     fixed same-session. **17 new tests, 81/81 green.** NOT yet live-smoke-
-     tested (no elevation this session) — re-run the elevated smoke test before
-     trusting the repair path live; known residuals: the snapshot itself is
-     deletable by an admin (documented, not hidden) and a legacy ANSI hosts
-     file would be UTF-8-mangled on first repair (pre-existing class).
+     fixed same-session. **17 new tests, 81/81 green.** ~~NOT yet live-smoke-
+     tested~~ *(superseded 12/06/2026 night: elevated smoke test passed 27/27 —
+     see below)*; known residuals: the snapshot itself is deletable by an admin
+     (documented, not hidden) and a legacy ANSI hosts file would be
+     UTF-8-mangled on first repair (pre-existing class).
   2. **CI added**: `.github/workflows/ci.yml` — build + full suite on every
      push/PR to `monkmode`, windows-latest, free tier.
   3. **README → README.md** (git mv, history kept), rewritten as a CV-grade
@@ -208,7 +208,22 @@ bypasses the manifest's UAC prompt:
      self-heals old sites back in). Scripts parse clean (PS 5.1). Fresh-eyes
      verifier could NOT run (session token limit) — parse-check + author
      self-review only; the elevated run is the real verification.
-     **NOT yet run — needs Samrath, elevated, after `tools\build-dist.ps1`.**
+     ~~NOT yet run~~ *(superseded — run and PASSED, see next entry).*
+
+- ✅ **B2 live verification session (2026-06-12 night → 13/06)** — the elevated
+  smoke test **PASSED 27/27** (Samrath ran it elevated; log:
+  `C:\Users\samra\monkmode-smoketest\smoketest.log`, finished 23:59:53):
+  full lifecycle green — block live (incl. survives `ipconfig /flushdns`),
+  **T1 delete-our-block tamper**: marker + entries restored ≤35s, planted user
+  sentinel preserved, read-only re-asserted, resolves 127.0.0.1 again, repair
+  converges (no churn one tick later); **T2 blank-hosts tamper**: block
+  restored, resolving again; auto-lift on time, marker stripped, service
+  stopped, snapshot deleted, teardown clean. **B2 is now live-verified, not
+  just unit-tested** (ARCHITECTURE §4 note updated). Also fixed this session:
+  `tools/build-dist.ps1` SDK selection — a runtime-only dotnet appeared at
+  `C:\Program Files\dotnet` and shadowed the user-scoped SDK ("No .NET SDKs
+  were found"); the script now skips any dotnet whose `--list-sdks` is empty
+  and falls back to `%USERPROFILE%\.dotnet`. Suite still 81/81.
 
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
@@ -242,8 +257,8 @@ bypasses the manifest's UAC prompt:
   and edit hosts; the timer re-asserts the attribute but does NOT yet restore
   deleted entries (this is the B2 "re-assert hosts" hardening item).~~
   *Superseded 12/06/2026 late eve: B2 restore is implemented (see above) —
-  remaining B2 residuals: snapshot deletable by admin; repair path not yet
-  live-smoke-tested.*
+  remaining B2 residual: snapshot deletable by admin. The repair path was
+  live-smoke-tested 12/06/2026 night (27/27).*
 - Phase 2 (full threat model) — **explicitly deferred by the user; do not start
   without asking.**
 - Phase 3 (hardening) — not started.
@@ -262,8 +277,8 @@ bypasses the manifest's UAC prompt:
      MM_notify2 twin that provided a weak version of this was removed — reinstate
      properly here).
    - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
-     ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented;
-     live verification pending the next elevated smoke test).
+     ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
+     and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
    - `SafeBoot` service registration so it runs in Safe Mode (B3).
    - Monotonic/authenticated time instead of trusting `DateTime.Now` (B4; the
      notifier's clock-change compensation is only a partial mitigation).

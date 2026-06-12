@@ -77,7 +77,9 @@ Ranked roughly by how easily a motivated user pulls them off.
 
 > **Status update 12/06/2026:** B2 is now **mitigated in software** (self-healing
 > hosts — see its row). Every other row still works as described. Unit-tested
-> (81/81); live elevated smoke test of the repair path still pending.
+> (81/81); **live-verified 12/06/2026** — the elevated smoke test passed 27/27,
+> including both B2 tamper drills (delete-our-block and blank-hosts: restored
+> ≤35s, user content preserved, read-only re-asserted, no rewrite churn).
 
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|

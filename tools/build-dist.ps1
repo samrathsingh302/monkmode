@@ -8,10 +8,14 @@
 
 $ErrorActionPreference = 'Stop'
 
-# Prefer dotnet on PATH; fall back to the user-scoped SDK install.
-$dotnet = (Get-Command dotnet -ErrorAction SilentlyContinue).Source
-if (-not $dotnet) { $dotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe' }
-if (-not (Test-Path $dotnet)) { throw "dotnet not found. Install the .NET 8 SDK." }
+# Use a dotnet that actually has an SDK: try PATH first, then the user-scoped
+# install (a runtime-only dotnet on PATH, e.g. C:\Program Files\dotnet, can't build).
+$candidates = @((Get-Command dotnet -ErrorAction SilentlyContinue).Source,
+                (Join-Path $env:USERPROFILE '.dotnet\dotnet.exe')) |
+    Where-Object { $_ -and (Test-Path $_) }
+$dotnet = $candidates | Where-Object { (& $_ --list-sdks) -match '^\d+\.' } |
+    Select-Object -First 1
+if (-not $dotnet) { throw "No dotnet with an SDK installed was found. Install the .NET 8 SDK." }
 
 $root = Split-Path $PSScriptRoot -Parent
 $dist = Join-Path $root 'dist'
