@@ -1,5 +1,9 @@
 # CONTINUE.md — overnight session state (2026-06-12)
 
+> ⚠️ **SUPERSEDED 12/06/2026 — Phase 2 is NOT green-lit** (Samrath's ruling,
+> 12/06 eve): THREATMODEL stays deferred until his explicit go — this file's
+> "green-lit" claim (ask 4 below) is the WRONG doc. State authority = HANDOFF.md.
+
 **To resume in a new session say: "continue from CONTINUE.md".**
 Read this, then HANDOFF.md (§3 config contract is CRITICAL), then ARCHITECTURE.md.
 
@@ -29,16 +33,19 @@ everything, verify it works.
      surgical changes only there.
    - CLI (MonkMode/) + notifier (MM_notify/) may be refactored freely; CLI is
      testable non-elevated: `C:\Users\samra\.dotnet\dotnet.exe dist\monkmode.dll status`.
-4. **Phase 2 = author THREATMODEL.md** (user green-lit it this session —
-   HANDOFF's "deferred, do not start" is OBSOLETE). Expand ARCHITECTURE.md
-   B1–B11 into full threat model: attacker tier, current mitigation, residual
-   risk, Phase-3 fix, honest ceiling.
+4. ~~**Phase 2 = author THREATMODEL.md** (user green-lit it this session —
+   HANDOFF's "deferred, do not start" is OBSOLETE).~~ **WRONG — superseded
+   12/06/2026 eve: Samrath ruled Phase 2 stays DEFERRED until his explicit go;
+   HANDOFF.md was right.** Scope, when actually green-lit: expand
+   ARCHITECTURE.md B1–B11 into full threat model: attacker tier, current
+   mitigation, residual risk, Phase-3 fix, honest ceiling.
 5. **Add non-elevated unit tests**: --for duration grammar (45/90m/2h/1d12h),
    en-CA datetime round-trip, Simple3Des round-trip + cross-project
    equivalence, ini read/write, hosts-entry generation (127.0.0.1 + marker).
    New test project in MonkMode.sln.
 6. **Update docs at end** (HANDOFF.md is stale: smoke fixes ARE committed as
-   a494da7; Phase 2 no longer deferred) + commit + push.
+   a494da7; ~~Phase 2 no longer deferred~~ *wrong — Phase 2 IS still deferred,
+   per Samrath 12/06 eve*) + commit + push.
 
 ## Stage reached when interrupted
 
@@ -60,7 +67,9 @@ everything, verify it works.
 ## Key facts (verified this session)
 
 - Branch `monkmode`, remote `monkmode` → https://github.com/samrathsingh302/monkmode.git
-- Working tree was CLEAN at interrupt; HEAD a494da7 (1 ahead of remote — push pending).
+- Working tree was CLEAN at interrupt; HEAD a494da7 ~~(1 ahead of remote — push
+  pending)~~ *(superseded: a494da7 and the commits on top of it are all pushed —
+  remote tip current as of 12/06/2026 eve)*.
 - Build: `C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release`
   (user-scoped SDK, not on PATH). Dist: `tools\build-dist.ps1` → dist\.
 - Elevated smoke-test scripts (reusable): `C:\Users\samra\monkmode-smoketest\`.

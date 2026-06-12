@@ -17,7 +17,7 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 ## Fences
 - **Never run the service / CLI during dev or audit** — it edits the LIVE hosts file, adds an HKCU `Run` entry, and installs a `CanStop=False` LocalSystem service. Read-only analysis unless Samrath explicitly asks for a live test. Unit tests must never touch real hosts/registry/SCM either.
 - **No data loss on hosts restore:** only ever touch the MonkMode marker block (`#### MonkMode Entries ####`), never the user's own hosts content.
-- **Don't lose the unpushed `monkmode`-branch commit** (working tree / source fixes not yet pushed). Don't disturb git state — no commit/push/reset/checkout unless asked.
+- **Never force-push or rewrite history on the `monkmode` branch** — everything is committed and pushed as of 12/06/2026 eve; the remote history is the safety net. Don't disturb git state otherwise — no reset/checkout/rebase unless asked.
 - `master` is the untouched original Cold Turkey — never work on it.
 - Crypto is documented-weak by design (`Simple3Des`/`mm_textbox`, hardcoded symmetric key, no HMAC) and is **Phase-3-owned (B7)** — not a new finding; don't re-flag it.
 

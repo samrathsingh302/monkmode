@@ -187,7 +187,9 @@ bypasses the manifest's UAC prompt:
      `mm_notify.exe` now stays alive (toast + user-session app-kill + clock comp).
 
 **NOT done / NOT verified:**
-- These source fixes are **not yet committed** (working tree on `monkmode`).
+- ~~These source fixes are **not yet committed** (working tree on `monkmode`).~~
+  *Superseded 12/06/2026 eve: committed AND pushed (a494da7, plus 005ea7a and
+  640db62 on top) — the remote `monkmode` tip is current.*
 - The expiry **toast** and **app-kill / clock-change** paths weren't asserted
   programmatically (mm_notify is confirmed running, but watch for the balloon at
   expiry and test `--apps` / clock-roll manually if you want belt-and-suspenders).
@@ -202,8 +204,9 @@ bypasses the manifest's UAC prompt:
 
 ## 6. Next steps / roadmap
 
-1. **Runtime smoke test** of the CLI end-to-end (see above). Highest priority —
-   the migration is only compile-verified.
+1. ~~**Runtime smoke test** of the CLI end-to-end (see above). Highest priority —
+   the migration is only compile-verified.~~ ✅ Done 10/06/2026 — the live
+   elevated smoke test passed 15/15 (see §5).
 2. **Phase 2 — `THREATMODEL.md`** (deferred; user must green-light): expand the
    B1–B11 bypass surface into a full threat model with mitigations + residual risk.
 3. **Phase 3 — hardening** (closes B1–B11), e.g.:
