@@ -165,6 +165,33 @@ bypasses the manifest's UAC prompt:
      **64/64 green**. `InternalsVisibleTo("MonkMode.Tests")` added to MM_notify.
   Also added `.mcp.json` (house Obsidian MCP wiring) at the repo root.
 
+- ✅ **CV-readiness session (2026-06-12, late eve)** — the project is now
+  presentation-grade and the first Phase 3 item is in:
+  1. **B2 self-healing hosts implemented** (the §6 roadmap item): the CLI
+     persists the exact marker block it writes to a snapshot
+     (`monkmode_hosts.block`, next to the exes — `Blocker.WriteHostsBlock`);
+     the service's timer restores tampered/deleted/blanked hosts entries from
+     it every 10s while the block is unexpired, via the pure, tested
+     `Service1.RepairHostsBlock` (fail-closed gate reused; user hosts content
+     preserved byte-for-byte; one-rewrite convergence, no flap). `adder_Changed`
+     mirrors added sites into the snapshot (only if it exists); `stopMe()`
+     deletes it. Verifier-confirmed SHIP; its P2 (apps-only block must delete a
+     stale snapshot or old sites resurrect — `Program.vb` DoBlock) and two P3s
+     (Using/Finally on the repair write; best-effort CLI snapshot write) were
+     fixed same-session. **17 new tests, 81/81 green.** NOT yet live-smoke-
+     tested (no elevation this session) — re-run the elevated smoke test before
+     trusting the repair path live; known residuals: the snapshot itself is
+     deletable by an admin (documented, not hidden) and a legacy ANSI hosts
+     file would be UTF-8-mangled on first repair (pre-existing class).
+  2. **CI added**: `.github/workflows/ci.yml` — build + full suite on every
+     push/PR to `monkmode`, windows-latest, free tier.
+  3. **README → README.md** (git mv, history kept), rewritten as a CV-grade
+     front page (architecture, tamper-resistance, honest threat model,
+     engineering story, CI badge). GPL/Cold Turkey attribution intact.
+  4. **`docs/CV.md` added** — CV bullets (3 sizes), elevator pitch, 5 STAR
+     stories, interview Q&A, numbers table, honesty rules (it's a fork; weak
+     crypto is B7-owned; never claim "unbreakable").
+
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
   auto-lift, verified cleanup, and tore everything down. Reusable scripts live in
@@ -193,9 +220,12 @@ bypasses the manifest's UAC prompt:
 - The expiry **toast** and **app-kill / clock-change** paths weren't asserted
   programmatically (mm_notify is confirmed running, but watch for the balloon at
   expiry and test `--apps` / clock-roll manually if you want belt-and-suspenders).
-- Residual for Phase 3: between 10s re-asserts an admin user can clear read-only
+- ~~Residual for Phase 3: between 10s re-asserts an admin user can clear read-only
   and edit hosts; the timer re-asserts the attribute but does NOT yet restore
-  deleted entries (this is the B2 "re-assert hosts" hardening item).
+  deleted entries (this is the B2 "re-assert hosts" hardening item).~~
+  *Superseded 12/06/2026 late eve: B2 restore is implemented (see above) —
+  remaining B2 residuals: snapshot deletable by admin; repair path not yet
+  live-smoke-tested.*
 - Phase 2 (full threat model) — **explicitly deferred by the user; do not start
   without asking.**
 - Phase 3 (hardening) — not started.
@@ -213,7 +243,9 @@ bypasses the manifest's UAC prompt:
    - Watchdog: service ⇄ a protected helper restart each other (B1; note the old
      MM_notify2 twin that provided a weak version of this was removed — reinstate
      properly here).
-   - Re-assert hosts every few seconds + tamper-detect/restore (B2).
+   - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
+     ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented;
+     live verification pending the next elevated smoke test).
    - `SafeBoot` service registration so it runs in Safe Mode (B3).
    - Monotonic/authenticated time instead of trusting `DateTime.Now` (B4; the
      notifier's clock-change compensation is only a partial mitigation).

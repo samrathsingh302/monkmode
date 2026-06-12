@@ -30,6 +30,7 @@ Module Blocker
     Public Const ServiceName As String = "MONKMODE"
     Public Const ServiceDisplay As String = "MonkMode"
     Public Const IniName As String = "monkmode_settings.ini"
+    Public Const SnapshotName As String = "monkmode_hosts.block"
     Public Const Marker As String = "#### MonkMode Entries ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
@@ -44,6 +45,14 @@ Module Blocker
 
     Public Function IniPath() As String
         Return Path.Combine(AppDir(), IniName)
+    End Function
+
+    ' Snapshot of the exact MonkMode hosts block written for the current block,
+    ' kept next to the exes/ini. The service reads it every timer tick to
+    ' restore the entries if an admin clears the read-only attribute and edits
+    ' or blanks hosts between ticks (B2 self-heal).
+    Public Function SnapshotPath() As String
+        Return Path.Combine(AppDir(), SnapshotName)
     End Function
 
     Public Function HostsPath() As String
@@ -159,15 +168,31 @@ Module Blocker
         Return text.TrimEnd(CChar(vbCr), CChar(vbLf), " "c, CChar(vbTab))
     End Function
 
+    ' The exact MonkMode-owned text appended to hosts: the marker line plus the
+    ' entry lines. WriteHostsBlock writes this same string to both hosts and the
+    ' snapshot file, so the two can never drift. Friend so tests can assert
+    ' that parity without touching the real hosts file.
+    Friend Function BuildMonkModeBlock(ByVal domains As IEnumerable(Of String)) As String
+        Return Marker & vbCrLf & BuildHostsEntries(domains)
+    End Function
+
     Public Sub WriteHostsBlock(ByVal domains As IEnumerable(Of String))
         Dim path As String = HostsPath()
         ClearReadOnly(path)
         Dim existing As String = ""
         If File.Exists(path) Then existing = File.ReadAllText(path)
         Dim baseText As String = StripOurBlock(existing)
-        Dim entries As String = BuildHostsEntries(domains)
-        Dim newText As String = baseText & vbCrLf & Marker & vbCrLf & entries
-        File.WriteAllText(path, newText)
+        Dim block As String = BuildMonkModeBlock(domains)
+        File.WriteAllText(path, baseText & vbCrLf & block)
+        ' Persist the exact block just written so the service can restore it if
+        ' hosts is tampered with mid-block (B2 self-heal). Best-effort: a failed
+        ' snapshot write must not abort DoBlock between the hosts write and the
+        ' service install — without a snapshot, enforcement simply degrades to
+        ' the pre-snapshot behaviour (attribute re-assert only).
+        Try
+            File.WriteAllText(SnapshotPath(), block)
+        Catch
+        End Try
     End Sub
 
     ' ---- config (ini) ----

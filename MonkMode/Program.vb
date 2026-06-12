@@ -109,7 +109,17 @@ Module Program
             Return 3
         End If
 
-        If domains.Count > 0 Then Blocker.WriteHostsBlock(domains)
+        If domains.Count > 0 Then
+            Blocker.WriteHostsBlock(domains)
+        Else
+            ' Apps-only block: remove any stale snapshot from an earlier block,
+            ' otherwise the service's B2 repair would resurrect the OLD sites
+            ' into hosts for the lifetime of this block.
+            Try
+                File.Delete(Blocker.SnapshotPath())
+            Catch
+            End Try
+        End If
         Blocker.WriteConfig(domains, apps, untilDate)
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
         Blocker.RegisterAndLaunchNotifier()

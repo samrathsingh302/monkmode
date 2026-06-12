@@ -223,6 +223,36 @@ Public Class Service1
         Catch ex As Exception
         End Try
 
+        ' B2 self-heal: between ticks an admin can clear the attribute and
+        ' edit/blank/delete hosts; while the block is still active (note
+        ' BlockHasExpired fails CLOSED: unparseable = active) restore our
+        ' entries from the snapshot the CLI persisted next to the exe.
+        ' Try/Catch so a transient lock can never crash the service.
+        Try
+            Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
+            If Not BlockHasExpired(iniUntil, DateTime.Now, 5) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
+                Dim hostsText As String = ""
+                If My.Computer.FileSystem.FileExists(hostDirS) Then
+                    hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
+                End If
+                Dim repaired As String = RepairHostsBlock(hostsText, My.Computer.FileSystem.ReadAllText(snapshotPath))
+                If repaired IsNot Nothing Then
+                    If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbNormal)
+                    Try
+                        Using sw As New StreamWriter(New FileStream(hostDirS, FileMode.Create, FileAccess.Write, FileShare.Read))
+                            sw.Write(repaired)
+                        End Using
+                    Finally
+                        ' Even if the write throws mid-way, never leave hosts
+                        ' writable or a write handle leaked (a held handle stops
+                        ' the DNS client re-reading hosts — the flushdns bug).
+                        SetAttr(hostDirS, vbReadOnly)
+                    End Try
+                End If
+            End If
+        Catch ex As Exception
+        End Try
+
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
             If Proc.SessionId = 0 Then
@@ -294,6 +324,38 @@ Public Class Service1
         Return original
     End Function
 
+    ' Decides whether hosts needs its MonkMode block restored (B2 self-heal)
+    ' and, if so, returns the full repaired hosts text; returns Nothing when no
+    ' repair is needed. expectedBlock is the snapshot the CLI persisted when
+    ' the block started (the marker line + entry lines, exactly as appended to
+    ' hosts). Semantics:
+    '   - null/empty/whitespace snapshot -> Nothing (never invent content);
+    '   - hosts already contains the snapshot exactly (ordinal) -> Nothing,
+    '     so an intact block never causes a rewrite;
+    '   - otherwise: the user's own content (StripMonkModeBlock removes any
+    '     partial/tampered remnant of our block, preserving the rest
+    '     byte-for-byte) + a single CRLF separator + expectedBlock. A blanked
+    '     hosts file repairs to the snapshot alone.
+    ' Shared and file-system-free so it can be unit tested.
+    Friend Shared Function RepairHostsBlock(ByVal hostsText As String, ByVal expectedBlock As String) As String
+
+        If String.IsNullOrWhiteSpace(expectedBlock) Then
+            Return Nothing
+        End If
+        If hostsText Is Nothing Then
+            hostsText = ""
+        End If
+        If hostsText.IndexOf(expectedBlock, StringComparison.Ordinal) >= 0 Then
+            Return Nothing
+        End If
+
+        Dim userContent As String = StripMonkModeBlock(hostsText)
+        If userContent.Length = 0 Then
+            Return expectedBlock
+        End If
+        Return userContent & vbCrLf & expectedBlock
+    End Function
+
     Private Sub stopMe()
 
         Dim fileReader As String = ""
@@ -325,6 +387,12 @@ Public Class Service1
             SetAttr(hostDirS, vbReadOnly)
         End If
 
+        ' The block is over - drop the repair snapshot (best effort) so an
+        ' expired block leaves nothing behind to self-heal back in.
+        Try
+            System.IO.File.Delete(Application.StartupPath + "\monkmode_hosts.block")
+        Catch ex As Exception
+        End Try
 
         Me.Stop()
         End
@@ -339,6 +407,18 @@ Public Class Service1
             SetAttr(hostDirS, vbNormal)
             System.IO.File.AppendAllText(hostDirS, toAdd)
             SetAttr(hostDirS, vbReadOnly)
+            ' Mirror the append into the repair snapshot (best effort) so a
+            ' later B2 self-heal restores the added sites too. Only when the
+            ' snapshot already exists: creating one here would make a
+            ' marker-less "expected block" that a repair would then write and
+            ' the expiry strip could never remove.
+            Try
+                Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
+                If My.Computer.FileSystem.FileExists(snapshotPath) Then
+                    System.IO.File.AppendAllText(snapshotPath, toAdd)
+                End If
+            Catch ex As Exception
+            End Try
             Try
                 System.IO.File.Delete(sWinDir & "\system32\drivers\etc\add_to_hosts")
             Catch ex As Exception
