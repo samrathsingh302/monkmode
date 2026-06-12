@@ -356,6 +356,26 @@ Public Class Service1
         Return userContent & vbCrLf & expectedBlock
     End Function
 
+    ' B1 watchdog gate (mutual-restart pair, layer 2). Decides whether the timer
+    ' should (re)launch the guardian peer this tick. Fail-SAFE in the same spirit
+    ' as the B2 repair gate:
+    '   - only while the block is still active (blockActive is the caller's
+    '     Not BlockHasExpired(...), so an unparseable Until fails CLOSED -> active
+    '     -> the guardian is kept alive, never dropped, until the block truly
+    '     ends and stopMe() tears everything down);
+    '   - only when the peer exe actually exists (nothing to start otherwise);
+    '   - only when no instance is already running, so a slow guardian start can
+    '     never spawn a storm of duplicates (mirrors the old twin's
+    '     processList.Length <= 0 guard, made explicit and testable).
+    ' Pure, Shared and process/SCM-free so it can be unit tested; the live timer
+    ' wiring (GetProcessesByName + Process.Start of the guardian) is verified by
+    ' the manual elevated smoke test, exactly like the B2 repair wiring.
+    Friend Shared Function ShouldRestartPeer(ByVal peerInstanceCount As Integer, ByVal blockActive As Boolean, ByVal peerExeExists As Boolean) As Boolean
+        If Not blockActive Then Return False
+        If Not peerExeExists Then Return False
+        Return peerInstanceCount <= 0
+    End Function
+
     Private Sub stopMe()
 
         Dim fileReader As String = ""

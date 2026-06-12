@@ -70,6 +70,11 @@ two were removed during the CLI migration.
 - The unlock decision trusts **`DateTime.Now`** (system local clock).
 - There is **no watchdog**: nothing restarts the service or the notifier if they
   are force-killed.
+  *(Since 13/06/2026 this is partly addressed — see B1: the CLI now configures
+  SCM auto-restart (FailureActions) on the service at install, so a force-kill is
+  restarted by the Service Control Manager. The mutual service ⇄ guardian
+  restart pair (layer 2) is designed and its decision gate is tested, but the
+  live guardian wiring is a later increment and is NOT yet in place.)*
 
 ## 4. Bypass surface (current state — these all work today)
 
@@ -80,10 +85,17 @@ Ranked roughly by how easily a motivated user pulls them off.
 > (81/81); **live-verified 12/06/2026** — the elevated smoke test passed 27/27,
 > including both B2 tamper drills (delete-our-block and blank-hosts: restored
 > ≤35s, user content preserved, read-only re-asserted, no rewrite churn).
+>
+> **Status update 13/06/2026:** B1 layer 1 (SCM auto-restart on force-kill) is
+> **code-complete but NOT yet live-verified** — `monkmode block` now sets the
+> service's FailureActions; this needs an elevated smoke test (kill the service,
+> confirm the SCM restarts it; `sc qfailure MONKMODE` shows the policy landed)
+> before B1 can be called mitigated. Suite now 95/95 (14 new B1 tests). The B1
+> layer-2 mutual watchdog is designed and its gate tested, but not yet wired.
 
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|
-| B1 | **Force-kill the service** (`taskkill /f`, Process Explorer, `sc` via SYSTEM token, pskill). | `CanStop=False` only blocks graceful stop; a force kill still terminates the process. No watchdog restarts it. Once dead, hosts is just a read-only file. | Critical |
+| B1 | **Force-kill the service** (`taskkill /f`, Process Explorer, `sc` via SYSTEM token, pskill). | `CanStop=False` only blocks graceful stop; a force kill still terminates the process. **PARTIALLY MITIGATED 13/06/2026 (layer 1, code-complete, not yet live-verified):** the CLI now sets SCM **FailureActions** on `MONKMODE` at install — restart on every failure forever (3× RESTART, 1 s delay, reset period INFINITE) + restart-on-non-crash flag — so a force-kill is auto-restarted by the Service Control Manager (`ServiceTools.SetRecoveryOptions`). **Layer 2 (designed, gate tested, live wiring pending):** a mutual service ⇄ protected-guardian restart pair (the proper version of the removed `MM_notify2` twin); the fail-safe decision gate `Service1.ShouldRestartPeer` is unit-tested but not yet wired into the timer. **Residuals (honest):** a scripted near-simultaneous double-kill within the ~1 s restart window, a SYSTEM-token kill that also disables recovery (`sc failure … reset= 0`), or suspend-then-kill of both processes still wins; true kill-immunity needs a PPL/kernel driver (out of scope). | ~~Critical~~ → High until layer 1 is live-verified + layer 2 wired (then Medium) |
 | B2 | **Clear the read-only attribute and edit/blank hosts.** | **MITIGATED 12/06/2026 (software side).** The CLI persists the exact marker block to `monkmode_hosts.block` (next to the exes); while the block is unexpired, the service's 10s timer re-asserts read-only and restores tampered/deleted/blanked entries from that snapshot (`Service1.RepairHostsBlock` — fail-closed expiry gate, user content preserved, no rewrite when intact). **Residuals:** an admin can delete the snapshot file itself (repair then degrades to attribute re-assert only); an edit sticks for up to ~10s until the next tick; and if the service is dead (B1) nothing repairs — B2's fate is chained to B1. | ~~Critical~~ → Low while the service runs (residuals listed; B1 unchanged) |
 | B3 | **Boot into Safe Mode**, then edit hosts / delete files / `sc delete KCTRP`. | Service has no `SafeBoot` registration, so it does **not** run in Safe Mode. Everything is editable. | Critical |
 | B4 | **Roll the system clock forward.** | Unlock compares `Time/Until` to `DateTime.Now`. Set the clock past the end time and the next 10 s tick calls `stopMe()` and lifts the block. `CurrentTime/Now` heartbeat is written but never enforced against rollback. | Critical |

@@ -38,6 +38,28 @@ Namespace Global.ServiceTools
         Private Const SERVICE_AUTO_START As UInteger = &H2
         Private Const SERVICE_ERROR_NORMAL As UInteger = &H1
 
+        ' --- Service recovery (B1 watchdog, layer 1: SCM auto-restart) ---
+        ' ChangeServiceConfig2 info levels.
+        Private Const SERVICE_CONFIG_FAILURE_ACTIONS As Integer = 2
+        Private Const SERVICE_CONFIG_FAILURE_ACTIONS_FLAG As Integer = 4
+
+        ' THE recovery policy (single source of truth — the live SetRecoveryOptions
+        ' marshals exactly these and the unit tests pin them; weakening any one of
+        ' them weakens B1, so the test fails loudly if they drift):
+        '   - RESTART on every failure, applied THREE times so the SCM keeps
+        '     restarting on the 1st, 2nd and every subsequent failure (it reuses
+        '     the last action for all further failures);
+        '   - 1s after the kill;
+        '   - reset period = INFINITE, so the failure count NEVER resets and
+        '     recovery never "gives up" no matter how many times it is killed;
+        '   - on non-crash failures too, so a force-kill that the SCM treats as a
+        '     clean-but-unexpected stop still triggers a restart.
+        Friend Const RecoveryActionTypeRestart As Integer = 1          ' SC_ACTION_RESTART
+        Friend Const RecoveryActionCount As Integer = 3
+        Friend Const RecoveryRestartDelayMs As UInteger = 1000UI
+        Friend Const RecoveryResetPeriodSeconds As UInteger = &HFFFFFFFFUI ' INFINITE
+        Friend Const RecoveryRestartOnNonCrash As Boolean = True
+
         <DllImport("advapi32.dll", EntryPoint:="OpenSCManagerW", CharSet:=CharSet.Unicode, SetLastError:=True)> _
         Private Shared Function OpenSCManager(ByVal machineName As String, ByVal databaseName As String, ByVal dwAccess As UInteger) As IntPtr
         End Function
@@ -57,6 +79,30 @@ Namespace Global.ServiceTools
         Private Shared Function CloseServiceHandle(ByVal hSCObject As IntPtr) As Boolean
         End Function
 
+        <DllImport("advapi32.dll", EntryPoint:="ChangeServiceConfig2W", CharSet:=CharSet.Unicode, SetLastError:=True)> _
+        Private Shared Function ChangeServiceConfig2(ByVal hService As IntPtr, ByVal dwInfoLevel As Integer, ByVal lpInfo As IntPtr) As Boolean
+        End Function
+
+        <StructLayout(LayoutKind.Sequential)> _
+        Private Structure SC_ACTION
+            Public Type As Integer
+            Public Delay As UInteger
+        End Structure
+
+        <StructLayout(LayoutKind.Sequential, CharSet:=CharSet.Unicode)> _
+        Private Structure SERVICE_FAILURE_ACTIONS
+            Public dwResetPeriod As UInteger
+            Public lpRebootMsg As String
+            Public lpCommand As String
+            Public cActions As UInteger
+            Public lpsaActions As IntPtr
+        End Structure
+
+        <StructLayout(LayoutKind.Sequential)> _
+        Private Structure SERVICE_FAILURE_ACTIONS_FLAG
+            Public fFailureActionsOnNonCrashFailures As Boolean
+        End Structure
+
         ''' <summary>True if a service with the given name is already installed.</summary>
         Public Shared Function ServiceIsInstalled(ByVal serviceName As String) As Boolean
             For Each sc As ServiceController In ServiceController.GetServices()
@@ -75,6 +121,13 @@ Namespace Global.ServiceTools
             If Not ServiceIsInstalled(serviceName) Then
                 InstallService(serviceName, displayName, binaryPath)
             End If
+            ' B1 watchdog, layer 1: ask the SCM to auto-restart the service if it
+            ' is force-killed. Best-effort — recovery hardening must never block a
+            ' block from actually starting, so a failure here is swallowed.
+            Try
+                SetRecoveryOptions(serviceName)
+            Catch
+            End Try
             StartService(serviceName)
         End Sub
 
@@ -96,6 +149,74 @@ Namespace Global.ServiceTools
                     Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not create the MonkMode service.")
                 End If
             Finally
+                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+                CloseServiceHandle(scm)
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Configure the SCM to auto-restart the service after an abnormal
+        ''' termination (B1 watchdog, layer 1). Restarts on every failure forever,
+        ''' 1s after the kill, including non-crash failures. Requires admin (the
+        ''' CLI runs elevated). Throws on failure so InstallAndStart can swallow it.
+        ''' Friend, not Public: it mutates the live SCM, so only InstallAndStart
+        ''' (and the unit-test assembly, via InternalsVisibleTo) should reach it.
+        ''' </summary>
+        Friend Shared Sub SetRecoveryOptions(ByVal serviceName As String)
+            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then
+                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
+            End If
+
+            Dim svc As IntPtr = IntPtr.Zero
+            Dim actionsPtr As IntPtr = IntPtr.Zero
+            Try
+                svc = OpenService(scm, serviceName, SERVICE_ALL_ACCESS)
+                If svc = IntPtr.Zero Then
+                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to set recovery options.")
+                End If
+
+                ' Build the SC_ACTION array (RecoveryActionCount RESTART actions)
+                ' in unmanaged memory.
+                Dim actionSize As Integer = Marshal.SizeOf(GetType(SC_ACTION))
+                actionsPtr = Marshal.AllocHGlobal(actionSize * RecoveryActionCount)
+                For i As Integer = 0 To RecoveryActionCount - 1
+                    Dim act As New SC_ACTION
+                    act.Type = RecoveryActionTypeRestart
+                    act.Delay = RecoveryRestartDelayMs
+                    Marshal.StructureToPtr(act, IntPtr.Add(actionsPtr, i * actionSize), False)
+                Next
+
+                Dim fa As New SERVICE_FAILURE_ACTIONS
+                fa.dwResetPeriod = RecoveryResetPeriodSeconds
+                fa.lpRebootMsg = Nothing
+                fa.lpCommand = Nothing
+                fa.cActions = CUInt(RecoveryActionCount)
+                fa.lpsaActions = actionsPtr
+
+                Dim faPtr As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(GetType(SERVICE_FAILURE_ACTIONS)))
+                Try
+                    Marshal.StructureToPtr(fa, faPtr, False)
+                    If Not ChangeServiceConfig2(svc, SERVICE_CONFIG_FAILURE_ACTIONS, faPtr) Then
+                        Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not set MonkMode service recovery actions.")
+                    End If
+                Finally
+                    Marshal.FreeHGlobal(faPtr)
+                End Try
+
+                ' Also restart on non-crash failures (best-effort — the restart
+                ' actions above are what matter; this just widens what counts).
+                Dim flag As New SERVICE_FAILURE_ACTIONS_FLAG
+                flag.fFailureActionsOnNonCrashFailures = RecoveryRestartOnNonCrash
+                Dim flagPtr As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(GetType(SERVICE_FAILURE_ACTIONS_FLAG)))
+                Try
+                    Marshal.StructureToPtr(flag, flagPtr, False)
+                    ChangeServiceConfig2(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, flagPtr)
+                Finally
+                    Marshal.FreeHGlobal(flagPtr)
+                End Try
+            Finally
+                If actionsPtr <> IntPtr.Zero Then Marshal.FreeHGlobal(actionsPtr)
                 If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
                 CloseServiceHandle(scm)
             End Try

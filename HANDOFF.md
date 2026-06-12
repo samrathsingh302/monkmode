@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13.
+Last updated: 2026-06-13 (B1 watchdog layer-1 increment).
 
 ---
 
@@ -225,6 +225,23 @@ bypasses the manifest's UAC prompt:
   were found"); the script now skips any dotnet whose `--list-sdks` is empty
   and falls back to `%USERPROFILE%\.dotnet`. Suite still 81/81.
 
+- 🔶 **B1 watchdog — layer 1 + design (2026-06-13, NOT live-verified yet)** —
+  first Phase 3 B1 increment (force-kill resistance), verifier-confirmed SHIP,
+  purely additive. **Layer 1 (SCM auto-restart):** `monkmode block` now calls
+  `ServiceTools.SetRecoveryOptions`, which sets the `MONKMODE` service's
+  FailureActions via `ChangeServiceConfig2W` — 3× RESTART, 1 s delay, reset
+  period INFINITE (count never resets), + restart-on-non-crash flag — so a
+  force-kill is auto-restarted by the SCM. Best-effort (a recovery-config
+  failure never blocks a block from arming). Policy is a set of `Friend Const`s
+  (single source of truth, pinned by tests). **Layer 2 (designed, gate tested,
+  unwired):** pure `Service1.ShouldRestartPeer(count, blockActive, exeExists)`
+  fail-safe gate for the mutual service ⇄ guardian pair — fail-CLOSED via
+  `Not BlockHasExpired`, no duplicate-spawn, no start of a missing exe. **14 new
+  tests, 95/95 green.** ⚠️ NOT live-smoke-tested — the elevated smoke test (kill
+  service → SCM restarts it; `sc qfailure MONKMODE` shows the policy) is the real
+  gate before B1 is "mitigated". The layer-2 guardian's form (SYSTEM child vs
+  second service) is an open decision — see `docs/handoffs/2026-06-13-0000-b1-watchdog-design.md`.
+
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
   auto-lift, verified cleanup, and tore everything down. Reusable scripts live in
@@ -273,9 +290,11 @@ bypasses the manifest's UAC prompt:
 2. **Phase 2 — `THREATMODEL.md`** (deferred; user must green-light): expand the
    B1–B11 bypass surface into a full threat model with mitigations + residual risk.
 3. **Phase 3 — hardening** (closes B1–B11), e.g.:
-   - Watchdog: service ⇄ a protected helper restart each other (B1; note the old
-     MM_notify2 twin that provided a weak version of this was removed — reinstate
-     properly here).
+   - Watchdog (B1): service ⇄ a protected helper restart each other (the old
+     MM_notify2 twin was a weak version — reinstate properly). *Layer 1 (SCM
+     auto-restart) done 13/06/2026 (code-complete, not live-verified); layer 2
+     (mutual guardian) designed + gate tested, wiring pending Samrath's
+     guardian-form pick — see the 13/06 dated handoff. Then smoke-test the lot.*
    - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
      ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
      and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
