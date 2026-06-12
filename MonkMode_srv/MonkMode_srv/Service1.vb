@@ -253,6 +253,24 @@ Public Class Service1
         Catch ex As Exception
         End Try
 
+        ' B1 watchdog, layer 2: keep the SYSTEM guardian peer (mm_guard.exe,
+        ' next to this exe) alive while the block is active. The decision is
+        ' the pure, tested ShouldRestartPeer gate - fail CLOSED via
+        ' Not BlockHasExpired (unparseable Until = still active = keep the
+        ' guardian up), no duplicate spawn while one is running, nothing
+        ' started if the exe is missing. The guardian reciprocally restarts
+        ' this service via the SCM if it is force-killed. Try/Catch so a spawn
+        ' failure can never crash the enforcement tick.
+        Try
+            Dim guardianExe As String = Application.StartupPath + "\mm_guard.exe"
+            If ShouldRestartPeer(System.Diagnostics.Process.GetProcessesByName("mm_guard").Length,
+                                 Not BlockHasExpired(iniUntil, DateTime.Now, 5),
+                                 My.Computer.FileSystem.FileExists(guardianExe)) Then
+                System.Diagnostics.Process.Start(guardianExe)
+            End If
+        Catch ex As Exception
+        End Try
+
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
             If Proc.SessionId = 0 Then
@@ -411,6 +429,20 @@ Public Class Service1
         ' expired block leaves nothing behind to self-heal back in.
         Try
             System.IO.File.Delete(Application.StartupPath + "\monkmode_hosts.block")
+        Catch ex As Exception
+        End Try
+
+        ' B1 layer 2: tear the guardian down too (best effort). It would also
+        ' stand down by itself on its next tick - it reads the same parsed,
+        ' past end time and exits - but killing it here makes the teardown
+        ' immediate and leaves no stray process behind an expired block.
+        Try
+            For Each guardProc As System.Diagnostics.Process In System.Diagnostics.Process.GetProcessesByName("mm_guard")
+                Try
+                    guardProc.Kill()
+                Catch ex As Exception
+                End Try
+            Next
         Catch ex As Exception
         End Try
 

@@ -3,12 +3,13 @@
 // The crypto design (TripleDES, SHA1-derived key from "mm_textbox", zero IV,
 // no HMAC) is documented-weak and Phase-3-owned (B7) - these tests do NOT
 // bless it, they only pin round-trip correctness and the byte-for-byte
-// equivalence of the three per-project copies, so the Phase-3 refactor has a
-// safety net.
+// equivalence of the four per-project copies (CLI, service, notifier,
+// guardian), so the Phase-3 refactor has a safety net.
 //
 // FENCE: never feed invalid Base64 to the SERVICE copy's DecryptData - that
 // copy calls `End` on FormatException (audit P3) and would kill the test host.
-// The invalid-input tests below use the CLI/notifier copies, which return "".
+// The invalid-input tests below use the CLI/notifier/guardian copies, which
+// return "".
 
 namespace MonkMode.Tests;
 
@@ -52,15 +53,35 @@ public class CryptoRoundTripTests
 
     [Theory]
     [MemberData(nameof(Plaintexts))]
-    public void AllThreeCopies_ProduceIdenticalCiphertext(string plaintext)
+    public void GuardianCopy_RoundTrips(string plaintext)
+    {
+        var enc = new mm_guard.Simple3Des(Passphrase);
+        Assert.Equal(plaintext, enc.DecryptData(enc.EncryptData(plaintext)));
+    }
+
+    [Theory]
+    [MemberData(nameof(Plaintexts))]
+    public void AllFourCopies_ProduceIdenticalCiphertext(string plaintext)
     {
         // The contract: the same Simple3Des is compiled into each project, so
         // ciphertext must be interchangeable between them.
         var cli = new MonkMode.Simple3Des(Passphrase).EncryptData(plaintext);
         var srv = new monkmode.Simple3Des(Passphrase).EncryptData(plaintext);
         var notify = new mm_notify.Simple3Des(Passphrase).EncryptData(plaintext);
+        var guard = new mm_guard.Simple3Des(Passphrase).EncryptData(plaintext);
         Assert.Equal(cli, srv);
         Assert.Equal(cli, notify);
+        Assert.Equal(cli, guard);
+    }
+
+    [Fact]
+    public void CliEncrypts_GuardianDecrypts()
+    {
+        // The watchdog data flow: the CLI writes [Time] Until, the guardian
+        // reads it each tick to decide whether to keep guarding.
+        var plaintext = "2026-06-25 10:00:00 p.m.";
+        var stored = new MonkMode.Simple3Des(Passphrase).EncryptData(plaintext);
+        Assert.Equal(plaintext, new mm_guard.Simple3Des(Passphrase).DecryptData(stored));
     }
 
     [Fact]
@@ -82,11 +103,14 @@ public class CryptoRoundTripTests
     }
 
     [Fact]
-    public void CliAndNotifierCopies_ReturnEmptyOnInvalidBase64()
+    public void CliNotifierAndGuardianCopies_ReturnEmptyOnInvalidBase64()
     {
         // (Service copy intentionally untested here - it calls `End` on bad
         // Base64, which would terminate the test host. Documented audit P3.)
+        // The guardian's "" matters doubly: an undecryptable Until becomes an
+        // unparseable one, which fails CLOSED (keep guarding).
         Assert.Equal("", new MonkMode.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
         Assert.Equal("", new mm_notify.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
+        Assert.Equal("", new mm_guard.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
     }
 }

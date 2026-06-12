@@ -1,7 +1,8 @@
 # Builds MonkMode and assembles all components into one folder (dist\),
 # which is the layout MonkMode expects at runtime: monkmode.exe (CLI),
-# MonkMode_srv.exe (service) and mm_notify.exe (notifier) all live together,
-# alongside monkmode_settings.ini once a block is started.
+# MonkMode_srv.exe (service), mm_notify.exe (notifier) and mm_guard.exe
+# (watchdog guardian) all live together, alongside monkmode_settings.ini
+# once a block is started.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
 # Then (from an elevated prompt):  dist\monkmode.exe block --sites reddit.com --for 2h
@@ -24,7 +25,8 @@ if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 $projects = @(
     'MonkMode\MonkMode.vbproj',
     'MonkMode_srv\MonkMode_srv\MonkMode_srv.vbproj',
-    'MM_notify\MM_notify\MM_notify.vbproj'
+    'MM_notify\MM_notify\MM_notify.vbproj',
+    'MM_guard\MM_guard\MM_guard.vbproj'
 )
 
 foreach ($p in $projects) {

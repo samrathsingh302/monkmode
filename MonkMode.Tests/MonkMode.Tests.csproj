@@ -37,6 +37,7 @@
     <ProjectReference Include="..\MonkMode\MonkMode.vbproj" />
     <ProjectReference Include="..\MonkMode_srv\MonkMode_srv\MonkMode_srv.vbproj" />
     <ProjectReference Include="..\MM_notify\MM_notify\MM_notify.vbproj" />
+    <ProjectReference Include="..\MM_guard\MM_guard\MM_guard.vbproj" />
   </ItemGroup>
 
 </Project>
