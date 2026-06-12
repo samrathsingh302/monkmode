@@ -158,20 +158,24 @@ public class GuardianShouldRelaunchNotifierTests
 
 public class GuardianCadenceTests
 {
-    // The guardian must tick at the service's own cadence (10s timer, 5s
-    // expiry grace) so the two halves agree on "expired" within one tick of
-    // each other. The service's interval lives in InitializeComponent
-    // (10000.0R) and its grace is the literal 5 at every BlockHasExpired call
-    // site - these pins fail loudly if the guardian drifts from that.
+    // The guardian must tick at the service's own cadence so the two halves
+    // agree on "expired" within one tick of each other. The service's values
+    // are Friend Consts (Service1.TimerIntervalMs feeds the timer in
+    // InitializeComponent; Service1.ExpiryGraceSeconds is the grace at every
+    // timer-path BlockHasExpired call) - pin guardian == service so a retune
+    // of either half that forgets the other fails loudly, AND pin the
+    // absolute policy values so a coordinated accidental drift is loud too.
     [Fact]
-    public void TicksEveryTenSeconds_LikeTheServiceTimer()
+    public void TicksAtTheServicesCadence()
     {
+        Assert.Equal(monkmode.Service1.TimerIntervalMs, mm_guard.Program.TickIntervalMs);
         Assert.Equal(10000, mm_guard.Program.TickIntervalMs);
     }
 
     [Fact]
-    public void UsesTheServicesFiveSecondExpiryGrace()
+    public void UsesTheServicesExpiryGrace()
     {
+        Assert.Equal(monkmode.Service1.ExpiryGraceSeconds, mm_guard.Program.ExpiryGraceSeconds);
         Assert.Equal(5L, mm_guard.Program.ExpiryGraceSeconds);
     }
 }

@@ -108,7 +108,7 @@ Public Class Service1
         'timer
         '
         Me.timer.Enabled = True
-        Me.timer.Interval = 10000.0R
+        Me.timer.Interval = CDbl(TimerIntervalMs)
         '
         'adder
         '
@@ -230,7 +230,7 @@ Public Class Service1
         ' Try/Catch so a transient lock can never crash the service.
         Try
             Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-            If Not BlockHasExpired(iniUntil, DateTime.Now, 5) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
+            If Not BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
                 Dim hostsText As String = ""
                 If My.Computer.FileSystem.FileExists(hostDirS) Then
                     hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
@@ -264,7 +264,7 @@ Public Class Service1
         Try
             Dim guardianExe As String = Application.StartupPath + "\mm_guard.exe"
             If ShouldRestartPeer(System.Diagnostics.Process.GetProcessesByName("mm_guard").Length,
-                                 Not BlockHasExpired(iniUntil, DateTime.Now, 5),
+                                 Not BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds),
                                  My.Computer.FileSystem.FileExists(guardianExe)) Then
                 System.Diagnostics.Process.Start(guardianExe)
             End If
@@ -286,7 +286,7 @@ Public Class Service1
         If StrComp("no", iniTimeChanging) = 0 Then
             ' Fail CLOSED: only a parsed, genuinely past end time lifts the
             ' block; an unparseable Until skips the expiry action this tick.
-            If BlockHasExpired(iniUntil, DateTime.Now, 5) Then
+            If BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds) Then
                 stopMe()
             Else
                 Dim iniFile = New IniFile
@@ -296,6 +296,16 @@ Public Class Service1
             End If
         End If
     End Sub
+
+    ' The enforcement cadence. Friend Consts so the guardian's unit tests can
+    ' pin its own tick/grace to EXACTLY these values - the two halves of the
+    ' B1 watchdog pair must agree on "expired" within one tick of each other,
+    ' and a retune here that forgot the guardian would otherwise drift apart
+    ' silently. TimerIntervalMs feeds InitializeComponent's timer;
+    ' ExpiryGraceSeconds is the grace used at every timer-path
+    ' BlockHasExpired call (OnStart deliberately uses the stricter 0).
+    Friend Const TimerIntervalMs As Integer = 10000
+    Friend Const ExpiryGraceSeconds As Long = 5
 
     ' Decides whether a persisted block end time has expired. untilText is the
     ' decrypted [Time] Until value (an en-CA datetime string); expired means no

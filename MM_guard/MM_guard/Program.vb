@@ -51,10 +51,21 @@ Module Program
         ' Single instance, machine-wide ("Global\" so the SYSTEM-session copy
         ' also excludes any copy started in a user session, and vice versa).
         ' The service's spawn gate already counts processes, but the mutex
-        ' closes the race of two ticks both deciding to spawn.
+        ' closes the race of two ticks both deciding to spawn. Creating a
+        ' Global\ object needs SeCreateGlobalPrivilege - a stray non-elevated
+        ' launch (the guardian is only meant to be SYSTEM-spawned) throws
+        ' here, so exit quietly instead of crashing unhandled.
         Dim createdNew As Boolean = False
-        Dim mtx As New Mutex(True, "Global\MonkModeGuardian", createdNew)
-        If Not createdNew Then Return
+        Dim mtx As Mutex
+        Try
+            mtx = New Mutex(True, "Global\MonkModeGuardian", createdNew)
+        Catch ex As Exception
+            Return
+        End Try
+        If Not createdNew Then
+            mtx.Dispose()
+            Return
+        End If
 
         Try
             Do
