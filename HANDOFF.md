@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-10.
+Last updated: 2026-06-12.
 
 ---
 
@@ -24,7 +24,7 @@ lock).
 The "think like a 24-year-old trying to disable a porn blocker" framing is
 **adversarial threat-modeling to harden the user's own tool** — legitimate.
 
-Local repo: `c:\Users\samra\projects\Cold-Turkey-Serious`
+Local repo: `C:\Users\samra\Atlas\repos\Cold-Turkey-Serious`
 Private GitHub: https://github.com/samrathsingh302/monkmode  (default branch `monkmode`)
 Working branch: **`monkmode`** (all work is here; `master` = original Cold Turkey).
 
@@ -118,6 +118,31 @@ bypasses the manifest's UAC prompt:
   added `tools/build-dist.ps1`.
 
 **Verified:** `dotnet build MonkMode.sln -c Release` succeeds (0 errors).
+
+- ✅ **Audit FIX session (2026-06-12)** — implemented the approved AUDIT_LOG §2 fixes:
+  1. **P1 culture loss fixed.** Every write of a persisted datetime now formats
+     with the explicit en-CA culture (the constructor's thread-culture set never
+     applied to SCM/timer/SystemEvents threads): `Service1.vb` (the five
+     `EncryptData(DateAdd…/DateTime.Now…)` sites) and `MM_notify/Form1.vb`
+     (clock-change reads now `TryParse(…, CA, …)`, write now `ToString(CA)`).
+     The CLI (`Blocker.vb`) was already explicit.
+  2. **P2 hosts-strip boundary bug fixed** (was `Service1.vb` `startpos - 3`,
+     CRLF-only assumption): the strip logic is extracted to the testable
+     `Service1.StripMonkModeBlock`, which now removes the marker block plus only
+     the single line terminator before it. Failing tests proved the old code ate
+     one user character under LF endings (and two with no newline before the
+     marker). Behaviour on the smoke-tested CRLF path is unchanged.
+  3. **P0 zero tests closed: `MonkMode.Tests/`** (xunit, **C#** — deliberate: VB's
+     case-insensitive namespaces merge `MonkMode` (CLI) with `monkmode` (service)
+     and make the duplicated `Simple3Des`/`IniFile` types ambiguous). 50 tests,
+     all green: marker-block strip edge cases (both implementations), en-CA
+     round-trip under de-DE/fr-FR/en-US/en-GB locales (incl. a real
+     `WriteConfig`→`ActiveBlockEnd` round-trip in the test bin dir), Simple3Des
+     round-trips + three-copy ciphertext equivalence. Pure unit tests — they
+     never touch the real hosts file, registry or service. **Never feed invalid
+     Base64 to the service's `DecryptData` in a test — it calls `End`** (P3).
+     Production visibility changes only: `StripOurBlock` Private→Friend and
+     `InternalsVisibleTo("MonkMode.Tests")` in MonkMode + MonkMode_srv.
 
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the

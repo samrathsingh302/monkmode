@@ -153,7 +153,7 @@ Module Blocker
         End If
     End Sub
 
-    Private Function StripOurBlock(ByVal text As String) As String
+    Friend Function StripOurBlock(ByVal text As String) As String
         Dim idx As Integer = text.IndexOf(Marker, StringComparison.Ordinal)
         If idx >= 0 Then text = text.Substring(0, idx)
         Return text.TrimEnd(CChar(vbCr), CChar(vbLf), " "c, CChar(vbTab))

@@ -2,7 +2,11 @@
 
 Imports System
 Imports System.Reflection
+Imports System.Runtime.CompilerServices
 Imports System.Runtime.InteropServices
+
+' Let the unit-test project see Friend members (the Blocker module).
+<Assembly: InternalsVisibleTo("MonkMode.Tests")>
 
 ' General Information about an assembly is controlled through the following 
 ' set of attributes. Change these attribute values to modify the information

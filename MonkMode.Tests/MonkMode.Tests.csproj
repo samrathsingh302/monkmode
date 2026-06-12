@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    MonkMode.Tests - pure unit tests for the tamper-critical logic.
+
+    C#, not VB, deliberately: VB namespaces are case-insensitive, so the CLI's
+    root namespace `MonkMode` and the service's `monkmode` merge in a VB test
+    project and their duplicated Simple3Des/IniFile types become ambiguous.
+    C# keeps them distinct.
+
+    HARD FENCE: these tests must never touch the real hosts file, the registry,
+    or the service - in-memory strings and the test bin directory only.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MonkMode\MonkMode.vbproj" />
+    <ProjectReference Include="..\MonkMode_srv\MonkMode_srv\MonkMode_srv.vbproj" />
+    <ProjectReference Include="..\MM_notify\MM_notify\MM_notify.vbproj" />
+  </ItemGroup>
+
+</Project>

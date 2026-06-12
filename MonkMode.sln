@@ -13,6 +13,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MM_notify", "MM_notify", "{
 EndProject
 Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "MM_notify", "MM_notify\MM_notify\MM_notify.vbproj", "{5FADD1BE-859C-4313-ACBC-C27B65B53944}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MonkMode.Tests", "MonkMode.Tests\MonkMode.Tests.csproj", "{652B7732-21AE-4FD8-8931-8F23AD7157FA}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -34,6 +36,10 @@ Global
 		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{5FADD1BE-859C-4313-ACBC-C27B65B53944}.Release|Any CPU.Build.0 = Release|Any CPU
+		{652B7732-21AE-4FD8-8931-8F23AD7157FA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{652B7732-21AE-4FD8-8931-8F23AD7157FA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{652B7732-21AE-4FD8-8931-8F23AD7157FA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{652B7732-21AE-4FD8-8931-8F23AD7157FA}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{F61A219D-B5DE-4ADD-9B5B-387D67104E8E} = {CC7D9ADA-2800-43BE-9D7B-5479338B5196}

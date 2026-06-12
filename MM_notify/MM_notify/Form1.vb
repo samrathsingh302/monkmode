@@ -29,6 +29,10 @@ Public Class Form1
     Inherits System.Windows.Forms.Form
 
     Private ReadOnly enc As New Simple3Des("mm_textbox")
+    ' Config datetimes are en-CA strings (the service parses with en-CA); always
+    ' pass this explicitly — SystemEvents handlers run on a system broadcast
+    ' thread, not the UI thread whose culture the constructor sets.
+    Private ReadOnly CA As New CultureInfo("en-CA")
     Private ReadOnly tray As New NotifyIcon()
     Private WithEvents pollTimer As New Timer()
     Private WithEvents appKillTimer As New Timer()
@@ -135,13 +139,13 @@ Public Class Form1
             ini.Load(IniPath())
 
             Dim oldNow As DateTime, until As DateTime
-            DateTime.TryParse(enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")), oldNow)
-            DateTime.TryParse(enc.DecryptData(ini.GetKeyValue("Time", "Until")), until)
+            DateTime.TryParse(enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")), CA, DateTimeStyles.None, oldNow)
+            DateTime.TryParse(enc.DecryptData(ini.GetKeyValue("Time", "Until")), CA, DateTimeStyles.None, until)
 
             Dim secondsLeft As Long = DateDiff(DateInterval.Second, oldNow, until)
             Dim newUntil As DateTime = DateAdd(DateInterval.Second, secondsLeft, DateTime.Now)
 
-            ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.ToString()))
+            ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.ToString(CA)))
             ini.SetKeyValue("Time", "TimeChanging", "no")
             ini.Save(IniPath())
         Catch ex As Exception

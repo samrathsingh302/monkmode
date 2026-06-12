@@ -155,10 +155,14 @@ Public Class Service1
             iniFile.SetKeyValue("User", "Done", "no")
             iniFile.SetKeyValue("User", "NeedsAlerted", "yes")
             iniFile.AddSection("Time")
-            iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now)))
+            ' Format with the explicit en-CA culture: this runs on an SCM/timer
+            ' thread, so the constructor's CurrentCulture does NOT apply here and
+            ' an implicit DateTime->String conversion would use the machine locale,
+            ' which the en-CA reads above can then fail to parse.
+            iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
             iniFile.SetKeyValue("Time", "TimeChanging", "no")
             iniFile.AddSection("CurrentTime")
-            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now))
+            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
             iniFile.AddSection("Process")
             iniFile.SetKeyValue("Process", "List", "null")
             iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
@@ -207,10 +211,12 @@ Public Class Service1
             iniFile.SetKeyValue("User", "Done", "no")
             iniFile.SetKeyValue("User", "NeedsAlerted", "yes")
             iniFile.AddSection("Time")
-            iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now)))
+            ' Explicit en-CA, as above (timer threads don't inherit the
+            ' constructor's CurrentCulture).
+            iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
             iniFile.SetKeyValue("Time", "TimeChanging", "no")
             iniFile.AddSection("CurrentTime")
-            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now))
+            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
             iniFile.AddSection("Process")
             iniFile.SetKeyValue("Process", "List", "null")
             iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
@@ -243,17 +249,43 @@ Public Class Service1
             Else
                 Dim iniFile = New IniFile
                 iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now))
+                iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
                 iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
             End If
         End If
     End Sub
 
+    ' Returns the hosts-file text with the MonkMode marker block (the marker
+    ' line and everything below it) removed, leaving the user's own content
+    ' untouched. Shared and file-system-free so it can be unit tested.
+    Friend Shared Function StripMonkModeBlock(ByVal fileReader As String) As String
+
+        Dim original As String = ""
+        Dim startpos As Integer = 0
+
+        startpos = InStr(1, fileReader, "#### MonkMode Entries ####", 1)
+        If startpos = 0 Then
+            Return fileReader
+        End If
+
+        ' Cut at the marker, then drop only the single line terminator the
+        ' writer placed before it. The old "startpos - 3" assumed that
+        ' terminator was CRLF and silently ate one character of the user's
+        ' own content whenever the hosts file used LF endings.
+        original = Microsoft.VisualBasic.Left(fileReader, startpos - 1)
+        If original.EndsWith(vbCrLf) Then
+            original = Microsoft.VisualBasic.Left(original, original.Length - 2)
+        ElseIf original.EndsWith(vbLf) OrElse original.EndsWith(vbCr) Then
+            original = Microsoft.VisualBasic.Left(original, original.Length - 1)
+        End If
+
+        Return original
+    End Function
+
     Private Sub stopMe()
 
         Dim fileReader As String = ""
         Dim original As String = ""
-        Dim startpos As Integer = 0
         Dim hostsFileNeedsRemoval As Boolean = False
 
         If My.Computer.FileSystem.FileExists(hostDirS) Then
@@ -265,14 +297,7 @@ Public Class Service1
         End If
 
         If hostsFileNeedsRemoval Then
-            startpos = InStr(1, fileReader, "#### MonkMode Entries ####", 1)
-            If startpos <> 0 And startpos <= 2 Then
-                original = ""
-            ElseIf startpos = 0 Then
-                original = fileReader
-            Else
-                original = Microsoft.VisualBasic.Left(fileReader, startpos - 3)
-            End If
+            original = StripMonkModeBlock(fileReader)
 
             Dim fs2 As New FileStream(hostDirS, FileMode.Create, FileAccess.Write, FileShare.Read)
             Dim sw2 As New StreamWriter(fs2)
