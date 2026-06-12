@@ -31,8 +31,9 @@ Public Class Form1
     Private ReadOnly enc As New Simple3Des("mm_textbox")
     ' Config datetimes are en-CA strings (the service parses with en-CA); always
     ' pass this explicitly — SystemEvents handlers run on a system broadcast
-    ' thread, not the UI thread whose culture the constructor sets.
-    Private ReadOnly CA As New CultureInfo("en-CA")
+    ' thread, not the UI thread whose culture the constructor sets. Shared so
+    ' the testable ComputeCompensatedUntil helper can use it.
+    Private Shared ReadOnly CA As New CultureInfo("en-CA")
     Private ReadOnly tray As New NotifyIcon()
     Private WithEvents pollTimer As New Timer()
     Private WithEvents appKillTimer As New Timer()
@@ -126,6 +127,19 @@ Public Class Form1
         Next
     End Sub
 
+    ' Computes the clock-change-compensated end time from the persisted
+    ' [CurrentTime] Now and [Time] Until strings (both already decrypted,
+    ' en-CA). Returns Nothing when either value fails to parse: deriving a new
+    ' end time from garbage would overwrite the real one with roughly "now"
+    ' and end the block instantly (fail-open), so the caller must leave the
+    ' stored Until untouched instead. Shared and pure so it can be unit tested.
+    Friend Shared Function ComputeCompensatedUntil(ByVal storedNow As String, ByVal storedUntil As String, ByVal currentTime As DateTime) As DateTime?
+        Dim oldNow As DateTime, oldUntil As DateTime
+        If Not DateTime.TryParse(storedNow, CA, DateTimeStyles.None, oldNow) Then Return Nothing
+        If Not DateTime.TryParse(storedUntil, CA, DateTimeStyles.None, oldUntil) Then Return Nothing
+        Return DateAdd(DateInterval.Second, DateDiff(DateInterval.Second, oldNow, oldUntil), currentTime)
+    End Function
+
     ' Keep the remaining time stable across a system-clock change so a block
     ' cannot be shortened by moving the clock forward.
     Private Sub SystemEvents_TimeChanged(ByVal sender As Object, ByVal e As EventArgs)
@@ -138,14 +152,15 @@ Public Class Form1
             System.Threading.Thread.Sleep(2000)
             ini.Load(IniPath())
 
-            Dim oldNow As DateTime, until As DateTime
-            DateTime.TryParse(enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")), CA, DateTimeStyles.None, oldNow)
-            DateTime.TryParse(enc.DecryptData(ini.GetKeyValue("Time", "Until")), CA, DateTimeStyles.None, until)
-
-            Dim secondsLeft As Long = DateDiff(DateInterval.Second, oldNow, until)
-            Dim newUntil As DateTime = DateAdd(DateInterval.Second, secondsLeft, DateTime.Now)
-
-            ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.ToString(CA)))
+            ' Fail CLOSED: if either stored value is unparseable, leave Until
+            ' alone — rewriting it from garbage would end the block early.
+            Dim newUntil As DateTime? = ComputeCompensatedUntil(
+                enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")),
+                enc.DecryptData(ini.GetKeyValue("Time", "Until")),
+                DateTime.Now)
+            If newUntil.HasValue Then
+                ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.Value.ToString(CA)))
+            End If
             ini.SetKeyValue("Time", "TimeChanging", "no")
             ini.Save(IniPath())
         Catch ex As Exception

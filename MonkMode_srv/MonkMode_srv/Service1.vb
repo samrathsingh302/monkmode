@@ -128,9 +128,6 @@ Public Class Service1
 
     Protected Overrides Sub OnStart(ByVal args() As String)
 
-        Dim timeLeft As Long
-        Dim timeLeftDate As DateTime
-
         ctMutex = New Threading.Mutex(False, "KeepmealivepleaseMONKMODE")
         adder.Path = sWinDir & "\system32\drivers\etc"
         Try
@@ -138,12 +135,10 @@ Public Class Service1
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
             If iniFile.Sections.Count < 2 Then
                 stopMe()
-            Else
-                DateTime.TryParse(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), culture, DateTimeStyles.None, timeLeftDate)
-                timeLeft = DateDiff(DateInterval.Second, DateTime.Now, timeLeftDate)
-                If timeLeft <= 0 Then
-                    stopMe()
-                End If
+            ElseIf BlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), DateTime.Now, 0) Then
+                ' Only a successfully parsed, genuinely past end time lifts the
+                ' block here; an unparseable Until keeps the block standing.
+                stopMe()
             End If
 
         Catch ex As Exception
@@ -191,13 +186,12 @@ Public Class Service1
         Dim Proc As System.Diagnostics.Process
         Dim notifyFound As Boolean = False
         Dim iniProcessList As String = ""
-        Dim timeLeft As Long
-        Dim timeLeftDate As DateTime
+        Dim iniUntil As String = ""
 
         Try
             Dim iniFile = New IniFile
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-            DateTime.TryParse(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), culture, DateTimeStyles.None, timeLeftDate)
+            iniUntil = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until"))
             iniTimeChanging = iniFile.GetKeyValue("Time", "TimeChanging")
             iniProcessList = iniFile.GetKeyValue("Process", "List")
             If StrComp("null", iniProcessList) <> 0 Then
@@ -241,10 +235,10 @@ Public Class Service1
             End If
         Next
 
-        timeLeft = DateDiff(DateInterval.Second, DateTime.Now, timeLeftDate)
-
         If StrComp("no", iniTimeChanging) = 0 Then
-            If timeLeft <= 5 Then
+            ' Fail CLOSED: only a parsed, genuinely past end time lifts the
+            ' block; an unparseable Until skips the expiry action this tick.
+            If BlockHasExpired(iniUntil, DateTime.Now, 5) Then
                 stopMe()
             Else
                 Dim iniFile = New IniFile
@@ -255,6 +249,20 @@ Public Class Service1
         End If
     End Sub
 
+    ' Decides whether a persisted block end time has expired. untilText is the
+    ' decrypted [Time] Until value (an en-CA datetime string); expired means no
+    ' more than graceSeconds remain at asOf. An unparseable value is NOT
+    ' expired: treating a failed parse as expiry would fail OPEN — a corrupted
+    ' (or legacy machine-locale) value would silently lift the block early.
+    ' Shared and file-system-free so it can be unit tested.
+    Friend Shared Function BlockHasExpired(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long) As Boolean
+        Dim untilDate As DateTime
+        If Not DateTime.TryParse(untilText, New CultureInfo("en-CA"), DateTimeStyles.None, untilDate) Then
+            Return False
+        End If
+        Return DateDiff(DateInterval.Second, asOf, untilDate) <= graceSeconds
+    End Function
+
     ' Returns the hosts-file text with the MonkMode marker block (the marker
     ' line and everything below it) removed, leaving the user's own content
     ' untouched. Shared and file-system-free so it can be unit tested.
@@ -263,8 +271,12 @@ Public Class Service1
         Dim original As String = ""
         Dim startpos As Integer = 0
 
-        startpos = InStr(1, fileReader, "#### MonkMode Entries ####", 1)
-        If startpos = 0 Then
+        ' Ordinal, case-sensitive — the same comparison the stopMe() gate and
+        ' the CLI use. The old case-insensitive InStr(..., CompareMethod.Text)
+        ' could lock onto a hand-edited case-variant marker line ABOVE the real
+        ' one and delete the user's own hosts lines between the two.
+        startpos = fileReader.IndexOf("#### MonkMode Entries ####", StringComparison.Ordinal)
+        If startpos < 0 Then
             Return fileReader
         End If
 
@@ -272,7 +284,7 @@ Public Class Service1
         ' writer placed before it. The old "startpos - 3" assumed that
         ' terminator was CRLF and silently ate one character of the user's
         ' own content whenever the hosts file used LF endings.
-        original = Microsoft.VisualBasic.Left(fileReader, startpos - 1)
+        original = Microsoft.VisualBasic.Left(fileReader, startpos)
         If original.EndsWith(vbCrLf) Then
             original = Microsoft.VisualBasic.Left(original, original.Length - 2)
         ElseIf original.EndsWith(vbLf) OrElse original.EndsWith(vbCr) Then

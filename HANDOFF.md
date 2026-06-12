@@ -144,6 +144,27 @@ bypasses the manifest's UAC prompt:
      Production visibility changes only: `StripOurBlock` Private→Friend and
      `InternalsVisibleTo("MonkMode.Tests")` in MonkMode + MonkMode_srv.
 
+- ✅ **Fail-closed fix session (2026-06-12)** — fixed the three verifier-confirmed
+  findings from the `005ea7a` review:
+  1. **Fail-open expiry closed.** Both expiry deciders ignored `DateTime.TryParse`'s
+     return value, so an unparseable `[Time] Until` (legacy machine-locale ini,
+     corrupted-but-decryptable value) became `MinValue` → "expired" → the service
+     lifted the block and the notifier rewrote Until to ~now. Now fail CLOSED:
+     the service's `OnStart`/timer gates go through `Service1.BlockHasExpired`
+     (unparseable = NOT expired, block stands) and the notifier's clock-comp goes
+     through `Form1.ComputeCompensatedUntil` (unparseable = `Nothing`, stored
+     Until left untouched; `TimeChanging` still reset to "no"). Consequence: a
+     corrupted Until now means the block never auto-expires until the value is
+     fixed — that's the intended tamper-resistant direction.
+  2. **Marker comparison made ordinal.** `StripMonkModeBlock` used case-insensitive
+     `InStr(..., CompareMethod.Text)` while the `stopMe()` gate and the CLI match
+     ordinally; a hand-edited case-variant marker line above the real one would
+     cut early and delete user hosts lines. Now `IndexOf(..., StringComparison.Ordinal)`.
+  3. **Marker tests added**: case-variant-above-real-marker and two-exact-markers
+     (first wins) for the service strip, plus a CLI parity test; 14 new tests,
+     **64/64 green**. `InternalsVisibleTo("MonkMode.Tests")` added to MM_notify.
+  Also added `.mcp.json` (house Obsidian MCP wiring) at the repo root.
+
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
   auto-lift, verified cleanup, and tore everything down. Reusable scripts live in

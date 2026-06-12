@@ -105,6 +105,27 @@ public class ServiceStripMonkModeBlockTests
         var hosts = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 added-later\r\n";
         Assert.Equal("127.0.0.1 my-dev-box", monkmode.Service1.StripMonkModeBlock(hosts));
     }
+
+    [Fact]
+    public void CaseVariantMarkerAboveRealMarker_DoesNotCutEarly()
+    {
+        // The strip must match the marker ordinally, like the stopMe() gate
+        // and the CLI. The old case-insensitive InStr locked onto the
+        // hand-edited variant line at the top and deleted the user's own
+        // "127.0.0.1 my-dev-box" between the two.
+        var hosts = "#### MONKMODE ENTRIES ####\r\n127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 x.com\r\n";
+        Assert.Equal("#### MONKMODE ENTRIES ####\r\n127.0.0.1 my-dev-box", monkmode.Service1.StripMonkModeBlock(hosts));
+    }
+
+    [Fact]
+    public void TwoExactMarkerLines_FirstWins_EverythingBelowItRemoved()
+    {
+        // Two literal marker lines in one file: the cut happens at the FIRST,
+        // and everything below it (including the second marker) is MonkMode's
+        // to remove.
+        var hosts = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n" + Marker + "\r\n127.0.0.1 x.com\r\n";
+        Assert.Equal("127.0.0.1 my-dev-box", monkmode.Service1.StripMonkModeBlock(hosts));
+    }
 }
 
 public class CliStripOurBlockTests
@@ -138,6 +159,18 @@ public class CliStripOurBlockTests
     public void MarkerAtStartOfFile_ReturnsEmpty()
     {
         Assert.Equal("", MonkMode.Blocker.StripOurBlock(Marker + "\r\n127.0.0.1 reddit.com\r\n"));
+    }
+
+    [Fact]
+    public void CaseVariantAndDoubledMarkers_MatchTheServiceStripSemantics()
+    {
+        // Parity with the service strip: ordinal matching (a case-variant
+        // line above the real marker is user content) and first-marker-wins.
+        var caseVariant = "#### MONKMODE ENTRIES ####\r\n127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 x.com\r\n";
+        Assert.Equal("#### MONKMODE ENTRIES ####\r\n127.0.0.1 my-dev-box", MonkMode.Blocker.StripOurBlock(caseVariant));
+
+        var doubled = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n" + Marker + "\r\n";
+        Assert.Equal("127.0.0.1 my-dev-box", MonkMode.Blocker.StripOurBlock(doubled));
     }
 
     [Fact]
