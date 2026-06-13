@@ -13,7 +13,7 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 - `MM_notify/` → `mm_notify.exe` (user-session notifier: app-kill, clock-change comp, tray-toast at expiry).
 - `MM_guard/` → `mm_guard.exe` (SYSTEM-session watchdog guardian spawned by the service: SCM-restarts a killed service, relaunches the notifier; exits only on genuine expiry).
 - Build: `C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release` (SDK is user-scoped, not on PATH).
-- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is still the manual elevated smoke test (last run 27/27; B1 watchdog layers not yet smoke-tested — see HANDOFF §5).
+- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is still the manual elevated smoke test (last run **47/47, 13/06/2026** — B1 + B2 live-verified; rebuild `dist\` first, see HANDOFF §8).
 
 ## Fences
 - **Never run the service / CLI during dev or audit** — it edits the LIVE hosts file, adds an HKCU `Run` entry, and installs a `CanStop=False` LocalSystem service. Read-only analysis unless Samrath explicitly asks for a live test. Unit tests must never touch real hosts/registry/SCM either.

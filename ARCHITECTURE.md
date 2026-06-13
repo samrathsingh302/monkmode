@@ -75,7 +75,7 @@ two were removed during the CLI migration.
   mutual service ⇄ guardian restart pair is wired (layer 2): the service's timer
   spawns/respawns the SYSTEM-session `mm_guard.exe`, which reciprocally restarts
   the service via the SCM and relaunches the notifier into the user session.
-  Both layers are code-complete + unit-tested but NOT yet live-verified.)*
+  Both layers **live-verified 13/06/2026** — elevated smoke test 47/47.)*
 
 ## 4. Bypass surface (current state — these all work today)
 
@@ -104,10 +104,22 @@ Ranked roughly by how easily a motivated user pulls them off.
 > respawns it (≤10 s); kill service AND disable recovery → guardian restarts
 > it (≤10 s); block expiry → service stops, guardian exits, **no restart
 > loop** (stopMe ⇄ recovery/guardian interaction).
+>
+> **Status update 13/06/2026 (night): B1 LIVE-VERIFIED — supersedes the two
+> notes above.** The extended elevated smoke test passed **47/47**: recovery
+> policy exact (3× RESTART, 1000 ms, reset INFINITE); guardian spawned 6.9 s as
+> SYSTEM; K1 force-kill service → SCM restart in 0.4 s, exactly one guardian;
+> K2 kill guardian → service respawned it in 7.4 s; K3 kill notifier → guardian
+> relaunched it in 10.5 s **into the user session**; K4 recovery disabled + kill
+> → guardian alone restarted the service in 11 s, policy restored; block
+> enforced through all drills; clean expiry with **no restart loop**, no stray
+> processes. (A first run failed 31/16 purely because `dist\` was stale — built
+> before the B1 commits, no `mm_guard.exe` present. **Rebuild `dist\` via
+> `tools\build-dist.ps1` before any smoke test.**)
 
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|
-| B1 | **Force-kill the service** (`taskkill /f`, Process Explorer, `sc` via SYSTEM token, pskill). | `CanStop=False` only blocks graceful stop; a force kill still terminates the process. **MITIGATED IN SOFTWARE 13/06/2026 (both layers code-complete, NOT yet live-verified):** **Layer 1** — the CLI sets SCM **FailureActions** on `MONKMODE` at install — restart on every failure forever (3× RESTART, 1 s delay, reset period INFINITE) + restart-on-non-crash flag (`ServiceTools.SetRecoveryOptions`). **Layer 2** — mutual service ⇄ guardian restart pair (the proper version of the removed `MM_notify2` twin): the service's timer spawns/respawns the SYSTEM-session `mm_guard.exe` through the tested fail-closed gate `Service1.ShouldRestartPeer`; the guardian reciprocally SCM-restarts a killed service and relaunches `mm_notify` into the user session, and stands down only on a genuinely parsed, past end time (`stopMe()` also kills it at expiry). **Residuals (honest):** a scripted near-simultaneous double-kill of service+guardian within the ~1 s/10 s restart windows, a SYSTEM-token kill that also disables recovery (`sc failure … reset= 0`), suspend-then-kill of both processes, or an **elevated** user pre-pinning the guardian (start your own `mm_guard.exe` first: it holds the single-instance mutex but lacks SCM rights, neutralising layer 2 — layer 1 still covers) still win; true kill-immunity needs a PPL/kernel driver (out of scope, B10-tier). | ~~Critical~~ → High until both layers are live-verified (then Medium) |
+| B1 | **Force-kill the service** (`taskkill /f`, Process Explorer, `sc` via SYSTEM token, pskill). | `CanStop=False` only blocks graceful stop; a force kill still terminates the process. **MITIGATED 13/06/2026 (both layers live-verified — elevated smoke test 47/47, kill drills K1–K4 + no-restart-loop expiry watch):** **Layer 1** — the CLI sets SCM **FailureActions** on `MONKMODE` at install — restart on every failure forever (3× RESTART, 1 s delay, reset period INFINITE) + restart-on-non-crash flag (`ServiceTools.SetRecoveryOptions`). **Layer 2** — mutual service ⇄ guardian restart pair (the proper version of the removed `MM_notify2` twin): the service's timer spawns/respawns the SYSTEM-session `mm_guard.exe` through the tested fail-closed gate `Service1.ShouldRestartPeer`; the guardian reciprocally SCM-restarts a killed service and relaunches `mm_notify` into the user session, and stands down only on a genuinely parsed, past end time (`stopMe()` also kills it at expiry). **Residuals (honest):** a scripted near-simultaneous double-kill of service+guardian within the ~1 s/10 s restart windows, a SYSTEM-token kill that also disables recovery (`sc failure … reset= 0`), suspend-then-kill of both processes, or an **elevated** user pre-pinning the guardian (start your own `mm_guard.exe` first: it holds the single-instance mutex but lacks SCM rights, neutralising layer 2 — layer 1 still covers) still win; true kill-immunity needs a PPL/kernel driver (out of scope, B10-tier). | ~~Critical~~ → **Medium** (live-verified 13/06/2026; residuals listed) |
 | B2 | **Clear the read-only attribute and edit/blank hosts.** | **MITIGATED 12/06/2026 (software side).** The CLI persists the exact marker block to `monkmode_hosts.block` (next to the exes); while the block is unexpired, the service's 10s timer re-asserts read-only and restores tampered/deleted/blanked entries from that snapshot (`Service1.RepairHostsBlock` — fail-closed expiry gate, user content preserved, no rewrite when intact). **Residuals:** an admin can delete the snapshot file itself (repair then degrades to attribute re-assert only); an edit sticks for up to ~10s until the next tick; and if the service is dead (B1) nothing repairs — B2's fate is chained to B1. | ~~Critical~~ → Low while the service runs (residuals listed; B1 unchanged) |
 | B3 | **Boot into Safe Mode**, then edit hosts / delete files / `sc delete KCTRP`. | Service has no `SafeBoot` registration, so it does **not** run in Safe Mode. Everything is editable. | Critical |
 | B4 | **Roll the system clock forward.** | Unlock compares `Time/Until` to `DateTime.Now`. Set the clock past the end time and the next 10 s tick calls `stopMe()` and lifts the block. `CurrentTime/Now` heartbeat is written but never enforced against rollback. | Critical |

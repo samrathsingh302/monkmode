@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 (B1 smoke-test extension AUTHORED — 47 checks ready in `C:\Users\samra\monkmode-smoketest\`; awaiting Samrath's elevated run before B1 flips to live-verified).
+Last updated: 2026-06-13 night (**B1 LIVE-VERIFIED — elevated smoke test 47/47**; ARCHITECTURE B1 severity High → Medium. Lesson: rebuild `dist\` before every smoke test — see §8).
 
 ---
 
@@ -227,7 +227,7 @@ bypasses the manifest's UAC prompt:
   were found"); the script now skips any dotnet whose `--list-sdks` is empty
   and falls back to `%USERPROFILE%\.dotnet`. Suite still 81/81.
 
-- 🔶 **B1 watchdog — layer 1 + design (2026-06-13, NOT live-verified yet)** —
+- ✅ **B1 watchdog — layer 1 + design (2026-06-13; live-verified later same day — see the 47/47 entry below)** —
   first Phase 3 B1 increment (force-kill resistance), verifier-confirmed SHIP,
   purely additive. **Layer 1 (SCM auto-restart):** `monkmode block` now calls
   `ServiceTools.SetRecoveryOptions`, which sets the `MONKMODE` service's
@@ -239,13 +239,13 @@ bypasses the manifest's UAC prompt:
   unwired):** pure `Service1.ShouldRestartPeer(count, blockActive, exeExists)`
   fail-safe gate for the mutual service ⇄ guardian pair — fail-CLOSED via
   `Not BlockHasExpired`, no duplicate-spawn, no start of a missing exe. **14 new
-  tests, 95/95 green.** ⚠️ NOT live-smoke-tested — the elevated smoke test (kill
+  tests, 95/95 green.** ~~⚠️ NOT live-smoke-tested — the elevated smoke test (kill
   service → SCM restarts it; `sc qfailure MONKMODE` shows the policy) is the real
-  gate before B1 is "mitigated". ~~The layer-2 guardian's form (SYSTEM child vs
+  gate before B1 is "mitigated".~~ *(superseded — passed 13/06 night, 47/47.)* ~~The layer-2 guardian's form (SYSTEM child vs
   second service) is an open decision~~ *(decision locked + wired same day — see
   next entry)* — see `docs/handoffs/2026-06-13-0000-b1-watchdog-design.md`.
 
-- 🔶 **B1 watchdog — layer 2 wired (2026-06-13, NOT live-verified yet)** — the
+- ✅ **B1 watchdog — layer 2 wired (2026-06-13; live-verified later same day — see the 47/47 entry below)** — the
   mutual service ⇄ guardian pair is complete in software (decision (A) locked:
   SYSTEM child process, NOT a second service). Verifier-confirmed SHIP; its two
   actionable P3s fixed same-session. Commits `395782c` + `879e24b`.
@@ -271,16 +271,17 @@ bypasses the manifest's UAC prompt:
   **Residuals (documented in ARCHITECTURE B1):** near-simultaneous double-kill,
   `sc failure … reset= 0` + kill, suspend-then-kill, and an *elevated* user
   pre-pinning the guardian (own `mm_guard.exe` grabs the mutex but lacks SCM
-  rights — layer 1 still covers). ⚠️ The elevated smoke test is the gate before
+  rights — layer 1 still covers). ~~⚠️ The elevated smoke test is the gate before
   B1 is "mitigated"; it must also check expiry causes NO restart loop
   (stopMe ⇄ SCM-recovery/guardian interaction was reasoned about + verifier-
-  walked, but never run live).
+  walked, but never run live).~~ *(superseded — passed 13/06 night, 47/47 incl.
+  the no-restart-loop expiry watch.)*
 
-- 🔶 **B1 smoke-test extension session (2026-06-13, authored, NOT YET RUN)** —
-  extended the elevated smoke test (`C:\Users\samra\monkmode-smoketest\`) from
+- ✅ **B1 smoke-test extension session (2026-06-13, authored; run same night —
+  PASSED 47/47, see next entry)** — extended the elevated smoke test
+  (`C:\Users\samra\monkmode-smoketest\`) from
   27 → **47 checks** to cover BOTH B1 watchdog layers; **no repo code touched**
-  (suite untouched at 123/123). Samrath must run it elevated; only after it
-  passes does ARCHITECTURE B1 flip to live-verified/Medium.
+  (suite untouched at 123/123).
   1. **Baseline (+5)**: `sc qfailure MONKMODE` shows the exact policy (3×
      RESTART, 1000 ms delay each, reset INFINITE — pins
      `ServiceTools.SetRecoveryOptions` landed); mm_guard spawned by the
@@ -307,6 +308,26 @@ bypasses the manifest's UAC prompt:
      then kill mm_guard + service together in a retry loop) — the old order
      would fight the watchdogs mid-teardown. Both scripts parse clean (PS 5.1
      parser); not run (fence: authoring only).
+
+- ✅ **B1 live verification session (2026-06-13, night)** — the extended elevated
+  smoke test **PASSED 47/47** (Samrath ran it elevated; log:
+  `C:\Users\samra\monkmode-smoketest\smoketest.log`). **B1 is now live-verified;
+  ARCHITECTURE §3/§4 updated, B1 severity High → Medium.** Observed timings:
+  recovery policy exact (3× RESTART / 1000 ms / reset INFINITE); guardian
+  spawned 6.9s, session 0; K1 force-kill service → SCM restart **0.4s**, exactly
+  one guardian after; K2 kill guardian → service respawned it **7.4s**; K3 kill
+  notifier → guardian relaunched it **10.5s** into the interactive user session;
+  K4 recovery disabled + kill → guardian alone restarted the service **11s**,
+  policy restored; block enforced through all drills; clean on-time expiry with
+  **no restart loop** (30s tight poll), no stray mm_guard, notifier self-exited.
+  **A first run failed 31 passed / 16 failed — every B1 check red — with a
+  one-cause diagnosis: `dist\` was stale** (built 12/06 23:46, BEFORE layer 1
+  `db1bb57` 00:24 and layer 2 `395782c` 00:46; no recovery policy in that CLI
+  and no `mm_guard.exe` in dist at all). Cascade: K1's kill left the service
+  permanently dead → K2–K4 moot → block never auto-lifted (marker stuck until
+  teardown's backup restore — machine verified clean after). Fixed by rebuilding
+  via `tools\build-dist.ps1`; second run 47/47. Lesson recorded in §8. No repo
+  code changed this session (suite untouched at 123/123); docs only.
 
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
@@ -357,12 +378,10 @@ bypasses the manifest's UAC prompt:
    B1–B11 bypass surface into a full threat model with mitigations + residual risk.
 3. **Phase 3 — hardening** (closes B1–B11), e.g.:
    - ~~Watchdog (B1): service ⇄ a protected helper restart each other (the old
-     MM_notify2 twin was a weak version — reinstate properly).~~ *Both layers
-     code-complete 13/06/2026; smoke test EXTENDED to 47 checks same day —
-     **next step: Samrath runs it elevated**
-     (`powershell -ExecutionPolicy Bypass -File C:\Users\samra\monkmode-smoketest\run-smoketest.ps1`,
-     ~8 min; `cleanup.ps1` is the rescue). On 47/47 → ARCHITECTURE B1 row →
-     live-verified, severity High → Medium.*
+     MM_notify2 twin was a weak version — reinstate properly).~~
+     ✅ Done 13/06/2026 — both layers code-complete and **live-verified the same
+     night: elevated smoke test 47/47** (kill drills K1–K4 + no-restart-loop
+     expiry watch). ARCHITECTURE B1 → Medium; residuals documented there.
    - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
      ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
      and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
@@ -405,3 +424,9 @@ bypasses the manifest's UAC prompt:
   projects didn't compile but SDK globbing did → removed.
 - The repo can't build with stock VS2022 alone (no .NET Framework targeting packs);
   the user-scoped .NET 8 SDK is what works.
+- **Rebuild `dist\` (`tools\build-dist.ps1`) before EVERY smoke test.** The smoke
+  test installs from `dist\`, which nothing rebuilds automatically — committing
+  code does not refresh it. A stale dist caused a 31/16 false-fail B1 run on
+  13/06/2026 (binaries predated the B1 commits: no recovery policy, no
+  `mm_guard.exe` in the folder), with the telltale signature: every NEW check
+  red, every pre-existing check green.

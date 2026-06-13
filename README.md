@@ -81,8 +81,12 @@ point, not a product:
   inherited popup window and the weak user-session watchdog twin (later
   reinstated properly as the SYSTEM-session guardian).
 - **Verified live, not just compiled:** an elevated end-to-end smoke test
-  (block → enforce → auto-expire → clean teardown) passed 15/15 checks and
-  exposed three real bugs the compiler couldn't: `0.0.0.0` sinkholes that
+  (block → enforce → tamper-repair → watchdog kill drills → auto-expire →
+  clean teardown), grown from 15 to **47 checks** as each hardening layer
+  landed, passes 47/47 — including force-killing the service, the guardian and
+  the notifier in turn, and disabling SCM recovery to prove the guardian alone
+  restores the service. Its first incarnation exposed three real bugs the
+  compiler couldn't: `0.0.0.0` sinkholes that
   Windows' resolver silently ignores (now `127.0.0.1`), a persistent write
   handle on the hosts file that stopped the DNS client re-reading it (any
   `ipconfig /flushdns` un-blocked everything), and a notifier that exited
