@@ -116,8 +116,44 @@ Module Blocker
         Return DateTime.MinValue
     End Function
 
+    ' Pure: is the block GENUINELY expired? Mirrors the service's
+    ' EffectiveBlockHasExpired (grace 0): expired ONLY when the config MAC is valid
+    ' (B7) AND the end time is at/before the trusted HIGH-WATER mark (B4) - NOT raw
+    ' DateTime.Now. Fail-CLOSED: an invalid MAC or an unparseable Until/HighWater
+    ' reads as NOT expired (block still standing). Friend so it is unit-tested.
+    Friend Function BlockGenuinelyExpired(ByVal macValid As Boolean, ByVal untilText As String, ByVal highWaterText As String) As Boolean
+        If Not macValid Then Return False
+        Dim untilDt As DateTime, hwDt As DateTime
+        If Not DateTime.TryParse(untilText, CA, DateTimeStyles.None, untilDt) Then Return False
+        If Not DateTime.TryParse(highWaterText, CA, DateTimeStyles.None, hwDt) Then Return False
+        Return untilDt <= hwDt
+    End Function
+
     Public Function BlockIsActive() As Boolean
-        Return ServiceIsRunning() AndAlso ActiveBlockEnd() > DateTime.Now
+        ' A standing block must NOT be overwritable by `block` unless it is
+        ' GENUINELY expired by the SAME MAC + high-water rule the service enforces.
+        ' The old check (ActiveBlockEnd() > DateTime.Now) decided liveness off the
+        ' raw wall clock, so an attacker could roll the clock forward past Until ->
+        ' BlockIsActive()=False -> `monkmode block --for 1m` overwrote the standing
+        ' block with a fresh short one, bypassing B4/B7 through the CLI seam. Now we
+        ' decide off the persisted high-water mark (a clock-forward can't advance
+        ' it) and the MAC (a tampered/frozen block stays active). Fail CLOSED: a
+        ' running service with an unreadable/tampered config reads as ACTIVE, so the
+        ' standing block is never overwritten - the exit remains `unblock --force`.
+        If Not ServiceIsRunning() Then Return False
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            ' Invalid MAC (tampered/unstamped/frozen) => active. Also avoids
+            ' decrypting possibly-garbage Until/HighWater (the service's DecryptData
+            ' End()s on bad Base64; the CLI just shouldn't feed it junk).
+            If Not ConfigMacIsValidForIni(ini) Then Return True
+            Dim untilStr As String = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
+            Dim hwStr As String = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))
+            Return Not BlockGenuinelyExpired(True, untilStr, hwStr)
+        Catch
+            Return True
+        End Try
     End Function
 
     Public Function BlockedSites() As String

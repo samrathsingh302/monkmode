@@ -180,6 +180,44 @@ bypasses the manifest's UAC prompt:
        confirmed: B6 sc-delete refusal + brick-safety + escape-hatch ordering are
        sound (Q1–Q4 accept); the ~10 s inter-tick re-assert window is an accepted
        residual; B4 single-jump/backward/restart/HighWater-tamper all hold.
+  0c. **🔎 Audit sweep of B1 / B2 / B3 / cross-slice (2026-06-14) — one more P1.**
+     Three more independent verifier audits (the un-audited shipped mitigations +
+     the seams between all of them, esp. the new B7/B4 "frozen block" states):
+     - **B1 watchdog → SHIP.** No new fail-open; every permanent-disable path
+       (double-kill faster than respawn, recovery-disabled + kill, elevated-user
+       mutex pre-grab) is an already-documented residual. SCM reset-INFINITE means
+       the 4th+ kill IS still auto-restarted (not exhaustion). No same-tick
+       spawn-then-stop race; frozen block keeps both watchdogs alive (fail-closed).
+     - **B2 hosts self-heal + B3 SafeBoot → SHIP.** The no-data-loss strip/repair
+       holds against every nasty case (case-variant/doubled/mid-file marker,
+       LF/CRLF/no-newline, blanked/deleted hosts, user line == a snapshot entry);
+       B3 `DeleteSubKeyTree` touches only MonkMode's two leaf keys; intact tick =
+       true no-op. Three P3 nits, all DEFERRED (not data-loss, not bypass): the
+       `stopMe()` hosts rewrite lacks the timer path's Try/Finally (near-impossible
+       in-memory-string torn write; and the audit's suggested "re-assert read-only
+       in Finally" is WRONG for the expiry path — it'd leave clean hosts locked);
+       `adder_Changed` has no debounce (duplicate appends, cosmetic) and appends
+       raw bytes (admin-only channel, pre-existing documented residual).
+     - **Cross-slice → P1 FIXED + P2/P3 noted.** **P1 (clock-forward bypass via
+       the CLI seam, FIXED):** `Blocker.BlockIsActive()` decided liveness off raw
+       `DateTime.Now`, so rolling the clock forward past `Until` made it return
+       False and `monkmode block --for 1m` overwrote the standing block with a
+       fresh valid-MAC short one — bypassing B4/B7 entirely through the CLI even
+       though the service refuses to lift. Fixed: new pure
+       `Blocker.BlockGenuinelyExpired(macValid, until, highWater)` mirrors the
+       service's `EffectiveBlockHasExpired` (MAC-gated, decided off the persisted
+       HighWater a clock-forward can't advance, grace 0); `BlockIsActive` now uses
+       it and fails CLOSED (running + invalid-MAC/unreadable => active, never
+       overwritable). 8 new tests incl. the clock-forward regression. **P2
+       (DEFERRED):** the service heartbeat and notifier are concurrent
+       unsynchronised ini writers (truncate-rewrite, no lock) — the audit confirmed
+       this is fail-CLOSED (a lost write only drops a HighWater advance / clock-comp
+       = block runs longer; a torn read fails closed), a robustness nit not a
+       security hole; a named mutex + temp-rename is the fix but touches 3 writers,
+       so not changed blind. Cross-slice frozen-block invariants, unblock --force
+       ordering, and "no raw DateTime.Now in any service/guardian enforcement
+       decision" all verified sound. **Suite 265 → 273 green.** All still
+       UNVERIFIED LIVE.
   1. **B7 — tamper-evident config (`1794bde`, committed).** HMAC-SHA256 over the
      *decrypted* ini canonical, key = random 32 bytes DPAPI-protected
      (LocalMachine scope so service/guardian/notifier/CLI can all unprotect).
