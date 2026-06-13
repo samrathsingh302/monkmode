@@ -79,17 +79,32 @@ Module Program
                 ' verified the world this tick - act on the NEXT tick.
                 Thread.Sleep(TickIntervalMs)
 
-                ' Read [Time] Until and the B7 MAC validity in one ini load.
+                ' Read [Time] Until, [Time] HighWater and the B7 MAC validity in
+                ' one ini load.
                 Dim until As String = ""
+                Dim highWater As String = ""
                 Dim macValid As Boolean = False
-                ReadBlockState(until, macValid)
+                ReadBlockState(until, highWater, macValid)
+
+                ' B4: the guardian decides expiry off the service-written HIGH-
+                ' WATER MARK, not raw DateTime.Now - so it never stands down on a
+                ' rolled-forward clock either (the service is the sole writer of
+                ' HighWater; the guardian only reads the last-persisted value).
+                ' Parse it to the asOf; an unparseable/blank HighWater falls back
+                ' to MinValue, which is far before any Until => reads NOT expired
+                ' (fail CLOSED, keep guarding).
+                Dim asOfHw As DateTime = DateTime.MinValue
+                Dim parsedHw As DateTime
+                If DateTime.TryParse(highWater, New Globalization.CultureInfo("en-CA"), Globalization.DateTimeStyles.None, parsedHw) Then
+                    asOfHw = parsedHw
+                End If
 
                 ' Fail CLOSED on both axes: an unparseable Until OR an invalid/
                 ' absent B7 MAC (a tampered config) reads as NOT expired, so the
                 ' guardian keeps guarding. Only a parsed, past end time AND a
                 ' valid MAC stands it down - exactly Service1's semantics, so the
                 ' pair never disagree on "expired".
-                Dim blockActive As Boolean = Not Guardian.EffectiveBlockHasExpired(until, DateTime.Now, ExpiryGraceSeconds, macValid)
+                Dim blockActive As Boolean = Not Guardian.EffectiveBlockHasExpired(until, asOfHw, ExpiryGraceSeconds, macValid)
                 If Not blockActive Then
                     ' Genuinely expired (parsed, past end time, valid MAC): stand
                     ' down for good. The service's stopMe() also kills us at
@@ -106,18 +121,22 @@ Module Program
     End Sub
 
     ' Reads the block state from a single ini load: the decrypted [Time] Until
-    ' (untilOut) and the B7 MAC validity (macValidOut). Both fail CLOSED on any
-    ' error - untilOut "" is unparseable (block reads active), macValidOut False
-    ' means a tampered/unreadable config also reads active - so a deleted or
-    ' corrupted config keeps the guardian guarding, never stands it down. One
-    ' load (not two) so Until and the MAC are evaluated against the same bytes.
-    Private Sub ReadBlockState(ByRef untilOut As String, ByRef macValidOut As Boolean)
+    ' (untilOut), the decrypted [Time] HighWater (highWaterOut, B4) and the B7
+    ' MAC validity (macValidOut). All fail CLOSED on any error - untilOut ""
+    ' is unparseable (block reads active), highWaterOut "" parses to MinValue
+    ' (reads active), macValidOut False means a tampered/unreadable config also
+    ' reads active - so a deleted or corrupted config keeps the guardian
+    ' guarding, never stands it down. One load (not three) so Until, HighWater
+    ' and the MAC are all evaluated against the same bytes.
+    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef macValidOut As Boolean)
         untilOut = ""
+        highWaterOut = ""
         macValidOut = False
         Try
             Dim ini As New IniFile
             ini.Load(Path.Combine(AppContext.BaseDirectory, IniName))
             untilOut = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
+            highWaterOut = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))
             macValidOut = ConfigMacIsValidForIni(ini)
         Catch ex As Exception
         End Try
@@ -130,15 +149,17 @@ Module Program
     ' comparison would miss a drift in THIS wrapper.
     Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
         Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
+        Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
+        Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain, highWaterPlain)
     End Function
 
     ' B7 live MAC gate (DPAPI seam - smoke-tested). DPAPI-unprotect [Integrity]

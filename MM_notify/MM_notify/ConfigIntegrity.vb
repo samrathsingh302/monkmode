@@ -46,9 +46,20 @@ Friend Module ConfigIntegrity
     ' regardless of the ciphertext or who wrote it. "null"/"" pass through
     ' as-is - the point is a stable, reproducible input, not interpretation.
     ' [Integrity] Key and [Integrity] Mac are deliberately NOT part of this.
-    Friend Function BuildCanonical(ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String) As String
-        Return "v1" & vbLf &
+    '
+    ' B4 (clock-rollback hardening): the canonical is now "v2" and includes
+    ' HighWater - the monotonic high-water mark (an en-CA LOCAL datetime, same
+    ' format as Until) that the service advances at most one tick at a time and
+    ' never on a clock jump. It MUST be MAC-covered so an attacker who recovered
+    ' the 3DES key can't forge a HighWater past Until to fake an expiry; covering
+    ' it here is what couples the value to the MAC. HighWater sits right after
+    ' Until (the two are paired: Until is the target, HighWater the trusted
+    ' clock measured against it). Bumping the tag v1 -> v2 makes any old-format
+    ' canonical mismatch loudly rather than silently cross-validating.
+    Friend Function BuildCanonical(ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String) As String
+        Return "v2" & vbLf &
                "Until=" & until & vbLf &
+               "HighWater=" & highWater & vbLf &
                "ProcessList=" & processList & vbLf &
                "CustomSites=" & customSites & vbLf &
                "Now=" & now & vbLf

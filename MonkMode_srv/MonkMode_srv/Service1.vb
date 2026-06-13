@@ -144,12 +144,36 @@ Public Class Service1
                 ' is left unstamped, so the readers fail CLOSED (macValid = False)
                 ' and it holds until re-armed from the CLI.
                 WriteDefaultBlock()
-            ElseIf EffectiveBlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), DateTime.Now, 0, ConfigMacIsValidForIni(iniFile)) Then
-                ' The ONLY OnStart path that may lift the block: a successfully
-                ' parsed, genuinely past end time AND a valid B7 MAC. An
-                ' unparseable Until or a tampered/invalid MAC keeps the block
-                ' standing (fail closed).
-                stopMe()
+            Else
+                ' B4: decide the OnStart expiry off the HIGH-WATER MARK, not raw
+                ' DateTime.Now. NextHighWater advances the stored value to "now"
+                ' ONLY for a Trusted (within-ceiling) advance; the boot gap after
+                ' real downtime is a big delta => ForwardJump => the stored value
+                ' is kept => the downtime is NOT credited toward expiry and the
+                ' block stays standing (the intended fail-closed cost of defeating
+                ' clock-forward). A clock rolled forward while off is likewise a
+                ' jump and never lifts the block here.
+                Dim storedHw As String = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "HighWater"))
+                Dim newHw As String = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
+                Dim asOfHw As DateTime = DateTime.MinValue
+                Dim parsedHw As DateTime
+                If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then asOfHw = parsedHw
+
+                If EffectiveBlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), asOfHw, 0, ConfigMacIsValidForIni(iniFile)) Then
+                    ' The ONLY OnStart path that may lift the block: a successfully
+                    ' parsed, genuinely past end time (measured against the trusted
+                    ' high-water mark) AND a valid B7 MAC. An unparseable Until or a
+                    ' tampered/invalid MAC keeps the block standing (fail closed).
+                    stopMe()
+                ElseIf newHw <> "" AndAlso newHw <> storedHw Then
+                    ' A rare Trusted advance at OnStart (a fast restart within the
+                    ' ceiling): persist the moved high-water mark and re-stamp the
+                    ' MAC over the new canonical with the existing key. Normally the
+                    ' boot gap is a jump so newHw = storedHw and this is a no-op.
+                    iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+                    RestampMacWithExistingKey(iniFile)
+                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+                End If
             End If
 
         Catch ex As Exception
@@ -206,6 +230,10 @@ Public Class Service1
         ' which the en-CA reads can then fail to parse.
         iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
         iniFile.SetKeyValue("Time", "TimeChanging", "no")
+        ' B4: seed HighWater (en-CA LOCAL, encrypted) so the recovery default has
+        ' the same shape as a CLI-armed block. Unstamped, so macValid stays False
+        ' and the block holds regardless; this just keeps the ini uniform.
+        iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
         iniFile.AddSection("CurrentTime")
         iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
         iniFile.AddSection("Process")
@@ -225,6 +253,14 @@ Public Class Service1
         ' treated as active (never expired) and every self-heal gate keeps
         ' enforcing. Computed once below while the ini is loaded.
         Dim macValid As Boolean = False
+        ' B4: the trusted high-water mark for THIS tick (en-CA LOCAL string) and
+        ' the DateTime asOf every expiry/self-heal gate below is driven off. The
+        ' default asOf = MinValue is fail-closed: against any parseable Until,
+        ' MinValue is far in the past so the block reads NOT expired (a tick that
+        ' couldn't read/advance HighWater never lifts the block). newHw "" means
+        ' "nothing to persist this tick".
+        Dim newHw As String = ""
+        Dim newHwAsOf As DateTime = DateTime.MinValue
 
         Try
             Dim iniFile = New IniFile
@@ -239,6 +275,20 @@ Public Class Service1
             ' Key, validate [Integrity] Mac over the canonical). Invalid/absent
             ' MAC or a DPAPI failure -> False -> block stays standing.
             macValid = ConfigMacIsValidForIni(iniFile)
+            ' B4: advance the monotonic high-water mark. Read the stored value
+            ' (decrypted), then NextHighWater advances it to "now" ONLY if the
+            ' advance is a Trusted real tick; a clock-forward jump or a backward
+            ' roll leaves it unchanged, so a rolled clock can never carry it past
+            ' Until. EVERY expiry/self-heal decision below uses newHwAsOf (the
+            ' parsed HighWater) as asOf instead of DateTime.Now - that is the
+            ' whole B4 fix. The new value is persisted in the heartbeat save
+            ' below (one save) so it advances each live tick.
+            Dim storedHw As String = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "HighWater"))
+            newHw = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
+            Dim parsedHw As DateTime
+            If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then
+                newHwAsOf = parsedHw
+            End If
         Catch ex As Exception
             ' Corrupt/unreadable ini: rewrite the default 7-day block, left
             ' UNSTAMPED on purpose (see the OnStart catch for the rationale) -
@@ -255,6 +305,11 @@ Public Class Service1
             ' constructor's CurrentCulture).
             iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
             iniFile.SetKeyValue("Time", "TimeChanging", "no")
+            ' B4: seed HighWater in the recovery default too (kept consistent with
+            ' the CLI-armed shape). This default is UNSTAMPED, so macValid stays
+            ' False and the block holds regardless of HighWater - but seeding it
+            ' keeps the ini shape uniform and gives the next tick a parseable base.
+            iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
             iniFile.AddSection("CurrentTime")
             iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
             iniFile.AddSection("Process")
@@ -274,10 +329,12 @@ Public Class Service1
         ' EffectiveBlockHasExpired fails CLOSED: unparseable Until OR an invalid
         ' B7 MAC = active) restore our entries from the snapshot the CLI
         ' persisted next to the exe.
+        ' B4: asOf is newHwAsOf (the trusted high-water mark), NOT DateTime.Now,
+        ' so a clock-forward can't flip this to "expired" and stop the repair.
         ' Try/Catch so a transient lock can never crash the service.
         Try
             Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-            If Not EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
+            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
                 Dim hostsText As String = ""
                 If My.Computer.FileSystem.FileExists(hostDirS) Then
                     hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
@@ -310,8 +367,11 @@ Public Class Service1
         ' failure can never crash the enforcement tick.
         Try
             Dim guardianExe As String = Application.StartupPath + "\mm_guard.exe"
+            ' B4: blockActive uses newHwAsOf (trusted high-water mark), not
+            ' DateTime.Now, so a clock-forward can't read as "expired" and let
+            ' the guardian be dropped early.
             If ShouldRestartPeer(System.Diagnostics.Process.GetProcessesByName("mm_guard").Length,
-                                 Not EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid),
+                                 Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid),
                                  My.Computer.FileSystem.FileExists(guardianExe)) Then
                 System.Diagnostics.Process.Start(guardianExe)
             End If
@@ -322,9 +382,10 @@ Public Class Service1
         ' while the block is active (an admin can delete the keys between ticks).
         ' Fail CLOSED via Not EffectiveBlockHasExpired - an unparseable Until OR
         ' an invalid B7 MAC keeps the keys asserted; stopMe() removes them at a
-        ' genuine expiry.
+        ' genuine expiry. B4: asOf is newHwAsOf (trusted high-water mark), not
+        ' DateTime.Now, so a clock-forward can't drop the keys early.
         Try
-            If Not EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid) Then
+            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
                 AssertSafeBootRegistration()
             End If
         Catch ex As Exception
@@ -346,17 +407,31 @@ Public Class Service1
             ' Fail CLOSED: only a parsed, genuinely past end time AND a valid B7
             ' MAC lifts the block; an unparseable Until or a tampered/invalid MAC
             ' skips the expiry action this tick (block stays standing).
-            If EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid) Then
+            ' B4: expiry is decided off newHwAsOf (the trusted high-water mark),
+            ' NOT raw DateTime.Now - this is the headline B4 change. A clock
+            ' rolled forward past Until does not advance HighWater (the jump is
+            ' refused), so this stays "not expired" and stopMe() is not called.
+            If EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
                 stopMe()
             Else
                 Dim iniFile = New IniFile
                 iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
                 iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-                ' B7: the heartbeat just rewrote [CurrentTime] Now, a MAC-covered
-                ' field, so re-stamp [Integrity] Mac over the new canonical with
-                ' the existing key - otherwise the MAC would go invalid on the
-                ' very next tick and (correctly, but needlessly) freeze the block
-                ' from ever auto-lifting. Reuses the stored key; never re-arms.
+                ' B4: persist the advanced high-water mark in the SAME save as the
+                ' heartbeat (one write). newHw is "now" on a Trusted tick and the
+                ' unchanged stored value on a jump/rollback (monotonic), so this
+                ' only ever moves HighWater forward at the real tick rate. Skip
+                ' when newHw is "" (a tick that couldn't read it - never blank a
+                ' good value).
+                If newHw <> "" Then
+                    iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+                End If
+                ' B7/B4: the heartbeat just rewrote [CurrentTime] Now AND [Time]
+                ' HighWater, both MAC-covered fields, so re-stamp [Integrity] Mac
+                ' over the new canonical with the existing key - otherwise the MAC
+                ' would go invalid on the very next tick and (correctly, but
+                ' needlessly) freeze the block from ever auto-lifting. Reuses the
+                ' stored key; never re-arms.
                 RestampMacWithExistingKey(iniFile)
                 iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
             End If
@@ -417,6 +492,79 @@ Public Class Service1
     ' produces macValid (ConfigMacIsValidForIni) is the smoke-tested seam.
     Friend Shared Function EffectiveBlockHasExpired(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
+    End Function
+
+    ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
+    '
+    ' Expiry must NOT trust raw DateTime.Now: rolling the clock forward past
+    ' [Time] Until would make the next tick call stopMe() and lift the block
+    ' early (and stand the guardian down too). B4 decides expiry off a HIGH-WATER
+    ' MARK ([Time] HighWater) that only ever advances at the real tick rate and
+    ' never by a jump - so a forward clock jump can't carry it past Until. The
+    ' service is the SOLE writer of HighWater (no write race); the guardian only
+    ' reads it. These gates are the pure, unit-tested core; the live wiring (read
+    ' the ini, persist the new value, re-stamp the MAC) is the per-tick seam.
+    '
+    ' DELIBERATE SEMANTIC: because HighWater only advances while the service is
+    ' running, genuine machine-OFF downtime is NOT credited toward expiry - the
+    ' block extends by the downtime. That is the fail-closed cost of defeating
+    ' clock-forward (the block measures real ON-machine elapsed time). At OnStart
+    ' the boot gap is a big delta => ForwardJump => not advanced => not credited.
+    ' Intended. A spring-DST forward shift is likewise a >ceiling jump => refused
+    ' => the only cost is a rare ~1h block-extension, the safe direction (LOCAL
+    ' time on purpose, so a DST/timezone forward shift never lifts a block early).
+
+    ' The classifier results for ClassifyTimeAdvance. Plain Integer (not an Enum)
+    ' so the service-copy and guardian-copy results compare directly in the
+    ' parity tests across the two assemblies. Untrusted folds into ForwardJump:
+    ' both mean "do not credit this advance", so the caller needs only the one
+    ' "don't advance" branch.
+    Friend Const TimeAdvanceBackward As Integer = -1     ' delta < 0 (clock rolled back)
+    Friend Const TimeAdvanceTrusted As Integer = 0       ' 0 <= delta <= ceiling (a real tick)
+    Friend Const TimeAdvanceForwardJump As Integer = 1   ' delta > ceiling, OR unparseable stored (fail closed)
+
+    ' The largest forward advance, in seconds, that still counts as a TRUSTED
+    ' tick. Must be >> the 10s TimerIntervalMs so an ordinary (possibly slightly
+    ' late) tick is always Trusted, while a deliberate clock-forward of minutes/
+    ' hours is a ForwardJump. Pinned by a unit test (like the recovery-policy and
+    ' SafeBoot consts) - a retune that dropped it near the tick interval would
+    ' start refusing legitimate ticks (block never advances), and one that raised
+    ' it huge would let a clock-forward of up to that many seconds through.
+    Friend Const HighWaterJumpCeilingSeconds As Long = 120
+
+    ' Classify how 'now' compares to the stored high-water mark. storedHwText and
+    ' nowText are en-CA LOCAL datetime strings (same format/parse as [Time]
+    ' Until, via DateDiff over the en-CA parse). Returns Backward (delta < 0),
+    ' Trusted (0 <= delta <= ceilingSeconds) or ForwardJump (delta > ceiling).
+    ' Fail-closed: an unparseable storedHw or nowText is ForwardJump (never
+    ' credit an advance we can't measure). Pure and Shared so it is unit tested.
+    Friend Shared Function ClassifyTimeAdvance(ByVal storedHwText As String, ByVal nowText As String, ByVal ceilingSeconds As Long) As Integer
+        Dim storedHw As DateTime, nowDt As DateTime
+        If Not DateTime.TryParse(storedHwText, New CultureInfo("en-CA"), DateTimeStyles.None, storedHw) Then
+            Return TimeAdvanceForwardJump
+        End If
+        If Not DateTime.TryParse(nowText, New CultureInfo("en-CA"), DateTimeStyles.None, nowDt) Then
+            Return TimeAdvanceForwardJump
+        End If
+        Dim delta As Long = DateDiff(DateInterval.Second, storedHw, nowDt)
+        If delta < 0 Then Return TimeAdvanceBackward
+        If delta > ceilingSeconds Then Return TimeAdvanceForwardJump
+        Return TimeAdvanceTrusted
+    End Function
+
+    ' The next [Time] HighWater string to persist. MONOTONIC: it advances to the
+    ' 'now' string ONLY when the advance is Trusted (a real tick); a backward
+    ' roll or a forward jump leaves it UNCHANGED (returns storedHwText), so a
+    ' clock jump can never move it past Until. On an unparseable storedHw it is
+    ' ForwardJump (not Trusted), so storedHwText is returned unchanged - keeping
+    ' the value and the MAC coupled (a tampered HighWater already fails the MAC,
+    ' so the block stands regardless; we deliberately do NOT re-seed to now here).
+    ' Pure and Shared so it is unit tested.
+    Friend Shared Function NextHighWater(ByVal storedHwText As String, ByVal nowText As String, ByVal ceilingSeconds As Long) As String
+        If ClassifyTimeAdvance(storedHwText, nowText, ceilingSeconds) = TimeAdvanceTrusted Then
+            Return nowText
+        End If
+        Return storedHwText
     End Function
 
     ' Returns the hosts-file text with the MonkMode marker block (the marker
@@ -565,15 +713,17 @@ Public Class Service1
     ' if someone started decrypting CustomSites or stopped decrypting ProcessList).
     Friend Function CanonicalFromIni(ByVal iniFile As IniFile) As String
         Dim untilEnc As String = iniFile.GetKeyValue("Time", "Until")
+        Dim highWaterEnc As String = iniFile.GetKeyValue("Time", "HighWater")
         Dim procEnc As String = iniFile.GetKeyValue("Process", "List")
         Dim nowEnc As String = iniFile.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = iniFile.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
+        Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain, highWaterPlain)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads

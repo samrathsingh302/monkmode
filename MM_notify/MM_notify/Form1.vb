@@ -154,15 +154,17 @@ Public Class Form1
     ' BuildCanonical literal comparison would miss a drift in THIS wrapper.
     Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
         Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
+        Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
+        Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain, highWaterPlain)
     End Function
 
     ' B7: recompute [Integrity] Mac over the current canonical with the already

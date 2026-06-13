@@ -52,6 +52,78 @@ Friend Module Guardian
         Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
     End Function
 
+    ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
+    '
+    ' Byte-for-byte the same gates as Service1's B4 block (the parity tests pin
+    ' that the two copies agree). The service is the SOLE writer of [Time]
+    ' HighWater; the guardian only READS the last-persisted value and uses it as
+    ' the asOf for its own EffectiveBlockHasExpired stand-down decision, so the
+    ' guardian never stands down on a rolled clock either. These classifiers are
+    ' here so the guardian could reason about an advance identically if needed
+    ' and so the two halves can be parity-pinned exactly like BlockHasExpired.
+    '
+    ' DELIBERATE SEMANTIC: because HighWater only advances while the service is
+    ' running, genuine machine-OFF downtime is NOT credited toward expiry - the
+    ' block extends by the downtime. That is the fail-closed cost of defeating
+    ' clock-forward (the block measures real ON-machine elapsed time). At OnStart
+    ' the boot gap is a big delta => ForwardJump => not advanced => not credited.
+    ' Intended. A spring-DST forward shift is likewise a >ceiling jump => refused
+    ' => the only cost is a rare ~1h block-extension, the safe direction (LOCAL
+    ' time on purpose, so a DST/timezone forward shift never lifts a block early).
+
+    ' The classifier results for ClassifyTimeAdvance. Plain Integer (not an Enum)
+    ' so the service-copy and guardian-copy results compare directly in the
+    ' parity tests across the two assemblies. Untrusted folds into ForwardJump:
+    ' both mean "do not credit this advance", so the caller needs only the one
+    ' "don't advance" branch.
+    Friend Const TimeAdvanceBackward As Integer = -1     ' delta < 0 (clock rolled back)
+    Friend Const TimeAdvanceTrusted As Integer = 0       ' 0 <= delta <= ceiling (a real tick)
+    Friend Const TimeAdvanceForwardJump As Integer = 1   ' delta > ceiling, OR unparseable stored (fail closed)
+
+    ' The largest forward advance, in seconds, that still counts as a TRUSTED
+    ' tick. Must be >> the 10s TimerIntervalMs so an ordinary (possibly slightly
+    ' late) tick is always Trusted, while a deliberate clock-forward of minutes/
+    ' hours is a ForwardJump. Pinned by a unit test (like the recovery-policy and
+    ' SafeBoot consts) - a retune that dropped it near the tick interval would
+    ' start refusing legitimate ticks (block never advances), and one that raised
+    ' it huge would let a clock-forward of up to that many seconds through.
+    Friend Const HighWaterJumpCeilingSeconds As Long = 120
+
+    ' Classify how 'now' compares to the stored high-water mark. storedHwText and
+    ' nowText are en-CA LOCAL datetime strings (same format/parse as [Time]
+    ' Until, via DateDiff over the en-CA parse). Returns Backward (delta < 0),
+    ' Trusted (0 <= delta <= ceilingSeconds) or ForwardJump (delta > ceiling).
+    ' Fail-closed: an unparseable storedHw or nowText is ForwardJump (never
+    ' credit an advance we can't measure). Pure and Shared so it is unit tested.
+    Friend Function ClassifyTimeAdvance(ByVal storedHwText As String, ByVal nowText As String, ByVal ceilingSeconds As Long) As Integer
+        Dim storedHw As DateTime, nowDt As DateTime
+        If Not DateTime.TryParse(storedHwText, New CultureInfo("en-CA"), DateTimeStyles.None, storedHw) Then
+            Return TimeAdvanceForwardJump
+        End If
+        If Not DateTime.TryParse(nowText, New CultureInfo("en-CA"), DateTimeStyles.None, nowDt) Then
+            Return TimeAdvanceForwardJump
+        End If
+        Dim delta As Long = DateDiff(DateInterval.Second, storedHw, nowDt)
+        If delta < 0 Then Return TimeAdvanceBackward
+        If delta > ceilingSeconds Then Return TimeAdvanceForwardJump
+        Return TimeAdvanceTrusted
+    End Function
+
+    ' The next [Time] HighWater string to persist. MONOTONIC: it advances to the
+    ' 'now' string ONLY when the advance is Trusted (a real tick); a backward
+    ' roll or a forward jump leaves it UNCHANGED (returns storedHwText), so a
+    ' clock jump can never move it past Until. On an unparseable storedHw it is
+    ' ForwardJump (not Trusted), so storedHwText is returned unchanged - keeping
+    ' the value and the MAC coupled (a tampered HighWater already fails the MAC,
+    ' so the block stands regardless; we deliberately do NOT re-seed to now here).
+    ' Pure and Shared so it is unit tested.
+    Friend Function NextHighWater(ByVal storedHwText As String, ByVal nowText As String, ByVal ceilingSeconds As Long) As String
+        If ClassifyTimeAdvance(storedHwText, nowText, ceilingSeconds) = TimeAdvanceTrusted Then
+            Return nowText
+        End If
+        Return storedHwText
+    End Function
+
     ' Decides whether this tick should ask the SCM to start the MONKMODE
     ' service. Only while the block is active (blockActive is the caller's
     ' Not BlockHasExpired(...), so fail-closed carries through) and only when

@@ -243,6 +243,13 @@ Module Blocker
         ini.AddSection("Time")
         ini.SetKeyValue("Time", "Until", enc.EncryptData(untilDate.ToString(CA)))
         ini.SetKeyValue("Time", "TimeChanging", "no")
+        ' B4: seed the monotonic high-water mark at "now" (en-CA LOCAL, encrypted
+        ' like Until). From here the service advances it at most one tick at a
+        ' time and never on a clock jump, and decides expiry off it instead of
+        ' raw DateTime.Now - so rolling the clock forward past Until can't lift
+        ' the block early. Stamped under the MAC by StampFreshMac below, so it
+        ' can't be forged past Until without failing verification.
+        ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
 
         ini.AddSection("CurrentTime")
         ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
@@ -258,24 +265,29 @@ Module Blocker
         ini.Save(IniPath())
     End Sub
 
-    ' B7: builds the canonical string the MAC is computed over, from a loaded
+    ' B7/B4: builds the canonical string the MAC is computed over, from a loaded
     ' ini. Uses the DECRYPTED plaintext for the encrypted fields ([Time] Until,
-    ' [Process] List, [CurrentTime] Now) and the as-stored value for the
-    ' plaintext [User] CustomSites, so every party (this writer, plus the
-    ' service/guardian/notifier readers) derives a byte-identical canonical.
-    ' [Integrity] Key/Mac are excluded. Missing values pass through as "".
+    ' [Time] HighWater, [Process] List, [CurrentTime] Now) and the as-stored
+    ' value for the plaintext [User] CustomSites, so every party (this writer,
+    ' plus the service/guardian/notifier readers) derives a byte-identical
+    ' canonical. [Integrity] Key/Mac are excluded. Missing values pass through
+    ' as "". B4: [Time] HighWater is ENCRYPTED like Until/Now (a datetime
+    ' belongs with the datetimes), so it is decrypted here the same way - all
+    ' four wrappers must agree or the MAC never validates and blocks freeze.
     Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
         Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
+        Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
+        Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
         ' "null" is stored verbatim (not encrypted); only decrypt a real payload.
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain, highWaterPlain)
     End Function
 
     ' B7: generate a new HMAC key, protect it into [Integrity] Key, and stamp

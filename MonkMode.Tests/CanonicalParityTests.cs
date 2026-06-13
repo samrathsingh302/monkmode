@@ -45,6 +45,9 @@ public class CanonicalParityTests
     private const string NowPlain = "2026-06-25 12:00:00 p.m.";
     private const string ProcListPlain = "chrome.exe;brave.exe;steam.exe;";
     private const string CustomSitesPlain = "reddit.com;x.com;";
+    // B4: HighWater is an encrypted datetime like Until/Now (the wrappers decrypt
+    // it). A distinct value so a wrapper that read the wrong field would diverge.
+    private const string HighWaterPlain = "2026-06-25 11:30:00 a.m.";
 
     // A fixed raw 32-byte test key (the production key is random + DPAPI-
     // protected; the pure MAC layer takes the raw key, so inject a known one and
@@ -63,6 +66,7 @@ public class CanonicalParityTests
     private static readonly string UntilEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(UntilPlain);
     private static readonly string NowEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(NowPlain);
     private static readonly string ProcListEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(ProcListPlain);
+    private static readonly string HighWaterEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(HighWaterPlain);
 
     // ---- per-project ini builders (each project has its own IniFile type) ----
     //
@@ -73,6 +77,7 @@ public class CanonicalParityTests
     {
         var ini = new MonkMode.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
+        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -83,6 +88,7 @@ public class CanonicalParityTests
     {
         var ini = new monkmode.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
+        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -93,6 +99,7 @@ public class CanonicalParityTests
     {
         var ini = new mm_guard.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
+        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -103,6 +110,7 @@ public class CanonicalParityTests
     {
         var ini = new mm_notify.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
+        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -135,14 +143,16 @@ public class CanonicalParityTests
     [Fact]
     public void TheCanonical_DecryptsUntilNowProcessList_ButLeavesCustomSitesVerbatim()
     {
-        // Pin WHAT the wrappers must do: decrypt Until/Now/ProcessList, pass
-        // CustomSites through verbatim. If a wrapper started decrypting
-        // CustomSites or stopped decrypting ProcessList, this exact string would
-        // change and the test fails loudly. (Mirrors BuildCanonical's pinned
-        // format test, but through the real reader, end to end.)
+        // Pin WHAT the wrappers must do: decrypt Until/HighWater/Now/ProcessList,
+        // pass CustomSites through verbatim. If a wrapper started decrypting
+        // CustomSites, stopped decrypting ProcessList, or stopped decrypting the
+        // B4 HighWater field, this exact string would change and the test fails
+        // loudly. (Mirrors BuildCanonical's pinned format test, but through the
+        // real reader, end to end.)
         Assert.Equal(
-            "v1\n" +
+            "v2\n" +
             "Until=" + UntilPlain + "\n" +
+            "HighWater=" + HighWaterPlain + "\n" +
             "ProcessList=" + ProcListPlain + "\n" +
             "CustomSites=" + CustomSitesPlain + "\n" +
             "Now=" + NowPlain + "\n",
@@ -182,9 +192,9 @@ public class CanonicalParityTests
         var encryptedSites = new MonkMode.Simple3Des(Passphrase).EncryptData("decrypted-sites;");
 
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListPlain, encryptedSites, NowPlain);              // CustomSites VERBATIM (correct)
+            UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain);  // CustomSites VERBATIM (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain);          // CustomSites DECRYPTED (the bug)
+            UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain);  // CustomSites DECRYPTED (the bug)
 
         Assert.NotEqual(correct, buggy);
 
@@ -201,9 +211,9 @@ public class CanonicalParityTests
         // would put the ciphertext into the canonical instead of the plaintext,
         // diverging from every other party. Pin that this breaks MAC agreement.
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain);            // ProcessList DECRYPTED (correct)
+            UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList DECRYPTED (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain);             // ProcessList CIPHERTEXT (the bug)
+            UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList CIPHERTEXT (the bug)
 
         Assert.NotEqual(correct, buggy);
         var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
@@ -220,6 +230,7 @@ public class CanonicalParityTests
         static void SetNullProc(Action<string, string, string> set)
         {
             set("Time", "Until", UntilEnc);
+            set("Time", "HighWater", HighWaterEnc);
             set("CurrentTime", "Now", NowEnc);
             set("Process", "List", "null");
             set("User", "CustomSites", CustomSitesPlain);
