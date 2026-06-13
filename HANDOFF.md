@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 night (**B3 Safe Mode resistance implemented** — service self-registers under the SafeBoot keys; code-complete + unit-tested 136/136 + verifier-SHIP, awaiting live verification: the 52-check smoke test AND a one-time manual Safe Mode reboot. Prior: B1 LIVE-VERIFIED 47/47, B1 severity → Medium. Always rebuild `dist\` before smoke-testing — see §8).
+Last updated: 2026-06-13 night (**B3 registration LIVE-VERIFIED — smoke test 52/52**; ARCHITECTURE B3 Critical → Low, with the caveat that the in-Safe-Mode run itself was NOT reboot-tested (skipped by choice) so it rests on the standard SafeBoot mechanism. Prior: B1 LIVE-VERIFIED 47/47 → Medium. Always rebuild `dist\` before smoke-testing — see §8).
 
 ---
 
@@ -329,7 +329,7 @@ bypasses the manifest's UAC prompt:
   via `tools\build-dist.ps1`; second run 47/47. Lesson recorded in §8. No repo
   code changed this session (suite untouched at 123/123); docs only.
 
-- 🔶 **B3 Safe Mode resistance — implemented (2026-06-13, NOT live-verified yet)** —
+- ✅ **B3 Safe Mode resistance — registration LIVE-VERIFIED (2026-06-13 night, smoke test 52/52)** —
   the next Phase 3 slice (closes the "boot into Safe Mode and tamper unopposed"
   bypass). Verifier-confirmed SHIP; purely additive; service-owned (no CLI
   change). **What it does:** the service registers `MONKMODE` under BOTH
@@ -358,12 +358,20 @@ bypasses the manifest's UAC prompt:
      self-heal drill (delete both keys → service re-asserts ≤15s); +1 both keys
      removed after expiry. Teardown AND `cleanup.ps1` now also delete the keys
      (failure-path rescue). `dist\` rebuilt with the B3 binaries.
-  ⚠️ **Two-part live gate before B3 flips to mitigated/Low** (neither done): (a)
-  run the 52-check smoke test elevated (proves keys written/re-asserted/removed);
-  (b) a one-time **MANUAL Safe Mode reboot** — start a block, reboot into Safe
-  Mode, confirm `sc query MONKMODE` = RUNNING and hosts still blocks, reboot back.
-  (b) is the one thing a normal-mode test cannot prove; until both pass, B3 stays
-  Critical in ARCHITECTURE.
+  ✅ **Live-verified 13/06/2026 night — smoke test 52/52** (Samrath ran it elevated;
+  log `C:\Users\samra\monkmode-smoketest\smoketest.log`): both SafeBoot keys
+  present at block start (tag `Service`), section-2d self-heal drill (both keys
+  deleted → service re-asserted them in 9.1s), both removed after expiry, clean
+  teardown — the registration lifecycle (write/self-heal/remove) is proven live.
+  **The second half of the original gate — a manual Safe Mode reboot to confirm
+  the service actually *runs* in Safe Mode — was deliberately SKIPPED (Samrath's
+  call).** So B3's final hop rests on the standard, documented Windows SafeBoot
+  mechanism (a correctly-registered auto-start service is started in Safe Mode),
+  not an empirical reboot. **ARCHITECTURE B3 → Low** with that caveat stated.
+  Optional future belt-and-braces: do the reboot check (start a block → reboot
+  into Safe Mode w/ Networking → `sc query MONKMODE` = RUNNING + example.com →
+  127.0.0.1 → `bcdedit /deletevalue {current} safeboot` → reboot → cleanup.ps1)
+  to close that last gap.
 
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
@@ -422,11 +430,12 @@ bypasses the manifest's UAC prompt:
      ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
      and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
    - ~~`SafeBoot` service registration so it runs in Safe Mode (B3).~~
-     🔶 Implemented in software 13/06/2026 (service self-registers under the
-     SafeBoot Minimal+Network keys, self-healed each tick, removed at expiry;
-     136/136, verifier-SHIP). **Live gate pending: run the 52-check smoke test
-     elevated, then a one-time MANUAL Safe Mode reboot** to confirm it actually
-     runs there — only then does ARCHITECTURE B3 flip Critical → Low.
+     ✅ Done 13/06/2026 — service self-registers under the SafeBoot Minimal+Network
+     keys (self-healed each tick, removed at expiry; 136/136, verifier-SHIP).
+     **Registration live-verified — smoke test 52/52; ARCHITECTURE B3 → Low.**
+     Caveat: the in-Safe-Mode run itself was NOT reboot-tested (skipped by
+     choice) — it rests on the standard SafeBoot mechanism. Optional: a manual
+     Safe Mode reboot would close that last gap.
    - Monotonic/authenticated time instead of trusting `DateTime.Now` (B4; the
      notifier's clock-change compensation is only a partial mitigation).
    - WFP/firewall-layer enforcement so DNS/DoH/VPN can't trivially bypass hosts (B5).

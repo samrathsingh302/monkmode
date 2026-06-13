@@ -57,15 +57,20 @@ service on a 10-second loop.
   loop, with the guardian also relaunching the notifier if it's killed. Every
   restart decision goes through a pure, unit-tested, fail-closed gate: nothing
   is ever resurrected after a block genuinely expires.
+- **Safe Mode resistance.** The service registers itself under the Windows
+  SafeBoot keys (Minimal *and* Network) — the standard mechanism by which a
+  service runs in Safe Mode — so rebooting into Safe Mode no longer leaves
+  enforcement off. It re-asserts those keys every 10 s if they're deleted and
+  removes them when the block ends; only its own keys are ever touched.
 - **Clock-change compensation.** The notifier detects system clock changes and
   rewrites the end time so rolling the clock forward doesn't end the block.
 - **Honest threat model.** [ARCHITECTURE.md](ARCHITECTURE.md) catalogues the
   full bypass surface (B1–B11), ranked by effort. While the user keeps admin
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to
-  document the rest honestly rather than claim "unbreakable". Closing the gaps
-  (Safe Mode, firewall-layer enforcement, signed config, clock hardening) is
-  the Phase 3 backlog.
+  document the rest honestly rather than claim "unbreakable". Closing the
+  remaining gaps (firewall-layer enforcement, signed config, clock hardening)
+  is the Phase 3 backlog.
 
 ## Engineering notes
 
