@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 late night (**B7, B4 and B6 are now code-complete + unit-tested (suite 240/240) but NOT YET LIVE-VERIFIED** — see the dedicated entry below; `dist\` is STALE (built 03:47, before B4/B7) so none of the three has been smoke-tested. B7/B4 are committed (`1794bde`, `a32a0cd`); B6 is the working tree (uncommitted). Prior verified state: **B3 registration LIVE-VERIFIED — smoke test 52/52** (ARCHITECTURE B3 Critical → Low, in-Safe-Mode run not reboot-tested); B1 LIVE-VERIFIED 47/47 → Medium. Always rebuild `dist\` before smoke-testing — see §8.)
+Last updated: 2026-06-13 late night (**B7, B4 and B6 are code-complete + unit-tested (suite 240/240), committed + pushed, but NOT YET LIVE-VERIFIED** — the elevated smoke test still needs running, and Samrath was away from the laptop so it could NOT be run this session, see the entry below. `dist\` was REBUILT this session (B4+B7+B6 across all four components — verified via the IL-bearing `.dll`s) and the smoke test was EXTENDED 52 → **61 checks** for B4/B6/B7 (authored + parses clean under PS 5.1, NOT run — Samrath must run it elevated when back). All three slices are committed + pushed (`097eaaa` B6, `20a6b75` docs, on top of `1794bde` B7 / `a32a0cd` B4). Prior verified state: **B3 registration LIVE-VERIFIED — smoke test 52/52** (ARCHITECTURE B3 Critical → Low, in-Safe-Mode run not reboot-tested); B1 LIVE-VERIFIED 47/47 → Medium. Always rebuild `dist\` before smoke-testing — see §8.)
 
 > **⚠️ DOC-DRIFT NOTE (2026-06-13 late night):** the B4 (`a32a0cd`) and B7 (`1794bde`) commits shipped code + tests but touched NO docs, so the ARCHITECTURE B4/B6/B7 rows still show their *original* (pre-mitigation) severities. Those severities are intentionally NOT yet lowered — the gate is a live elevated smoke test, which has not run for any of B4/B7/B6. See the consolidated entry at the top of §5.
 
@@ -153,11 +153,30 @@ bypasses the manifest's UAC prompt:
      SD and never WD/WO), the four pure functions' truth tables, the round-trip
      brick-safety proof `Remove(Add(x))==x`, and CLI↔service parity. 210 → **240
      green**.
-  **Gate before any severity drop:** rebuild `dist\` (`tools\build-dist.ps1`),
-  run the elevated smoke test, and EXTEND it for B6 (a `sc delete MONKMODE`
-  during an active block is refused; `unblock --force` tears everything down and
-  leaves a removable machine; expiry leaves the service removable). B6 is also
-  not yet committed.
+  **Gate before any severity drop — the elevated smoke test (NOT yet run).**
+  Prepared this session so it is a one-double-click run when Samrath is back at
+  an elevated prompt:
+  - `dist\` **rebuilt** with the B4+B7+B6 binaries (the stale 03:47 build that
+    caused the earlier 31/16 false-fail is gone).
+  - Smoke test **extended 52 → 61 checks** (`run-smoketest.ps1`, parses clean
+    PS 5.1, authored-not-run): B7/B4 wiring-present checks (`[Integrity] Mac`+
+    `Key`, `[Time] HighWater` in the ini); **B6 section 2e** — `sc delete
+    MONKMODE` refused mid-block + service survives + deny-DELETE self-heal after
+    the ACE is stripped (≤15s); **B6 at expiry** — ACE removed (service
+    removable). Plus an OPTIONAL `-IncludeClockTest` B4 drill (moves the system
+    clock past `Until`, asserts no lift, restores the clock; OFF by default,
+    +2 checks → 63). **Teardown + `cleanup.ps1` made B6-safe** — they now strip
+    the deny-DELETE ACE before `sc delete`, else the new ACE would refuse the
+    teardown's own delete and orphan an undeletable service.
+  - **NOT covered live (by design, documented in the script header):** B7's
+    fail-closed-expiry (corrupting the MAC is one-way and would hang the
+    auto-lift run — prove it in a dedicated short run + `unblock --force`); the
+    in-Safe-Mode B3 reboot. Both rest on the unit suite + a manual one-off.
+  - ⚠️ **Could NOT be run this session** — the agent shell is non-elevated and
+    Samrath was away; running an unattended elevated test that installs a
+    `CanStop=False` + now sc-delete-resistant (B6) service on the live machine
+    with nobody present is a §4-class risk. Run it elevated when back; if it
+    hangs, `cleanup.ps1` (now B6-safe) is the rescue.
 
 **Done (committed + pushed on `monkmode`):**
 - Phase 0 — `ARCHITECTURE.md`: component map + ranked bypass surface **B1–B11**.
