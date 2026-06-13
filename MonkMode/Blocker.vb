@@ -36,6 +36,19 @@ Module Blocker
     Public Const NotifierExeName As String = "mm_notify.exe"
     Public Const RunValueName As String = "MonkMode_notify"
 
+    ' Process names (no .exe) for the watchdog pair + notifier the escape hatch
+    ' must kill, and the guardian exe name. Kept here as the CLI's single source
+    ' of truth.
+    Public Const ServiceProcessName As String = "MonkMode_srv"
+    Public Const GuardProcessName As String = "mm_guard"
+    Public Const NotifierProcessName As String = "mm_notify"
+
+    ' B3 SafeBoot leaf keys the escape hatch removes (relative to HKLM). Mirror of
+    ' the service's Service1.SafeBootMinimalKey/SafeBootNetworkKey - a parity test
+    ' pins them equal so this CLI copy can't drift from what the service writes.
+    Public Const SafeBootMinimalKey As String = "SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\MONKMODE"
+    Public Const SafeBootNetworkKey As String = "SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MONKMODE"
+
     ' B7 tamper-evident config: the [Integrity] section holds the DPAPI-protected
     ' HMAC key and the MAC over the canonical of the decrypted config values.
     ' Both are EXCLUDED from the canonical (you can't MAC the MAC).
@@ -361,6 +374,89 @@ Module Blocker
             If key Is Nothing Then Return
             ini.SetKeyValue(IntegritySection, IntegrityMacName, ConfigIntegrity.ComputeConfigMac(CanonicalFromIni(ini), key))
         Catch ex As Exception
+        End Try
+    End Sub
+
+    ' ---- B6 escape hatch primitives (the guaranteed-removal path) ----
+    ' These are the brick-insurance teardown steps the `unblock --force` verb
+    ' sequences (Program.DoUnblock). Each is best-effort and independent so the
+    ' verb can run them in the correct order and continue past any one failure.
+    ' They mirror the live-verified cleanup.ps1 emergency teardown exactly.
+
+    ' Kill the watchdog pair (guardian + service) in a retry loop until both stay
+    ' down, then the notifier. The caller MUST have disabled SCM recovery first
+    ' (ServiceTools.DisableRecovery) or the SCM would resurrect the service
+    ' between kills. Returns True if both watchdog processes are gone. Best
+    ' effort: a kill that races a restart is retried up to `attempts` times.
+    Public Function KillWatchdogProcesses(Optional ByVal attempts As Integer = 8) As Boolean
+        Dim bothDown As Boolean = False
+        For i As Integer = 1 To attempts
+            For Each name As String In New String() {GuardProcessName, ServiceProcessName}
+                For Each p As Process In Process.GetProcessesByName(name)
+                    Try
+                        p.Kill()
+                    Catch
+                    End Try
+                Next
+            Next
+            If Process.GetProcessesByName(GuardProcessName).Length = 0 AndAlso
+               Process.GetProcessesByName(ServiceProcessName).Length = 0 Then
+                bothDown = True
+                Exit For
+            End If
+            Threading.Thread.Sleep(500)
+        Next
+        ' The notifier is harmless once the block is gone, but kill it too so the
+        ' teardown leaves nothing behind.
+        For Each p As Process In Process.GetProcessesByName(NotifierProcessName)
+            Try
+                p.Kill()
+            Catch
+            End Try
+        Next
+        Return bothDown
+    End Function
+
+    ' Unlock hosts and strip ONLY the MonkMode marker block, preserving the
+    ' user's own content (reuses StripOurBlock - the same data-loss-safe strip
+    ' the service's expiry path uses). No-op if hosts has no MonkMode block.
+    Public Sub RestoreHostsFromStrip()
+        Dim path As String = HostsPath()
+        If Not File.Exists(path) Then Return
+        ClearReadOnly(path)
+        Dim text As String = File.ReadAllText(path)
+        If text.IndexOf(Marker, StringComparison.Ordinal) < 0 Then Return
+        File.WriteAllText(path, StripOurBlock(text))
+    End Sub
+
+    ' Remove the B2 hosts snapshot so a reinstalled service can't self-heal the
+    ' old block back in. Best-effort.
+    Public Sub DeleteSnapshot()
+        Try
+            File.Delete(SnapshotPath())
+        Catch
+        End Try
+    End Sub
+
+    ' Remove the B3 SafeBoot leaf keys so no orphaned Safe Mode registration
+    ' lingers for a service that is being deleted. Only MonkMode's own two leaf
+    ' keys are touched (no-data-loss fence). Best-effort, per-key.
+    Public Sub RemoveSafeBootKeys()
+        For Each subKey As String In New String() {SafeBootMinimalKey, SafeBootNetworkKey}
+            Try
+                Registry.LocalMachine.DeleteSubKeyTree(subKey, False)
+            Catch
+            End Try
+        Next
+    End Sub
+
+    ' Clear the HKCU Run autorun for the notifier. Best-effort.
+    Public Sub ClearNotifierAutorun()
+        Try
+            Using rk As RegistryKey = Registry.CurrentUser.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Run", True)
+                If rk IsNot Nothing Then rk.DeleteValue(RunValueName, False)
+            End Using
+        Catch
         End Try
     End Sub
 

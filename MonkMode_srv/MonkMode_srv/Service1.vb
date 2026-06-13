@@ -202,6 +202,16 @@ Public Class Service1
         ' above, which Ends the process before here (and removes any stale keys).
         AssertSafeBootRegistration()
 
+        ' B6: deny DELETE on the service object so `sc delete MONKMODE` is refused
+        ' while the block is active. Same active-path-only placement as the
+        ' SafeBoot registration (an expired/invalid block stopMe()s above). The
+        ' per-tick re-assert below undoes any casual re-ACL; stopMe() removes the
+        ' deny at genuine expiry. Best-effort - a failure must not abort OnStart.
+        Try
+            AssertDenyDeleteAce()
+        Catch ex As Exception
+        End Try
+
     End Sub
 
     ' Rewrite a safe default 7-day block (the inherited panic behaviour), used by
@@ -387,6 +397,21 @@ Public Class Service1
         Try
             If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
                 AssertSafeBootRegistration()
+            End If
+        Catch ex As Exception
+        End Try
+
+        ' B6 deny-DELETE self-heal: re-assert the service-object deny-DELETE ACE
+        ' every tick while the block is active (an admin with WRITE_DAC can clear
+        ' it between ticks, as a casual `sc sdset`/Process-Explorer re-ACL). Fail
+        ' CLOSED via Not EffectiveBlockHasExpired - an unparseable Until OR an
+        ' invalid B7 MAC keeps the deny on; stopMe() removes it at genuine expiry.
+        ' B4: asOf is newHwAsOf (trusted high-water mark), not DateTime.Now, so a
+        ' clock-forward can't drop the deny early. Read-only probe inside makes an
+        ' intact DACL a no-op (no churn). Best-effort - never crash the tick.
+        Try
+            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
+                AssertDenyDeleteAce()
             End If
         Catch ex As Exception
         End Try
@@ -757,6 +782,152 @@ Public Class Service1
         End Try
     End Sub
 
+    ' ===== B6: deny-DELETE on the service object (sc-delete resistance) =====
+    '
+    ' The service is the SOLE per-tick re-asserter of the deny-DELETE ACE (the
+    ' CLI's escape hatch is the only remover besides stopMe()). BRICK-SAFE by
+    ' construction (see ServiceSecurity.vb): we deny the DELETE right (SD) only,
+    ' to Built-in Administrators (BA). The service runs as LocalSystem (SY, not a
+    ' BA member) so the deny does not even apply to it, and it opens the service
+    ' with READ_CONTROL | WRITE_DAC (we NEVER deny WRITE_DAC) - so this re-assert
+    ' and the stopMe() re-grant can ALWAYS rewrite the DACL. There is no path
+    ' here that leaves the service un-removable.
+
+    Private Const SC_MANAGER_ALL_ACCESS As UInteger = &H3FUI
+    Private Const READ_CONTROL As UInteger = &H20000UI
+    Private Const WRITE_DAC As UInteger = &H40000UI
+    Private Const DACL_SECURITY_INFORMATION As UInteger = &H4UI
+    Private Const SDDL_REVISION_1 As UInteger = 1UI
+
+    <DllImport("advapi32.dll", EntryPoint:="OpenSCManagerW", CharSet:=CharSet.Unicode, SetLastError:=True)>
+    Private Shared Function OpenSCManager(ByVal machineName As String, ByVal databaseName As String, ByVal dwAccess As UInteger) As IntPtr
+    End Function
+
+    <DllImport("advapi32.dll", EntryPoint:="OpenServiceW", CharSet:=CharSet.Unicode, SetLastError:=True)>
+    Private Shared Function OpenService(ByVal hSCManager As IntPtr, ByVal serviceName As String, ByVal dwDesiredAccess As UInteger) As IntPtr
+    End Function
+
+    <DllImport("advapi32.dll", SetLastError:=True)>
+    Private Shared Function CloseServiceHandle(ByVal hSCObject As IntPtr) As Boolean
+    End Function
+
+    <DllImport("advapi32.dll", SetLastError:=True)>
+    Private Shared Function QueryServiceObjectSecurity(ByVal hService As IntPtr, ByVal dwSecurityInformation As UInteger,
+        ByVal lpSecurityDescriptor As IntPtr, ByVal cbBufSize As UInteger, ByRef pcbBytesNeeded As UInteger) As Boolean
+    End Function
+
+    <DllImport("advapi32.dll", SetLastError:=True)>
+    Private Shared Function SetServiceObjectSecurity(ByVal hService As IntPtr, ByVal dwSecurityInformation As UInteger,
+        ByVal lpSecurityDescriptor As IntPtr) As Boolean
+    End Function
+
+    <DllImport("advapi32.dll", EntryPoint:="ConvertSecurityDescriptorToStringSecurityDescriptorW", CharSet:=CharSet.Unicode, SetLastError:=True)>
+    Private Shared Function ConvertSecurityDescriptorToStringSecurityDescriptor(ByVal SecurityDescriptor As IntPtr,
+        ByVal RequestedStringSDRevision As UInteger, ByVal SecurityInformation As UInteger,
+        ByRef StringSecurityDescriptor As IntPtr, ByRef StringSecurityDescriptorLen As UInteger) As Boolean
+    End Function
+
+    <DllImport("advapi32.dll", EntryPoint:="ConvertStringSecurityDescriptorToSecurityDescriptorW", CharSet:=CharSet.Unicode, SetLastError:=True)>
+    Private Shared Function ConvertStringSecurityDescriptorToSecurityDescriptor(ByVal StringSecurityDescriptor As String,
+        ByVal StringSDRevision As UInteger, ByRef SecurityDescriptor As IntPtr, ByRef SecurityDescriptorSize As UInteger) As Boolean
+    End Function
+
+    <DllImport("kernel32.dll", SetLastError:=True)>
+    Private Shared Function LocalFree(ByVal hMem As IntPtr) As IntPtr
+    End Function
+
+    ' Read the service's DACL as an SDDL string, or Nothing on any failure.
+    ' Two-phase QueryServiceObjectSecurity (size probe, then fetch).
+    Private Shared Function ReadServiceDaclSddl(ByVal svc As IntPtr) As String
+        Dim needed As UInteger = 0UI
+        QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, IntPtr.Zero, 0UI, needed)
+        If needed = 0UI Then Return Nothing
+        Dim sdBuf As IntPtr = Marshal.AllocHGlobal(CInt(needed))
+        Try
+            Dim got As UInteger = 0UI
+            If Not QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sdBuf, needed, got) Then
+                Return Nothing
+            End If
+            Dim strSd As IntPtr = IntPtr.Zero
+            Dim strLen As UInteger = 0UI
+            If Not ConvertSecurityDescriptorToStringSecurityDescriptor(sdBuf, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, strSd, strLen) Then
+                Return Nothing
+            End If
+            Try
+                Return Marshal.PtrToStringUni(strSd)
+            Finally
+                If strSd <> IntPtr.Zero Then LocalFree(strSd)
+            End Try
+        Finally
+            Marshal.FreeHGlobal(sdBuf)
+        End Try
+    End Function
+
+    ' Convert an SDDL string back to a binary SD and write it as the service's
+    ' DACL. Returns True on success.
+    Private Shared Function WriteServiceDaclSddl(ByVal svc As IntPtr, ByVal sddl As String) As Boolean
+        If String.IsNullOrEmpty(sddl) Then Return False
+        Dim sd As IntPtr = IntPtr.Zero
+        Dim sdSize As UInteger = 0UI
+        If Not ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, SDDL_REVISION_1, sd, sdSize) Then
+            Return False
+        End If
+        Try
+            Return SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd)
+        Finally
+            If sd <> IntPtr.Zero Then LocalFree(sd)
+        End Try
+    End Function
+
+    ' B6 re-assert: ensure the MONKMODE service object carries the deny-DELETE
+    ' ACE, so `sc delete MONKMODE` is refused while a block is active. Read-only
+    ' probe FIRST so an already-denied DACL is a true no-op (no churn, like the
+    ' B3 SafeBoot probe). Best-effort throughout - a registry/SCM hiccup must
+    ' never crash the enforcement tick; the caller wraps this in Try too.
+    Private Sub AssertDenyDeleteAce()
+        Dim scm As IntPtr = IntPtr.Zero
+        Dim svc As IntPtr = IntPtr.Zero
+        Try
+            scm = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then Return
+            svc = OpenService(scm, "MONKMODE", READ_CONTROL Or WRITE_DAC)
+            If svc = IntPtr.Zero Then Return
+            Dim sddl As String = ReadServiceDaclSddl(svc)
+            If sddl Is Nothing Then Return
+            If ServiceSecurity.SddlHasDenyDelete(sddl) Then Return
+            Dim updated As String = ServiceSecurity.AddDenyDeleteAce(sddl)
+            If updated <> sddl Then WriteServiceDaclSddl(svc, updated)
+        Catch ex As Exception
+        Finally
+            If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+            If scm <> IntPtr.Zero Then CloseServiceHandle(scm)
+        End Try
+    End Sub
+
+    ' B6 re-grant (the non-negotiable teardown step): remove the deny-DELETE ACE
+    ' so a genuinely expired block leaves a fully REMOVABLE service. The exact
+    ' inverse of AssertDenyDeleteAce. stopMe() calls this AFTER killing the
+    ' guardian and BEFORE Me.Stop()/End, so no live guardian/tick can re-deny in
+    ' the gap. Best-effort; a no-op if the ACE is absent.
+    Private Sub RestoreDefaultServiceSd()
+        Dim scm As IntPtr = IntPtr.Zero
+        Dim svc As IntPtr = IntPtr.Zero
+        Try
+            scm = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then Return
+            svc = OpenService(scm, "MONKMODE", READ_CONTROL Or WRITE_DAC)
+            If svc = IntPtr.Zero Then Return
+            Dim sddl As String = ReadServiceDaclSddl(svc)
+            If sddl Is Nothing Then Return
+            Dim updated As String = ServiceSecurity.RemoveDenyDeleteAce(sddl)
+            If updated <> sddl Then WriteServiceDaclSddl(svc, updated)
+        Catch ex As Exception
+        Finally
+            If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+            If scm <> IntPtr.Zero Then CloseServiceHandle(scm)
+        End Try
+    End Sub
+
     Private Sub stopMe()
 
         Dim fileReader As String = ""
@@ -812,6 +983,20 @@ Public Class Service1
                 Catch ex As Exception
                 End Try
             Next
+        Catch ex As Exception
+        End Try
+
+        ' B6 re-grant - THE non-negotiable teardown step: remove the deny-DELETE
+        ' ACE so a genuinely expired block leaves a fully REMOVABLE service.
+        ' ORDERING IS LOAD-BEARING: this runs AFTER the guardian kill above and
+        ' BEFORE Me.Stop()/End below, so no live guardian (or another tick of
+        ' this service) can re-assert the deny in the gap between removing it and
+        ' the process exiting. Best-effort; if it somehow fails, the service is
+        ' still removable via `monkmode unblock --force` (which restores the SD
+        ' itself). Without this, an expired block would leave a service that
+        ' resists sc-delete until the next install rewrote the DACL.
+        Try
+            RestoreDefaultServiceSd()
         Catch ex As Exception
         End Try
 

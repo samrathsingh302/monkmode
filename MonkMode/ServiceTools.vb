@@ -33,6 +33,20 @@ Namespace Global.ServiceTools
         Private Const SERVICE_ALL_ACCESS As UInteger = &HF01FF
         Private Const SERVICE_QUERY_STATUS As UInteger = &H4
 
+        ' --- Standard rights for the B6 security ops ---
+        ' READ_CONTROL | WRITE_DAC is the MINIMAL handle B6 needs to read and
+        ' rewrite the service's DACL (QueryServiceObjectSecurity /
+        ' SetServiceObjectSecurity). DELETE is needed only by the escape hatch's
+        ' DeleteService. Crucially we never need (and never request) anything
+        ' that would let a denied-DELETE service resist its OWN restore: WRITE_DAC
+        ' is NOT in the deny ACE, so this handle always succeeds.
+        Private Const READ_CONTROL As UInteger = &H20000UI
+        Private Const WRITE_DAC As UInteger = &H40000UI
+        Private Const [DELETE] As UInteger = &H10000UI
+        ' SECURITY_INFORMATION: we read/write the DACL only - never the owner,
+        ' group or SACL, so the rest of the descriptor is left exactly as-is.
+        Private Const DACL_SECURITY_INFORMATION As UInteger = &H4UI
+
         ' --- Service type / start type / error control ---
         Private Const SERVICE_WIN32_OWN_PROCESS As UInteger = &H10
         Private Const SERVICE_AUTO_START As UInteger = &H2
@@ -81,6 +95,48 @@ Namespace Global.ServiceTools
 
         <DllImport("advapi32.dll", EntryPoint:="ChangeServiceConfig2W", CharSet:=CharSet.Unicode, SetLastError:=True)> _
         Private Shared Function ChangeServiceConfig2(ByVal hService As IntPtr, ByVal dwInfoLevel As Integer, ByVal lpInfo As IntPtr) As Boolean
+        End Function
+
+        ' --- B6 service-object security (DACL read/write) ---
+        ' QueryServiceObjectSecurity copies the requested SECURITY_INFORMATION of
+        ' the service's security descriptor into a self-relative buffer;
+        ' SetServiceObjectSecurity writes it back. We read the DACL, convert it to
+        ' SDDL, surgically add/remove the deny-DELETE ACE (ServiceSecurity, the
+        ' pure unit-tested layer), convert back, and write it - mirroring the
+        ' best-effort SetRecoveryOptions pattern.
+        <DllImport("advapi32.dll", SetLastError:=True)> _
+        Private Shared Function QueryServiceObjectSecurity(ByVal hService As IntPtr, ByVal dwSecurityInformation As UInteger, _
+            ByVal lpSecurityDescriptor As IntPtr, ByVal cbBufSize As UInteger, ByRef pcbBytesNeeded As UInteger) As Boolean
+        End Function
+
+        <DllImport("advapi32.dll", SetLastError:=True)> _
+        Private Shared Function SetServiceObjectSecurity(ByVal hService As IntPtr, ByVal dwSecurityInformation As UInteger, _
+            ByVal lpSecurityDescriptor As IntPtr) As Boolean
+        End Function
+
+        ' SDDL <-> binary security-descriptor conversion (sddlapi, exported from
+        ' advapi32). SDDL revision 1. The "...ToString..." call allocates the
+        ' string with LocalAlloc; we copy it out and LocalFree it.
+        <DllImport("advapi32.dll", EntryPoint:="ConvertSecurityDescriptorToStringSecurityDescriptorW", CharSet:=CharSet.Unicode, SetLastError:=True)> _
+        Private Shared Function ConvertSecurityDescriptorToStringSecurityDescriptor(ByVal SecurityDescriptor As IntPtr, _
+            ByVal RequestedStringSDRevision As UInteger, ByVal SecurityInformation As UInteger, _
+            ByRef StringSecurityDescriptor As IntPtr, ByRef StringSecurityDescriptorLen As UInteger) As Boolean
+        End Function
+
+        <DllImport("advapi32.dll", EntryPoint:="ConvertStringSecurityDescriptorToSecurityDescriptorW", CharSet:=CharSet.Unicode, SetLastError:=True)> _
+        Private Shared Function ConvertStringSecurityDescriptorToSecurityDescriptor(ByVal StringSecurityDescriptor As String, _
+            ByVal StringSDRevision As UInteger, ByRef SecurityDescriptor As IntPtr, ByRef SecurityDescriptorSize As UInteger) As Boolean
+        End Function
+
+        <DllImport("kernel32.dll", SetLastError:=True)> _
+        Private Shared Function LocalFree(ByVal hMem As IntPtr) As IntPtr
+        End Function
+
+        ' SDDL revision constant (the only one defined).
+        Private Const SDDL_REVISION_1 As UInteger = 1UI
+
+        <DllImport("advapi32.dll", SetLastError:=True)> _
+        Private Shared Function DeleteService(ByVal hService As IntPtr) As Boolean
         End Function
 
         <StructLayout(LayoutKind.Sequential)> _
@@ -217,6 +273,199 @@ Namespace Global.ServiceTools
                 End Try
             Finally
                 If actionsPtr <> IntPtr.Zero Then Marshal.FreeHGlobal(actionsPtr)
+                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+                CloseServiceHandle(scm)
+            End Try
+        End Sub
+
+        ' ===== B6: deny-DELETE on the service object (sc-delete resistance) =====
+        '
+        ' BRICK-SAFE by construction (see ServiceSecurity.vb's header): we add a
+        ' single deny ACE for the DELETE right (SD) only, targeting Built-in
+        ' Administrators (BA). We open the service with READ_CONTROL | WRITE_DAC
+        ' to rewrite the DACL; we NEVER deny WRITE_DAC, so this open always
+        ' succeeds and BOTH the LocalSystem service (SY) and the elevated admin
+        ' CLI (BA, still holding WRITE_DAC) can always restore the DACL. There is
+        ' no path here that can make the service un-removable: the per-tick
+        ' re-assert undoes a casual re-ACL, stopMe() removes the ACE at genuine
+        ' expiry, and the `unblock --force` escape hatch removes it unconditionally.
+
+        ' Read the service's DACL as an SDDL string, or Nothing on any failure.
+        ' Two-phase QueryServiceObjectSecurity (size probe, then fetch).
+        Private Shared Function ReadServiceDaclSddl(ByVal svc As IntPtr) As String
+            Dim needed As UInteger = 0UI
+            ' First call sizes the buffer (it fails with ERROR_INSUFFICIENT_BUFFER
+            ' and sets `needed`).
+            QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, IntPtr.Zero, 0UI, needed)
+            If needed = 0UI Then Return Nothing
+
+            Dim sdBuf As IntPtr = Marshal.AllocHGlobal(CInt(needed))
+            Try
+                Dim got As UInteger = 0UI
+                If Not QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sdBuf, needed, got) Then
+                    Return Nothing
+                End If
+                Dim strSd As IntPtr = IntPtr.Zero
+                Dim strLen As UInteger = 0UI
+                If Not ConvertSecurityDescriptorToStringSecurityDescriptor(sdBuf, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, strSd, strLen) Then
+                    Return Nothing
+                End If
+                Try
+                    Return Marshal.PtrToStringUni(strSd)
+                Finally
+                    If strSd <> IntPtr.Zero Then LocalFree(strSd)
+                End Try
+            Finally
+                Marshal.FreeHGlobal(sdBuf)
+            End Try
+        End Function
+
+        ' Convert an SDDL string back to a binary SD and write it as the service's
+        ' DACL. Returns True on success.
+        Private Shared Function WriteServiceDaclSddl(ByVal svc As IntPtr, ByVal sddl As String) As Boolean
+            If String.IsNullOrEmpty(sddl) Then Return False
+            Dim sd As IntPtr = IntPtr.Zero
+            Dim sdSize As UInteger = 0UI
+            If Not ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, SDDL_REVISION_1, sd, sdSize) Then
+                Return False
+            End If
+            Try
+                Return SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd)
+            Finally
+                ' ConvertString...ToSecurityDescriptor allocates the SD with
+                ' LocalAlloc; free it with LocalFree.
+                If sd <> IntPtr.Zero Then LocalFree(sd)
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' B6: add the deny-DELETE-for-Administrators ACE to the MONKMODE service
+        ''' object so `sc delete MONKMODE` (OpenService DELETE + DeleteService) is
+        ''' refused while a block is active. Best-effort and idempotent: if the
+        ''' DACL already carries the ACE this is a true no-op (no churn). NEVER
+        ''' bricks the service - it denies DELETE only, and opens with WRITE_DAC
+        ''' which is never denied, so the owner can always restore. Friend: it
+        ''' mutates the live service SD, so only the service-side caller (and the
+        ''' unit tests, via InternalsVisibleTo) should reach it. Throws on the SCM
+        ''' open failures so the caller's Try/Catch can swallow them.
+        ''' </summary>
+        Friend Shared Sub AssertDenyDelete(ByVal serviceName As String)
+            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then
+                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
+            End If
+            Dim svc As IntPtr = IntPtr.Zero
+            Try
+                svc = OpenService(scm, serviceName, READ_CONTROL Or WRITE_DAC)
+                If svc = IntPtr.Zero Then
+                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to set its DACL.")
+                End If
+                Dim sddl As String = ReadServiceDaclSddl(svc)
+                If sddl Is Nothing Then Return
+                ' Read-only probe first: an intact DACL (already denying DELETE) is
+                ' a no-op, so we never rewrite the SD needlessly (mirrors the B3
+                ' SafeBoot probe and RepairHostsBlock returning Nothing).
+                If MonkMode.ServiceSecurity.SddlHasDenyDelete(sddl) Then Return
+                Dim updated As String = MonkMode.ServiceSecurity.AddDenyDeleteAce(sddl)
+                If updated <> sddl Then
+                    WriteServiceDaclSddl(svc, updated)
+                End If
+            Finally
+                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+                CloseServiceHandle(scm)
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' B6: restore the default service SD by removing the deny-DELETE ACE, so
+        ''' an expired block (or the escape hatch) leaves a fully removable
+        ''' service. The exact inverse of AssertDenyDelete. Best-effort; a no-op if
+        ''' the ACE is absent. THIS is the non-negotiable re-grant: stopMe() calls
+        ''' it at genuine expiry (after killing the guardian, before stopping) so
+        ''' no live guardian can re-deny in the gap. Throws on SCM open failures
+        ''' for the caller to swallow.
+        ''' </summary>
+        Friend Shared Sub RestoreDefaultServiceSd(ByVal serviceName As String)
+            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then
+                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
+            End If
+            Dim svc As IntPtr = IntPtr.Zero
+            Try
+                svc = OpenService(scm, serviceName, READ_CONTROL Or WRITE_DAC)
+                If svc = IntPtr.Zero Then
+                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to restore its DACL.")
+                End If
+                Dim sddl As String = ReadServiceDaclSddl(svc)
+                If sddl Is Nothing Then Return
+                Dim updated As String = MonkMode.ServiceSecurity.RemoveDenyDeleteAce(sddl)
+                If updated <> sddl Then
+                    WriteServiceDaclSddl(svc, updated)
+                End If
+            Finally
+                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+                CloseServiceHandle(scm)
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Disable the SCM auto-restart recovery policy (B1 layer 1) on the named
+        ''' service - the escape hatch's first step, so nothing resurrects the
+        ''' service mid-teardown. Equivalent to `sc failure NAME reset= 0
+        ''' actions= ""`. Best-effort; throws on the SCM open failures only.
+        ''' </summary>
+        Friend Shared Sub DisableRecovery(ByVal serviceName As String)
+            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then
+                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
+            End If
+            Dim svc As IntPtr = IntPtr.Zero
+            Dim faPtr As IntPtr = IntPtr.Zero
+            Try
+                svc = OpenService(scm, serviceName, SERVICE_ALL_ACCESS)
+                If svc = IntPtr.Zero Then
+                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to clear its recovery policy.")
+                End If
+                ' Zero reset period, zero actions (empty list) = no recovery.
+                Dim fa As New SERVICE_FAILURE_ACTIONS
+                fa.dwResetPeriod = 0UI
+                fa.lpRebootMsg = Nothing
+                fa.lpCommand = Nothing
+                fa.cActions = 0UI
+                fa.lpsaActions = IntPtr.Zero
+                faPtr = Marshal.AllocHGlobal(Marshal.SizeOf(GetType(SERVICE_FAILURE_ACTIONS)))
+                Marshal.StructureToPtr(fa, faPtr, False)
+                ChangeServiceConfig2(svc, SERVICE_CONFIG_FAILURE_ACTIONS, faPtr)
+            Finally
+                If faPtr <> IntPtr.Zero Then Marshal.FreeHGlobal(faPtr)
+                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
+                CloseServiceHandle(scm)
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Delete the named service via the SCM (escape-hatch final step). Opens
+        ''' with DELETE and calls DeleteService. The caller MUST already have
+        ''' restored the default SD (RestoreDefaultServiceSd) so the deny-DELETE
+        ''' ACE no longer blocks this open. Best-effort; throws on SCM failures so
+        ''' the escape hatch can report and continue. (Marks the service for
+        ''' deletion; it is removed once the last handle closes / it stops.)
+        ''' </summary>
+        Friend Shared Sub DeleteServiceByName(ByVal serviceName As String)
+            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
+            If scm = IntPtr.Zero Then
+                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
+            End If
+            Dim svc As IntPtr = IntPtr.Zero
+            Try
+                svc = OpenService(scm, serviceName, [DELETE])
+                If svc = IntPtr.Zero Then
+                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to delete it.")
+                End If
+                If Not DeleteService(svc) Then
+                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "DeleteService failed for the MonkMode service.")
+                End If
+            Finally
                 If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
                 CloseServiceHandle(scm)
             End Try

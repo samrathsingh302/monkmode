@@ -5,6 +5,7 @@
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt]
 '      monkmode status
 '      monkmode add    --sites c.com[,d.com]
+'      monkmode unblock --force            (escape hatch — tears down an active block)
 '      monkmode help
 '
 '    A block, once started, cannot be shortened or started anew until the
@@ -32,6 +33,7 @@ Module Program
                 Case "block" : Return DoBlock(args)
                 Case "status" : Return DoStatus()
                 Case "add" : Return DoAdd(args)
+                Case "unblock" : Return DoUnblock(args)
                 Case "help", "-h", "--help", "/?" : PrintUsage() : Return 0
                 Case Else
                     Console.Error.WriteLine("Unknown command: " & verb)
@@ -166,7 +168,79 @@ Module Program
         Return 0
     End Function
 
+    ' B6 escape hatch — the guaranteed-removal / clean-exit path. Once B1/B2/B3/
+    ' B4/B7 are all fail-closed, a tampered or corrupted block never auto-lifts,
+    ' and the service now resists `sc delete`. This verb is the deliberate,
+    ' documented way out (brick-insurance — see ARCHITECTURE B6 / the honest
+    ' ceiling). It is UNCONDITIONAL by design but gated behind an explicit
+    ' --force, so it can never be a casual one-word bypass: you must consciously
+    ' ask to tear an active block down. Every step is best-effort and ordered so
+    ' nothing resurrects the service mid-teardown; failures are reported, not
+    ' fatal. Mirrors the live-verified cleanup.ps1 emergency teardown.
+    Private Function DoUnblock(ByVal args As String()) As Integer
+        Dim forced As Boolean = HasFlag(args, "--force")
+        If Not forced Then
+            Console.Error.WriteLine("'unblock' tears down an active block and removes the MonkMode service.")
+            Console.Error.WriteLine("This is the deliberate escape hatch — it is NOT undone automatically.")
+            Console.Error.WriteLine("If you really mean it, run:  monkmode unblock --force")
+            Return 1
+        End If
+
+        Console.WriteLine("Forcing MonkMode down (escape hatch). This removes the active block.")
+
+        ' 1. Stop the SCM from auto-restarting the service the moment we kill it
+        '    (B1 layer 1), so the kills in step 2 actually stick.
+        Step_("Disabling service recovery policy", Sub() ServiceTools.ServiceInstaller.DisableRecovery(Blocker.ServiceName))
+
+        ' 2. Kill the watchdog pair (guardian first, then service) so neither
+        '    re-asserts the deny-DELETE ACE nor re-enforces hosts, plus the
+        '    notifier. Retries until both stay down (recovery is already off).
+        Step_("Stopping the watchdog pair and notifier", Sub() Blocker.KillWatchdogProcesses())
+
+        ' 3. With nothing alive to re-deny, remove the deny-DELETE ACE so the
+        '    service object can be opened for DELETE (the CLI runs as BA).
+        Step_("Removing the service deny-DELETE protection", Sub() ServiceTools.ServiceInstaller.RestoreDefaultServiceSd(Blocker.ServiceName))
+
+        ' 4. Delete the service registration itself (the `sc delete` we normally
+        '    refuse during a block).
+        Step_("Deleting the MonkMode service", Sub() ServiceTools.ServiceInstaller.DeleteServiceByName(Blocker.ServiceName))
+
+        ' 5. Unlock hosts and strip ONLY the MonkMode marker block (user content
+        '    preserved byte-for-byte — the same data-loss-safe strip the service
+        '    uses at expiry).
+        Step_("Restoring the hosts file", Sub() Blocker.RestoreHostsFromStrip())
+
+        ' 6-8. Remove the B2 snapshot, the B3 SafeBoot leaf keys, and the HKCU
+        '    autorun, so a future install can't self-heal the old block back.
+        Step_("Removing the hosts snapshot", Sub() Blocker.DeleteSnapshot())
+        Step_("Removing the Safe Mode registration", Sub() Blocker.RemoveSafeBootKeys())
+        Step_("Clearing the notifier autorun", Sub() Blocker.ClearNotifierAutorun())
+
+        Console.WriteLine("Done. MonkMode has been removed. If your browser still shows a block, flush DNS / reopen it.")
+        Return 0
+    End Function
+
     ' ---------- helpers ----------
+
+    ' Run one best-effort teardown step: print what it does, swallow + report any
+    ' failure so the escape hatch always continues to the next step.
+    Private Sub Step_(ByVal label As String, ByVal action As Action)
+        Console.Write("  " & label & " ... ")
+        Try
+            action()
+            Console.WriteLine("ok")
+        Catch ex As Exception
+            Console.WriteLine("skipped (" & ex.Message & ")")
+        End Try
+    End Sub
+
+    ' True if a bare flag (e.g. --force) is present anywhere in args.
+    Private Function HasFlag(ByVal args As String(), ByVal name As String) As Boolean
+        For Each a As String In args
+            If String.Equals(a, name, StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
 
     Private Function GetOption(ByVal args As String(), ByVal name As String) As String
         For i As Integer = 0 To args.Length - 1
@@ -224,6 +298,7 @@ Module Program
         Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
+        Console.WriteLine("  monkmode unblock --force   (escape hatch: tears down an active block + removes the service)")
         Console.WriteLine("  monkmode help")
         Console.WriteLine("")
         Console.WriteLine("Notes:")
