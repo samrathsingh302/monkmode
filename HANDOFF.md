@@ -144,6 +144,34 @@ bypasses the manifest's UAC prompt:
      the 3DES-encrypted Until which would hit DecryptData→End — and asserts the
      service does NOT re-stamp + keeps enforcing; exits via `unblock --force`).
      NOT yet committed/live-run as of this note → see the commit + gate below.
+  0b. **🔎 Adversarial audit of B4 + B6 (2026-06-13) — two more findings.** After
+     the B7 P0, two independent verifier audits swept B4 and B6 for the same
+     class of integration fail-open. Both found real issues:
+     - **B6 → P2 FIXED: the `monkmode add` re-stamp was a 4th B7-class
+       fail-open.** `Blocker.AppendAddToHosts` re-stamped the MAC unconditionally;
+       `BlockIsActive` (used by the `add` verb) only checks service-running +
+       parseable Until, NOT the MAC. So: edit Until → past (block freezes,
+       macValid=False), run `monkmode add` → fresh valid MAC minted over the
+       tampered canonical → block lifts next tick. **Fixed**: `AppendAddToHosts`
+       now captures `macValid` (new `Blocker.ConfigMacIsValidForIni`) BEFORE the
+       CustomSites edit and only re-stamps if it was valid (mirrors the other 3
+       gates). All four autonomous/user re-stamp sites are now macValid-gated.
+       Covered live by a new `b7-failclosed-test.ps1` §4b (`add` must not change
+       the corrupted MAC). Suite still 257 (CLI file-I/O path, no unit seam).
+     - **B4 → P1 OPEN: within-ceiling clock-creep.** HighWater is capped per
+       *step* (≤120 s) but NOT bound to real elapsed time (no monotonic clock).
+       Nudging the clock +119 s before each 10 s real tick walks HighWater ~12×
+       faster than honest time → early lift (1 h block in ~5 min; +120 s per
+       `OnStart` restart compounds it). The pure `ClockRollbackTests` can't see it
+       (they step the synthetic clock 10 s/tick = the honest cadence). **NOT yet
+       fixed** — the fix (bound each tick's credit to `Environment.TickCount64`
+       monotonic elapsed, `credited = min(wallDelta, monoElapsed + small slack)`)
+       is timing-sensitive and wants the live B4 clock test to tune the slack, so
+       it should be its own focused slice, not shipped blind. ARCHITECTURE B4 kept
+       at **High** (single-jump + tamper closed; creep open). Verifier also
+       confirmed: B6 sc-delete refusal + brick-safety + escape-hatch ordering are
+       sound (Q1–Q4 accept); the ~10 s inter-tick re-assert window is an accepted
+       residual; B4 single-jump/backward/restart/HighWater-tamper all hold.
   1. **B7 — tamper-evident config (`1794bde`, committed).** HMAC-SHA256 over the
      *decrypted* ini canonical, key = random 32 bytes DPAPI-protected
      (LocalMachine scope so service/guardian/notifier/CLI can all unprotect).

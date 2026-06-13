@@ -347,18 +347,31 @@ Module Blocker
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
+            ' B7 fail-open FIX: capture the MAC validity BEFORE we touch any
+            ' MAC-covered field. Only re-stamp if the config was already valid -
+            ' otherwise `add` would re-bless a TAMPERED config. The attack the
+            ' other re-stamp gates close also reaches here: an attacker edits
+            ' [Time] Until to "now" (the 3DES key is known by design) => macValid
+            ' goes False so the block correctly FREEZES; but `add` only requires
+            ' BlockIsActive (service running + a parseable Until), not a valid MAC,
+            ' so running `monkmode add` would otherwise mint a fresh VALID MAC over
+            ' the tampered canonical and un-freeze the block (it lifts next tick).
+            ' When the MAC is invalid we still sync CustomSites best-effort but
+            ' leave the stale MAC, so the readers keep failing closed. Mirrors the
+            ' service heartbeat/OnStart (ClassifyHeartbeat/ShouldRestampOnStart)
+            ' and notifier gates.
+            Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
             Dim cur As String = ini.GetKeyValue("User", "CustomSites")
             If cur Is Nothing OrElse cur = "null" Then cur = ""
             Dim merged As String = cur & PackList(domains)
             ini.SetKeyValue("User", "CustomSites", If(merged = "", "null", merged))
-            ' B7: this rewrote a MAC-covered field ([User] CustomSites), so the
-            ' existing [Integrity] Mac no longer matches. Re-stamp it over the new
-            ' canonical, reusing the SAME [Integrity] Key (the block is unchanged
-            ' otherwise - never mint a new key here). If the key can't be
-            ' unprotected, leave the (now stale) MAC be: the readers will fail
-            ' closed (keep enforcing) rather than auto-lift, which is the safe
-            ' direction. Best-effort, like the CustomSites sync itself.
-            RestampMacWithExistingKey(ini)
+            If macValid Then
+                ' Re-stamp [Integrity] Mac over the new canonical, reusing the SAME
+                ' [Integrity] Key (the block is unchanged otherwise - never mint a
+                ' new key here). Safe because the MAC was valid before this edit, so
+                ' the only change is our own legitimate CustomSites append.
+                RestampMacWithExistingKey(ini)
+            End If
             ini.Save(IniPath())
         Catch
         End Try
@@ -376,6 +389,21 @@ Module Blocker
         Catch ex As Exception
         End Try
     End Sub
+
+    ' B7: is [Integrity] Mac currently valid over the canonical? DPAPI-unprotect
+    ' [Integrity] Key + FixedTimeEquals. Returns False (never throws) on any
+    ' failure - absent/invalid MAC, unreadable key, foreign-machine blob. Mirrors
+    ' the service/notifier readers; used to refuse re-stamping a tampered config in
+    ' AppendAddToHosts (the B7-class `add` fail-open fix).
+    Private Function ConfigMacIsValidForIni(ByVal ini As IniFile) As Boolean
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(ini.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return False
+            Return ConfigIntegrity.ConfigMacIsValid(CanonicalFromIni(ini), ini.GetKeyValue(IntegritySection, IntegrityMacName), key)
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
 
     ' ---- B6 escape hatch primitives (the guaranteed-removal path) ----
     ' These are the brick-insurance teardown steps the `unblock --force` verb
