@@ -4,7 +4,9 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 night (**B3 registration LIVE-VERIFIED — smoke test 52/52**; ARCHITECTURE B3 Critical → Low, with the caveat that the in-Safe-Mode run itself was NOT reboot-tested (skipped by choice) so it rests on the standard SafeBoot mechanism. Prior: B1 LIVE-VERIFIED 47/47 → Medium. Always rebuild `dist\` before smoke-testing — see §8).
+Last updated: 2026-06-13 late night (**B7, B4 and B6 are now code-complete + unit-tested (suite 240/240) but NOT YET LIVE-VERIFIED** — see the dedicated entry below; `dist\` is STALE (built 03:47, before B4/B7) so none of the three has been smoke-tested. B7/B4 are committed (`1794bde`, `a32a0cd`); B6 is the working tree (uncommitted). Prior verified state: **B3 registration LIVE-VERIFIED — smoke test 52/52** (ARCHITECTURE B3 Critical → Low, in-Safe-Mode run not reboot-tested); B1 LIVE-VERIFIED 47/47 → Medium. Always rebuild `dist\` before smoke-testing — see §8.)
+
+> **⚠️ DOC-DRIFT NOTE (2026-06-13 late night):** the B4 (`a32a0cd`) and B7 (`1794bde`) commits shipped code + tests but touched NO docs, so the ARCHITECTURE B4/B6/B7 rows still show their *original* (pre-mitigation) severities. Those severities are intentionally NOT yet lowered — the gate is a live elevated smoke test, which has not run for any of B4/B7/B6. See the consolidated entry at the top of §5.
 
 ---
 
@@ -106,6 +108,56 @@ bypasses the manifest's UAC prompt:
 ---
 
 ## 5. Status — done vs. not done
+
+- 🟡 **B7 + B4 + B6 — code-complete + unit-tested, NOT live-verified (2026-06-13 late night).**
+  Three hardening slices landed back-to-back; the suite is green at **240/240**
+  but **none has had a live elevated smoke test**, and `dist\` is stale (03:47,
+  predates B4/B7). Severities in ARCHITECTURE are therefore unchanged pending
+  that run.
+  1. **B7 — tamper-evident config (`1794bde`, committed).** HMAC-SHA256 over the
+     *decrypted* ini canonical, key = random 32 bytes DPAPI-protected
+     (LocalMachine scope so service/guardian/notifier/CLI can all unprotect).
+     `ConfigIntegrity` module byte-identical across all four projects
+     (parity-pinned). Fail-CLOSED: `EffectiveBlockHasExpired = macValid AndAlso
+     BlockHasExpired` — an absent/invalid MAC, DPAPI failure or foreign-machine
+     blob reads as "not expired" → block stands. Re-stamped by every writer of a
+     covered field. Ceiling: an admin who runs code can still recover the key +
+     forge a MAC (machine-scope DPAPI; full closure needs TPM/PPL, B10-tier).
+  2. **B4 — clock-rollback hardening (`a32a0cd`, committed).** New MAC-covered
+     `[Time] HighWater` (furthest legitimately-observed time). Every expiry /
+     self-heal decision (B1 spawn, B2 repair, B3 SafeBoot, expiry/stopMe, OnStart)
+     now passes `asOf = HighWater`, not `DateTime.Now`. Pure gates
+     `ClassifyTimeAdvance` / `NextHighWater` (parity-pinned; unparseable =
+     fail-closed jump; ceiling 120 s ≫ 10 s tick). Rolling the clock forward past
+     `Until` refuses to advance HighWater → never reads "expired". Guardian is
+     sole reader, service sole writer (no race). Stacks on B7 fail-closed.
+  3. **B6 — service-deletion resistance (working tree, UNCOMMITTED).** Denies
+     `sc delete MONKMODE` while a block is active via one deny ACE `(D;;SD;;;BA)`
+     on the service-object DACL. **Brick-safe by construction:** denies DELETE
+     (SD) ONLY — never WRITE_DAC/WRITE_OWNER — so both SY (service) and BA (admin
+     CLI) can always rewrite the DACL to restore. Pure SDDL surgery in
+     `ServiceSecurity.vb` (CLI + service copies, parity-pinned). Service:
+     `AssertDenyDeleteAce` at OnStart + per-tick (fail-closed `Not
+     EffectiveBlockHasExpired`, B4 `asOf`, read-only probe = no churn);
+     `RestoreDefaultServiceSd` in `stopMe()` AFTER the guardian kill, BEFORE
+     `Me.Stop()/End` (ordering load-bearing). CLI: new **`unblock --force`**
+     escape hatch (`Program.DoUnblock`) — the deliberate, documented clean-exit /
+     brick-insurance: DisableRecovery → KillWatchdogProcesses → RestoreDefaultSd
+     → DeleteService → strip hosts → delete snapshot → remove SafeBoot keys →
+     clear autorun (all best-effort, ordered; mirrors `cleanup.ps1`). Gated
+     behind explicit `--force` so it is never a casual one-word bypass.
+     **This session's fix:** the slice did not build — `Program.vb` dispatched
+     `unblock → DoUnblock` but `DoUnblock` was never written (`BC30451`). Authored
+     it + usage text; build now green. **New tests:** `ServiceSecurityTests.cs` —
+     30 tests pinning the deny-ACE constants (incl. the brick-guard that we deny
+     SD and never WD/WO), the four pure functions' truth tables, the round-trip
+     brick-safety proof `Remove(Add(x))==x`, and CLI↔service parity. 210 → **240
+     green**.
+  **Gate before any severity drop:** rebuild `dist\` (`tools\build-dist.ps1`),
+  run the elevated smoke test, and EXTEND it for B6 (a `sc delete MONKMODE`
+  during an active block is refused; `unblock --force` tears everything down and
+  leaves a removable machine; expiry leaves the service removable). B6 is also
+  not yet committed.
 
 **Done (committed + pushed on `monkmode`):**
 - Phase 0 — `ARCHITECTURE.md`: component map + ranked bypass surface **B1–B11**.
