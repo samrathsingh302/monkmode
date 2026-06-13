@@ -6,10 +6,12 @@
 // equivalence of the four per-project copies (CLI, service, notifier,
 // guardian), so the Phase-3 refactor has a safety net.
 //
-// FENCE: never feed invalid Base64 to the SERVICE copy's DecryptData - that
-// copy calls `End` on FormatException (audit P3) and would kill the test host.
-// The invalid-input tests below use the CLI/notifier/guardian copies, which
-// return "".
+// HISTORICAL FENCE (now resolved): the SERVICE copy's DecryptData used to call
+// `End` on a FormatException (audit P3) - an availability bypass (write junk
+// into [Time] Until -> the LocalSystem service force-terminates) that would
+// also have killed the test host. B7 fixed it to `Return ""`, matching the
+// other three copies, so the invalid-Base64 test below now covers ALL FOUR
+// copies (and pins that the service no longer `End`s).
 
 namespace MonkMode.Tests;
 
@@ -103,13 +105,15 @@ public class CryptoRoundTripTests
     }
 
     [Fact]
-    public void CliNotifierAndGuardianCopies_ReturnEmptyOnInvalidBase64()
+    public void AllFourCopies_ReturnEmptyOnInvalidBase64()
     {
-        // (Service copy intentionally untested here - it calls `End` on bad
-        // Base64, which would terminate the test host. Documented audit P3.)
-        // The guardian's "" matters doubly: an undecryptable Until becomes an
-        // unparseable one, which fails CLOSED (keep guarding).
+        // B7 fixed the service copy's `End` to `Return ""`, so all four copies
+        // now fail closed on junk: an undecryptable Until becomes an unparseable
+        // one, which fails CLOSED everywhere (service keeps enforcing, guardian
+        // keeps guarding). The service copy is now safe to exercise directly -
+        // if it still `End`ed, this very test would terminate the host.
         Assert.Equal("", new MonkMode.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
+        Assert.Equal("", new monkmode.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
         Assert.Equal("", new mm_notify.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
         Assert.Equal("", new mm_guard.Simple3Des(Passphrase).DecryptData("not base64 at all!"));
     }

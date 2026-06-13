@@ -40,6 +40,18 @@ Friend Module Guardian
         Return DateDiff(DateInterval.Second, asOf, untilDate) <= graceSeconds
     End Function
 
+    ' B7: MAC-aware expiry, byte-for-byte the same semantics as
+    ' Service1.EffectiveBlockHasExpired - the guardian and the service MUST agree
+    ' on "expired" or one side could stand down while the other still enforces.
+    ' The block is expired ONLY when the time has genuinely passed AND the config
+    ' MAC is valid; a tampered/invalid MAC (or an unparseable Until) reads as NOT
+    ' expired, so the guardian keeps guarding (fail CLOSED) until a legitimate
+    ' stamp exists. The live MAC evaluation that yields macValid lives in
+    ' Program.vb (the DPAPI seam); this stays pure and unit-testable.
+    Friend Function EffectiveBlockHasExpired(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+        Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
+    End Function
+
     ' Decides whether this tick should ask the SCM to start the MONKMODE
     ' service. Only while the block is active (blockActive is the caller's
     ' Not BlockHasExpired(...), so fail-closed carries through) and only when

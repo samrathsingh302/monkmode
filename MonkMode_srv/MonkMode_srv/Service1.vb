@@ -134,33 +134,28 @@ Public Class Service1
             Dim iniFile As IniFile = New IniFile
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
             If iniFile.Sections.Count < 2 Then
-                stopMe()
-            ElseIf BlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), DateTime.Now, 0) Then
-                ' Only a successfully parsed, genuinely past end time lifts the
-                ' block here; an unparseable Until keeps the block standing.
+                ' B7 fail-closed: a truncated/blanked ini (fewer than the expected
+                ' sections) is treated EXACTLY like a corrupt one - rewrite the
+                ' UNSTAMPED default block and keep enforcing, NEVER stopMe(). The
+                ' old code called stopMe() here, which let an attacker lift the
+                ' block by truncating monkmode_settings.ini to <2 sections and
+                ' forcing a restart (no MAC forge needed) - strictly easier than
+                ' the recover-the-3DES-key attack B7 exists to stop. The default
+                ' is left unstamped, so the readers fail CLOSED (macValid = False)
+                ' and it holds until re-armed from the CLI.
+                WriteDefaultBlock()
+            ElseIf EffectiveBlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), DateTime.Now, 0, ConfigMacIsValidForIni(iniFile)) Then
+                ' The ONLY OnStart path that may lift the block: a successfully
+                ' parsed, genuinely past end time AND a valid B7 MAC. An
+                ' unparseable Until or a tampered/invalid MAC keeps the block
+                ' standing (fail closed).
                 stopMe()
             End If
 
         Catch ex As Exception
-            My.Computer.FileSystem.WriteAllText(Application.StartupPath + "\monkmode_settings.ini", "", False)
-            Dim iniFile = New IniFile
-            iniFile.AddSection("User")
-            iniFile.SetKeyValue("User", "CustomChecked", "abcdefghijk")
-            iniFile.SetKeyValue("User", "CustomSites", "null")
-            iniFile.SetKeyValue("User", "Done", "no")
-            iniFile.SetKeyValue("User", "NeedsAlerted", "yes")
-            iniFile.AddSection("Time")
-            ' Format with the explicit en-CA culture: this runs on an SCM/timer
-            ' thread, so the constructor's CurrentCulture does NOT apply here and
-            ' an implicit DateTime->String conversion would use the machine locale,
-            ' which the en-CA reads above can then fail to parse.
-            iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
-            iniFile.SetKeyValue("Time", "TimeChanging", "no")
-            iniFile.AddSection("CurrentTime")
-            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-            iniFile.AddSection("Process")
-            iniFile.SetKeyValue("Process", "List", "null")
-            iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+            ' Corrupt/unreadable ini: rewrite the safe default 7-day block (fail
+            ' closed, same as the <2 sections branch above).
+            WriteDefaultBlock()
         End Try
 
         If Not My.Computer.FileSystem.FileExists(hostDirS) Then
@@ -185,6 +180,39 @@ Public Class Service1
 
     End Sub
 
+    ' Rewrite a safe default 7-day block (the inherited panic behaviour), used by
+    ' OnStart on both fail-closed paths: a corrupt/unreadable ini (the Catch) AND
+    ' a truncated/blanked one (< 2 sections). B7: this default is deliberately
+    ' left UNSTAMPED (no [Integrity] Key/Mac) - only the CLI mints a fresh key
+    ' when legitimately arming a block. With no MAC the readers fail CLOSED
+    ' (macValid = False), so this recovery block stays standing until it is
+    ' re-armed from the CLI, rather than silently auto-lifting from a config that
+    ' just failed to parse or was truncated to lift the block. That is the
+    ' tamper-resistant direction (an evader who corrupts OR truncates the ini does
+    ' not get a liftable block); the trade-off is a corrupted-at-expiry ini must
+    ' be re-armed by hand instead of timing out.
+    Private Sub WriteDefaultBlock()
+        My.Computer.FileSystem.WriteAllText(Application.StartupPath + "\monkmode_settings.ini", "", False)
+        Dim iniFile = New IniFile
+        iniFile.AddSection("User")
+        iniFile.SetKeyValue("User", "CustomChecked", "abcdefghijk")
+        iniFile.SetKeyValue("User", "CustomSites", "null")
+        iniFile.SetKeyValue("User", "Done", "no")
+        iniFile.SetKeyValue("User", "NeedsAlerted", "yes")
+        iniFile.AddSection("Time")
+        ' Format with the explicit en-CA culture: this runs on an SCM/timer
+        ' thread, so the constructor's CurrentCulture does NOT apply here and
+        ' an implicit DateTime->String conversion would use the machine locale,
+        ' which the en-CA reads can then fail to parse.
+        iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
+        iniFile.SetKeyValue("Time", "TimeChanging", "no")
+        iniFile.AddSection("CurrentTime")
+        iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
+        iniFile.AddSection("Process")
+        iniFile.SetKeyValue("Process", "List", "null")
+        iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+    End Sub
+
     Private Sub timer_Elapsed(ByVal sender As System.Object, ByVal e As System.Timers.ElapsedEventArgs) Handles timer.Elapsed
 
         Dim processList As System.Diagnostics.Process() = Nothing
@@ -192,6 +220,11 @@ Public Class Service1
         Dim notifyFound As Boolean = False
         Dim iniProcessList As String = ""
         Dim iniUntil As String = ""
+        ' B7: MAC validity for this tick. Default FALSE = fail closed: if the
+        ' config can't even be read, or the MAC doesn't verify, the block is
+        ' treated as active (never expired) and every self-heal gate keeps
+        ' enforcing. Computed once below while the ini is loaded.
+        Dim macValid As Boolean = False
 
         Try
             Dim iniFile = New IniFile
@@ -202,7 +235,15 @@ Public Class Service1
             If StrComp("null", iniProcessList) <> 0 Then
                 iniProcessList = encryptionW.DecryptData(iniProcessList)
             End If
+            ' B7: evaluate the tamper-evident MAC (DPAPI-unprotect [Integrity]
+            ' Key, validate [Integrity] Mac over the canonical). Invalid/absent
+            ' MAC or a DPAPI failure -> False -> block stays standing.
+            macValid = ConfigMacIsValidForIni(iniFile)
         Catch ex As Exception
+            ' Corrupt/unreadable ini: rewrite the default 7-day block, left
+            ' UNSTAMPED on purpose (see the OnStart catch for the rationale) -
+            ' macValid stays False this tick so the block holds; re-arm from the
+            ' CLI to get a fresh MAC and a liftable block.
             Dim iniFile = New IniFile
             iniFile.AddSection("User")
             iniFile.SetKeyValue("User", "CustomChecked", "abcdefghijk")
@@ -230,12 +271,13 @@ Public Class Service1
 
         ' B2 self-heal: between ticks an admin can clear the attribute and
         ' edit/blank/delete hosts; while the block is still active (note
-        ' BlockHasExpired fails CLOSED: unparseable = active) restore our
-        ' entries from the snapshot the CLI persisted next to the exe.
+        ' EffectiveBlockHasExpired fails CLOSED: unparseable Until OR an invalid
+        ' B7 MAC = active) restore our entries from the snapshot the CLI
+        ' persisted next to the exe.
         ' Try/Catch so a transient lock can never crash the service.
         Try
             Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-            If Not BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
+            If Not EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
                 Dim hostsText As String = ""
                 If My.Computer.FileSystem.FileExists(hostDirS) Then
                     hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
@@ -269,7 +311,7 @@ Public Class Service1
         Try
             Dim guardianExe As String = Application.StartupPath + "\mm_guard.exe"
             If ShouldRestartPeer(System.Diagnostics.Process.GetProcessesByName("mm_guard").Length,
-                                 Not BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds),
+                                 Not EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid),
                                  My.Computer.FileSystem.FileExists(guardianExe)) Then
                 System.Diagnostics.Process.Start(guardianExe)
             End If
@@ -278,10 +320,11 @@ Public Class Service1
 
         ' B3 SafeBoot self-heal: re-assert the Safe Mode registration every tick
         ' while the block is active (an admin can delete the keys between ticks).
-        ' Fail CLOSED via Not BlockHasExpired - an unparseable Until keeps the
-        ' keys asserted; stopMe() removes them at a genuine expiry.
+        ' Fail CLOSED via Not EffectiveBlockHasExpired - an unparseable Until OR
+        ' an invalid B7 MAC keeps the keys asserted; stopMe() removes them at a
+        ' genuine expiry.
         Try
-            If Not BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds) Then
+            If Not EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid) Then
                 AssertSafeBootRegistration()
             End If
         Catch ex As Exception
@@ -300,14 +343,21 @@ Public Class Service1
         Next
 
         If StrComp("no", iniTimeChanging) = 0 Then
-            ' Fail CLOSED: only a parsed, genuinely past end time lifts the
-            ' block; an unparseable Until skips the expiry action this tick.
-            If BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds) Then
+            ' Fail CLOSED: only a parsed, genuinely past end time AND a valid B7
+            ' MAC lifts the block; an unparseable Until or a tampered/invalid MAC
+            ' skips the expiry action this tick (block stays standing).
+            If EffectiveBlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds, macValid) Then
                 stopMe()
             Else
                 Dim iniFile = New IniFile
                 iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
                 iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
+                ' B7: the heartbeat just rewrote [CurrentTime] Now, a MAC-covered
+                ' field, so re-stamp [Integrity] Mac over the new canonical with
+                ' the existing key - otherwise the MAC would go invalid on the
+                ' very next tick and (correctly, but needlessly) freeze the block
+                ' from ever auto-lifting. Reuses the stored key; never re-arms.
+                RestampMacWithExistingKey(iniFile)
                 iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
             End If
         End If
@@ -335,6 +385,12 @@ Public Class Service1
     Friend Const SafeBootNetworkKey As String = "SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MONKMODE"
     Friend Const SafeBootValue As String = "Service"
 
+    ' B7 tamper-evident config: the [Integrity] section (DPAPI-protected HMAC key
+    ' + MAC over the canonical of the decrypted config values).
+    Friend Const IntegritySection As String = "Integrity"
+    Friend Const IntegrityKeyName As String = "Key"
+    Friend Const IntegrityMacName As String = "Mac"
+
     ' Decides whether a persisted block end time has expired. untilText is the
     ' decrypted [Time] Until value (an en-CA datetime string); expired means no
     ' more than graceSeconds remain at asOf. An unparseable value is NOT
@@ -347,6 +403,20 @@ Public Class Service1
             Return False
         End If
         Return DateDiff(DateInterval.Second, asOf, untilDate) <= graceSeconds
+    End Function
+
+    ' B7: the MAC-aware expiry decision. The block counts as expired ONLY when
+    ' the time has genuinely passed (BlockHasExpired) AND the config MAC is
+    ' valid. An invalid/absent MAC (a tampered ini - e.g. the attacker recovered
+    ' the 3DES key and re-encrypted Until to "now") therefore reads as NOT
+    ' expired, exactly like an unparseable Until: the block stays standing and
+    ' never auto-lifts until a legitimate stamp exists. This does NOT gate
+    ' stopMe() on the MAC directly - it just forces the "active" path, so the
+    ' B2/B1/B3 self-heal gates (all keyed off Not <this>) keep enforcing too.
+    ' Pure and Shared so it is unit tested; the live MAC/DPAPI evaluation that
+    ' produces macValid (ConfigMacIsValidForIni) is the smoke-tested seam.
+    Friend Shared Function EffectiveBlockHasExpired(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+        Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
     End Function
 
     ' Returns the hosts-file text with the MonkMode marker block (the marker
@@ -480,6 +550,59 @@ Public Class Service1
         End Try
         Try
             Registry.LocalMachine.DeleteSubKeyTree(SafeBootNetworkKey, False)
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' B7: build the canonical (decrypted plaintext, fixed field order) the MAC is
+    ' computed over, from a loaded ini. Byte-identical construction to the CLI's
+    ' Blocker.CanonicalFromIni and the notifier/guardian readers - all parties
+    ' must derive the same input or the MAC would never agree. [Integrity]
+    ' Key/Mac are excluded (you can't MAC the MAC). Friend (not Private) so the
+    ' end-to-end parity tests can prove this reader derives a byte-identical
+    ' canonical to the CLI writer and the other readers - the tautological
+    ' BuildCanonical literal comparison can't catch a drift in THIS wrapper (e.g.
+    ' if someone started decrypting CustomSites or stopped decrypting ProcessList).
+    Friend Function CanonicalFromIni(ByVal iniFile As IniFile) As String
+        Dim untilEnc As String = iniFile.GetKeyValue("Time", "Until")
+        Dim procEnc As String = iniFile.GetKeyValue("Process", "List")
+        Dim nowEnc As String = iniFile.GetKeyValue("CurrentTime", "Now")
+        Dim sites As String = iniFile.GetKeyValue("User", "CustomSites")
+
+        Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
+        Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
+        Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
+
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+    End Function
+
+    ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads
+    ' [Integrity] Key, DPAPI-unprotects it at machine scope, and validates
+    ' [Integrity] Mac against the canonical. Returns False (MAC INVALID) on ANY
+    ' failure - missing/blank/non-Base64 key or MAC, a DPAPI denial, a blob from
+    ' another machine, a crypto error - so a tamper or a DPAPI hiccup reads as
+    ' "keep the block standing" via EffectiveBlockHasExpired, NEVER as "lift".
+    ' Best-effort and never throws (the caller is inside the per-tick Try too).
+    Private Function ConfigMacIsValidForIni(ByVal iniFile As IniFile) As Boolean
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(iniFile.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return False
+            Return ConfigIntegrity.ConfigMacIsValid(CanonicalFromIni(iniFile), iniFile.GetKeyValue(IntegritySection, IntegrityMacName), key)
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' B7: re-stamp [Integrity] Mac over the current canonical using the already
+    ' stored [Integrity] Key (DPAPI-unprotected) - used after the heartbeat
+    ' rewrites [CurrentTime] Now (a MAC-covered field) so normal operation does
+    ' not trip the MAC. No-op if no recoverable key; never throws. The service
+    ' does NOT mint a new key (it never arms a block; the CLI owns that).
+    Private Sub RestampMacWithExistingKey(ByVal iniFile As IniFile)
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(iniFile.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return
+            iniFile.SetKeyValue(IntegritySection, IntegrityMacName, ConfigIntegrity.ComputeConfigMac(CanonicalFromIni(iniFile), key))
         Catch ex As Exception
         End Try
     End Sub
@@ -649,8 +772,14 @@ Public NotInheritable Class Simple3Des
         Try
             encryptedBytes = Convert.FromBase64String(encryptedtext)
         Catch ef As System.FormatException
-            'encryptedBytes = 
-            End
+            ' Fail CLOSED, like the CLI/notifier/guardian copies: return "" so a
+            ' junk value written into an encrypted field (e.g. [Time] Until) is
+            ' treated as an unparseable plaintext (block stays standing), instead
+            ' of `End` force-terminating the LocalSystem service - that `End` was
+            ' an availability bypass (write garbage -> service dies). The B7 MAC
+            ' makes such a junk write fail verification anyway, but the decrypt
+            ' must not crash the enforcement core regardless.
+            Return ""
         End Try
         ' Create the stream.
         Dim ms As New System.IO.MemoryStream

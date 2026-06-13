@@ -39,6 +39,12 @@ Module Program
     Friend Const NotifierProcessName As String = "mm_notify"
     Friend Const IniName As String = "monkmode_settings.ini"
 
+    ' B7 tamper-evident config: same [Integrity] section the CLI stamps. The
+    ' guardian reads (never writes) it - a MAC failure keeps it guarding.
+    Friend Const IntegritySection As String = "Integrity"
+    Friend Const IntegrityKeyName As String = "Key"
+    Friend Const IntegrityMacName As String = "Mac"
+
     ' Same cadence and expiry grace as the service's timer (10s tick, 5s grace)
     ' so both halves of the pair agree on "expired" within one tick of each
     ' other. Pinned by the unit tests - keep in sync with Service1.
@@ -73,11 +79,21 @@ Module Program
                 ' verified the world this tick - act on the NEXT tick.
                 Thread.Sleep(TickIntervalMs)
 
-                Dim blockActive As Boolean = Not Guardian.BlockHasExpired(ReadBlockUntil(), DateTime.Now, ExpiryGraceSeconds)
+                ' Read [Time] Until and the B7 MAC validity in one ini load.
+                Dim until As String = ""
+                Dim macValid As Boolean = False
+                ReadBlockState(until, macValid)
+
+                ' Fail CLOSED on both axes: an unparseable Until OR an invalid/
+                ' absent B7 MAC (a tampered config) reads as NOT expired, so the
+                ' guardian keeps guarding. Only a parsed, past end time AND a
+                ' valid MAC stands it down - exactly Service1's semantics, so the
+                ' pair never disagree on "expired".
+                Dim blockActive As Boolean = Not Guardian.EffectiveBlockHasExpired(until, DateTime.Now, ExpiryGraceSeconds, macValid)
                 If Not blockActive Then
-                    ' Genuinely expired (parsed, past end time): stand down for
-                    ' good. The service's stopMe() also kills us at expiry;
-                    ' this is the fallback if we outlive that.
+                    ' Genuinely expired (parsed, past end time, valid MAC): stand
+                    ' down for good. The service's stopMe() also kills us at
+                    ' expiry; this is the fallback if we outlive that.
                     Exit Do
                 End If
 
@@ -89,17 +105,53 @@ Module Program
         End Try
     End Sub
 
-    ' The decrypted [Time] Until value, or "" when the ini/value is missing or
-    ' undecryptable. "" is unparseable, and unparseable fails CLOSED (the block
-    ' reads as still active) - a deleted or corrupted config must keep the
-    ' guardian guarding, never stand it down.
-    Private Function ReadBlockUntil() As String
+    ' Reads the block state from a single ini load: the decrypted [Time] Until
+    ' (untilOut) and the B7 MAC validity (macValidOut). Both fail CLOSED on any
+    ' error - untilOut "" is unparseable (block reads active), macValidOut False
+    ' means a tampered/unreadable config also reads active - so a deleted or
+    ' corrupted config keeps the guardian guarding, never stands it down. One
+    ' load (not two) so Until and the MAC are evaluated against the same bytes.
+    Private Sub ReadBlockState(ByRef untilOut As String, ByRef macValidOut As Boolean)
+        untilOut = ""
+        macValidOut = False
         Try
             Dim ini As New IniFile
             ini.Load(Path.Combine(AppContext.BaseDirectory, IniName))
-            Return enc.DecryptData(ini.GetKeyValue("Time", "Until"))
+            untilOut = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
+            macValidOut = ConfigMacIsValidForIni(ini)
         Catch ex As Exception
-            Return ""
+        End Try
+    End Sub
+
+    ' B7: build the canonical (decrypted plaintext, fixed order) the MAC is over.
+    ' Byte-identical construction to the CLI/service/notifier readers. Friend (not
+    ' Private) so the end-to-end parity tests can prove this reader agrees with the
+    ' CLI writer and the other readers - a tautological BuildCanonical literal
+    ' comparison would miss a drift in THIS wrapper.
+    Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
+        Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
+        Dim procEnc As String = ini.GetKeyValue("Process", "List")
+        Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
+        Dim sites As String = ini.GetKeyValue("User", "CustomSites")
+
+        Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
+        Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
+        Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
+
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+    End Function
+
+    ' B7 live MAC gate (DPAPI seam - smoke-tested). DPAPI-unprotect [Integrity]
+    ' Key and validate [Integrity] Mac over the canonical. False on ANY failure
+    ' (missing/blank/non-Base64 key or MAC, DPAPI denial, foreign-machine blob,
+    ' crypto error) so a tamper reads as "keep guarding", never "stand down".
+    Private Function ConfigMacIsValidForIni(ByVal ini As IniFile) As Boolean
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(ini.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return False
+            Return ConfigIntegrity.ConfigMacIsValid(CanonicalFromIni(ini), ini.GetKeyValue(IntegritySection, IntegrityMacName), key)
+        Catch ex As Exception
+            Return False
         End Try
     End Function
 

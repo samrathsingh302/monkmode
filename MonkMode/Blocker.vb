@@ -36,6 +36,13 @@ Module Blocker
     Public Const NotifierExeName As String = "mm_notify.exe"
     Public Const RunValueName As String = "MonkMode_notify"
 
+    ' B7 tamper-evident config: the [Integrity] section holds the DPAPI-protected
+    ' HMAC key and the MAC over the canonical of the decrypted config values.
+    ' Both are EXCLUDED from the canonical (you can't MAC the MAC).
+    Public Const IntegritySection As String = "Integrity"
+    Public Const IntegrityKeyName As String = "Key"
+    Public Const IntegrityMacName As String = "Mac"
+
     Public ReadOnly CA As CultureInfo = New CultureInfo("en-CA")
     Private ReadOnly enc As New Simple3Des("mm_textbox")
 
@@ -240,7 +247,51 @@ Module Blocker
         ini.AddSection("CurrentTime")
         ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
 
+        ' B7: stamp a fresh tamper-evident MAC. Generate a per-block HMAC key,
+        ' DPAPI-protect it at machine scope into [Integrity] Key, and MAC the
+        ' canonical of the plaintext values just written into [Integrity] Mac.
+        ' Best-effort: a DPAPI failure must NOT abort arming the block (the
+        ' readers then see no/invalid MAC and fail CLOSED = keep enforcing,
+        ' which is safe - they just can't auto-lift until a good stamp exists).
+        StampFreshMac(ini)
+
         ini.Save(IniPath())
+    End Sub
+
+    ' B7: builds the canonical string the MAC is computed over, from a loaded
+    ' ini. Uses the DECRYPTED plaintext for the encrypted fields ([Time] Until,
+    ' [Process] List, [CurrentTime] Now) and the as-stored value for the
+    ' plaintext [User] CustomSites, so every party (this writer, plus the
+    ' service/guardian/notifier readers) derives a byte-identical canonical.
+    ' [Integrity] Key/Mac are excluded. Missing values pass through as "".
+    Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
+        Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
+        Dim procEnc As String = ini.GetKeyValue("Process", "List")
+        Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
+        Dim sites As String = ini.GetKeyValue("User", "CustomSites")
+
+        Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
+        ' "null" is stored verbatim (not encrypted); only decrypt a real payload.
+        Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
+        Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
+
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+    End Function
+
+    ' B7: generate a new HMAC key, protect it into [Integrity] Key, and stamp
+    ' [Integrity] Mac over the current canonical. Best-effort throughout - on a
+    ' DPAPI/crypto failure the block still arms (readers fail closed). Mutates
+    ' the ini in place; the caller saves.
+    Private Sub StampFreshMac(ByVal ini As IniFile)
+        Try
+            Dim key() As Byte = ConfigIntegrity.NewRandomKey()
+            Dim protectedKey As String = ConfigIntegrity.ProtectKey(key)
+            If protectedKey Is Nothing Then Return
+            ini.AddSection(IntegritySection)
+            ini.SetKeyValue(IntegritySection, IntegrityKeyName, protectedKey)
+            ini.SetKeyValue(IntegritySection, IntegrityMacName, ConfigIntegrity.ComputeConfigMac(CanonicalFromIni(ini), key))
+        Catch ex As Exception
+        End Try
     End Sub
 
     ' ---- notifier ----
@@ -275,8 +326,29 @@ Module Blocker
             If cur Is Nothing OrElse cur = "null" Then cur = ""
             Dim merged As String = cur & PackList(domains)
             ini.SetKeyValue("User", "CustomSites", If(merged = "", "null", merged))
+            ' B7: this rewrote a MAC-covered field ([User] CustomSites), so the
+            ' existing [Integrity] Mac no longer matches. Re-stamp it over the new
+            ' canonical, reusing the SAME [Integrity] Key (the block is unchanged
+            ' otherwise - never mint a new key here). If the key can't be
+            ' unprotected, leave the (now stale) MAC be: the readers will fail
+            ' closed (keep enforcing) rather than auto-lift, which is the safe
+            ' direction. Best-effort, like the CustomSites sync itself.
+            RestampMacWithExistingKey(ini)
             ini.Save(IniPath())
         Catch
+        End Try
+    End Sub
+
+    ' B7: recompute [Integrity] Mac over the current canonical using the already
+    ' stored [Integrity] Key (DPAPI-unprotected). Used when a writer changes a
+    ' MAC-covered field of an EXISTING block without re-arming it. No-op if there
+    ' is no recoverable key; never throws.
+    Private Sub RestampMacWithExistingKey(ByVal ini As IniFile)
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(ini.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return
+            ini.SetKeyValue(IntegritySection, IntegrityMacName, ConfigIntegrity.ComputeConfigMac(CanonicalFromIni(ini), key))
+        Catch ex As Exception
         End Try
     End Sub
 

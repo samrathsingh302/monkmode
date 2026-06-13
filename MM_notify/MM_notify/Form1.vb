@@ -140,6 +140,43 @@ Public Class Form1
         Return DateAdd(DateInterval.Second, DateDiff(DateInterval.Second, oldNow, oldUntil), currentTime)
     End Function
 
+    ' B7 tamper-evident config: same [Integrity] section the CLI stamps. The
+    ' notifier re-stamps the MAC when it rewrites [Time] Until on a clock change.
+    Private Const IntegritySection As String = "Integrity"
+    Private Const IntegrityKeyName As String = "Key"
+    Private Const IntegrityMacName As String = "Mac"
+
+    ' B7: build the canonical (decrypted plaintext, fixed order) the MAC is over,
+    ' from a loaded ini. Byte-identical construction to the CLI's CanonicalFromIni
+    ' and the service/guardian readers - every party must agree on the input.
+    ' Friend (not Private) so the end-to-end parity tests can prove this reader
+    ' agrees with the CLI writer and the other readers - a tautological
+    ' BuildCanonical literal comparison would miss a drift in THIS wrapper.
+    Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
+        Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
+        Dim procEnc As String = ini.GetKeyValue("Process", "List")
+        Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
+        Dim sites As String = ini.GetKeyValue("User", "CustomSites")
+
+        Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
+        Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
+        Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
+
+        Return ConfigIntegrity.BuildCanonical(untilPlain, procPlain, sites, nowPlain)
+    End Function
+
+    ' B7: recompute [Integrity] Mac over the current canonical with the already
+    ' stored [Integrity] Key (DPAPI-unprotected). No-op if no recoverable key;
+    ' never throws. Mutates the ini in place; the caller saves.
+    Private Sub RestampMacWithExistingKey(ByVal ini As IniFile)
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(ini.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return
+            ini.SetKeyValue(IntegritySection, IntegrityMacName, ConfigIntegrity.ComputeConfigMac(CanonicalFromIni(ini), key))
+        Catch ex As Exception
+        End Try
+    End Sub
+
     ' Keep the remaining time stable across a system-clock change so a block
     ' cannot be shortened by moving the clock forward.
     Private Sub SystemEvents_TimeChanged(ByVal sender As Object, ByVal e As EventArgs)
@@ -160,6 +197,15 @@ Public Class Form1
                 DateTime.Now)
             If newUntil.HasValue Then
                 ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.Value.ToString(CA)))
+                ' B7: we just rewrote a MAC-covered field ([Time] Until), so
+                ' re-stamp [Integrity] Mac over the new canonical with the
+                ' existing [Integrity] Key (clock-comp doesn't re-arm the block,
+                ' so reuse the key - never mint a new one). Without this the
+                ' service/guardian would see a MAC mismatch every time the clock
+                ' changes and (correctly, but needlessly) refuse to ever lift.
+                ' If the key can't be unprotected, leave the now-stale MAC: the
+                ' readers fail closed (keep enforcing), which is the safe way.
+                RestampMacWithExistingKey(ini)
             End If
             ini.SetKeyValue("Time", "TimeChanging", "no")
             ini.Save(IniPath())
