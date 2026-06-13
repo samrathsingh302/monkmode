@@ -66,6 +66,10 @@ two were removed during the CLI migration.
   passes. `CanStop=False` blocks the *graceful* SCM stop path only.
   *(Since 12/06/2026 the service also (c) restores its hosts entries from a
   CLI-written snapshot every 10s while the block is active — the B2 self-heal.)*
+  *(Since 13/06/2026 the service also (d) registers itself under the SafeBoot
+  Minimal+Network keys — self-healed every tick, removed at expiry — so it runs
+  in Safe Mode; see B3. Code-complete + unit-tested, NOT yet live-verified in an
+  actual Safe Mode boot.)*
 - Blocking is purely **hosts-file DNS sinkholing** (`0.0.0.0`).
 - The unlock decision trusts **`DateTime.Now`** (system local clock).
 - There is **no watchdog**: nothing restarts the service or the notifier if they
@@ -116,12 +120,22 @@ Ranked roughly by how easily a motivated user pulls them off.
 > processes. (A first run failed 31/16 purely because `dist\` was stale — built
 > before the B1 commits, no `mm_guard.exe` present. **Rebuild `dist\` via
 > `tools\build-dist.ps1` before any smoke test.**)
+>
+> **Status update 13/06/2026 (B3 Safe Mode):** the service now registers itself
+> under the SafeBoot Minimal + Network keys (written at `OnStart`, self-healed
+> every 10s tick while active, removed at expiry) so it runs in Safe Mode —
+> **code-complete, unit-tested (136/136), fresh-context verifier: SHIP, NOT yet
+> live-verified.** Two-part gate before B3 is "mitigated": (1) the extended smoke
+> test (52 checks — SafeBoot keys written/re-asserted-after-delete/removed) must
+> pass, AND (2) a one-time **MANUAL Safe Mode reboot** must confirm the service
+> actually runs there (start a block, reboot into Safe Mode, `sc query MONKMODE`
+> = RUNNING + hosts still blocks) — the one thing a normal-mode test cannot prove.
 
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|
 | B1 | **Force-kill the service** (`taskkill /f`, Process Explorer, `sc` via SYSTEM token, pskill). | `CanStop=False` only blocks graceful stop; a force kill still terminates the process. **MITIGATED 13/06/2026 (both layers live-verified — elevated smoke test 47/47, kill drills K1–K4 + no-restart-loop expiry watch):** **Layer 1** — the CLI sets SCM **FailureActions** on `MONKMODE` at install — restart on every failure forever (3× RESTART, 1 s delay, reset period INFINITE) + restart-on-non-crash flag (`ServiceTools.SetRecoveryOptions`). **Layer 2** — mutual service ⇄ guardian restart pair (the proper version of the removed `MM_notify2` twin): the service's timer spawns/respawns the SYSTEM-session `mm_guard.exe` through the tested fail-closed gate `Service1.ShouldRestartPeer`; the guardian reciprocally SCM-restarts a killed service and relaunches `mm_notify` into the user session, and stands down only on a genuinely parsed, past end time (`stopMe()` also kills it at expiry). **Residuals (honest):** a scripted near-simultaneous double-kill of service+guardian within the ~1 s/10 s restart windows, a SYSTEM-token kill that also disables recovery (`sc failure … reset= 0`), suspend-then-kill of both processes, or an **elevated** user pre-pinning the guardian (start your own `mm_guard.exe` first: it holds the single-instance mutex but lacks SCM rights, neutralising layer 2 — layer 1 still covers) still win; true kill-immunity needs a PPL/kernel driver (out of scope, B10-tier). | ~~Critical~~ → **Medium** (live-verified 13/06/2026; residuals listed) |
 | B2 | **Clear the read-only attribute and edit/blank hosts.** | **MITIGATED 12/06/2026 (software side).** The CLI persists the exact marker block to `monkmode_hosts.block` (next to the exes); while the block is unexpired, the service's 10s timer re-asserts read-only and restores tampered/deleted/blanked entries from that snapshot (`Service1.RepairHostsBlock` — fail-closed expiry gate, user content preserved, no rewrite when intact). **Residuals:** an admin can delete the snapshot file itself (repair then degrades to attribute re-assert only); an edit sticks for up to ~10s until the next tick; and if the service is dead (B1) nothing repairs — B2's fate is chained to B1. | ~~Critical~~ → Low while the service runs (residuals listed; B1 unchanged) |
-| B3 | **Boot into Safe Mode**, then edit hosts / delete files / `sc delete KCTRP`. | Service has no `SafeBoot` registration, so it does **not** run in Safe Mode. Everything is editable. | Critical |
+| B3 | **Boot into Safe Mode**, then edit hosts / delete files / `sc delete MONKMODE`. | Originally: the service had no `SafeBoot` registration, so it did **not** run in Safe Mode and everything was editable. **MITIGATED IN SOFTWARE 13/06/2026 (code-complete + unit-tested + verifier-SHIP, NOT yet live-verified):** the service now registers itself under BOTH `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\MONKMODE` and `…\SafeBoot\Network\MONKMODE` (each `(Default)=Service`) at `OnStart`, re-asserts them every 10s tick while the block is active (fail-CLOSED via `Not BlockHasExpired`; read-only probe first, so an intact registration is a true no-op — no churn), and removes both at a genuine expiry (`stopMe`). So it runs in plain Safe Mode AND Safe Mode with Networking, where it keeps hosts locked + self-healing (B2) and the watchdog pair alive (B1); deleting the keys mid-block is repaired within a tick. Only MonkMode's own two leaf keys are ever touched (no-data-loss fence). **Residuals (honest):** an admin who deletes the keys AND stops the service+guardian from rewriting them wins (the B1 kill problem — B3 chained to B1); `sc delete` during an active block (B6) orphans the keys harmlessly; an offline/WinRE edit (B10) still wins. **Verification ceiling:** the normal-mode smoke test proves the keys are written/re-asserted/removed, but that the service actually *runs* in Safe Mode needs a one-time MANUAL Safe Mode reboot — pending. | ~~Critical~~ → Low **once live-verified** (52-check smoke test + manual Safe Mode reboot); Critical until then |
 | B4 | **Roll the system clock forward.** | Unlock compares `Time/Until` to `DateTime.Now`. Set the clock past the end time and the next 10 s tick calls `stopMe()` and lifts the block. `CurrentTime/Now` heartbeat is written but never enforced against rollback. | Critical |
 | B5 | **Change DNS / use DoH / VPN / proxy / Tor.** | Hosts only intercepts the OS resolver. Browser DoH, a public resolver, or a VPN ignores hosts entirely. | Critical |
 | B6 | **`sc delete KCTRP`** (README literally documents this). | Service is removable by any admin. | High |

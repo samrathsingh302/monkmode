@@ -178,6 +178,11 @@ Public Class Service1
             stopMe()
         End Try
 
+        ' B3: register under SafeBoot so enforcement survives a Safe Mode reboot.
+        ' Only reached on the active path - an expired/invalid block calls stopMe()
+        ' above, which Ends the process before here (and removes any stale keys).
+        AssertSafeBootRegistration()
+
     End Sub
 
     Private Sub timer_Elapsed(ByVal sender As System.Object, ByVal e As System.Timers.ElapsedEventArgs) Handles timer.Elapsed
@@ -271,6 +276,17 @@ Public Class Service1
         Catch ex As Exception
         End Try
 
+        ' B3 SafeBoot self-heal: re-assert the Safe Mode registration every tick
+        ' while the block is active (an admin can delete the keys between ticks).
+        ' Fail CLOSED via Not BlockHasExpired - an unparseable Until keeps the
+        ' keys asserted; stopMe() removes them at a genuine expiry.
+        Try
+            If Not BlockHasExpired(iniUntil, DateTime.Now, ExpiryGraceSeconds) Then
+                AssertSafeBootRegistration()
+            End If
+        Catch ex As Exception
+        End Try
+
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
             If Proc.SessionId = 0 Then
@@ -306,6 +322,18 @@ Public Class Service1
     ' BlockHasExpired call (OnStart deliberately uses the stricter 0).
     Friend Const TimerIntervalMs As Integer = 10000
     Friend Const ExpiryGraceSeconds As Long = 5
+
+    ' B3 SafeBoot: the registry subkeys that make the MONKMODE service start in
+    ' Safe Mode (Minimal) and Safe Mode with Networking (Network). Without them
+    ' the service does NOT run in Safe Mode, so an evader could reboot there and
+    ' edit hosts / delete the service unopposed. Each subkey is named after the
+    ' service; what SafeBoot keys off is the subkey's PRESENCE, and its (Default)
+    ' value is the conventional "Service" tag (drivers use "Driver"). Friend
+    ' Consts (single source of truth) so the unit tests pin them - a typo in a
+    ' path or the tag would silently disarm B3, so the suite fails loudly on drift.
+    Friend Const SafeBootMinimalKey As String = "SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\MONKMODE"
+    Friend Const SafeBootNetworkKey As String = "SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MONKMODE"
+    Friend Const SafeBootValue As String = "Service"
 
     ' Decides whether a persisted block end time has expired. untilText is the
     ' decrypted [Time] Until value (an en-CA datetime string); expired means no
@@ -404,6 +432,58 @@ Public Class Service1
         Return peerInstanceCount <= 0
     End Function
 
+    ' B3 SafeBoot gate. The (Default) value under each SafeBoot subkey must be the
+    ' ordinal string "Service" for the registration to read as intact; anything
+    ' else (missing, blank, a case-variant, a tampered tag) needs a rewrite. Pure
+    ' and Shared so the re-assert's write-vs-skip decision is unit tested; the
+    ' live registry I/O (CreateSubKey/SetValue/DeleteSubKeyTree) is smoke-tested,
+    ' exactly like the B1/B2 live wiring.
+    Friend Shared Function SafeBootValueIsCorrect(ByVal currentValue As String) As Boolean
+        Return String.Equals(currentValue, SafeBootValue, StringComparison.Ordinal)
+    End Function
+
+    ' B3 SafeBoot self-heal (live wiring). Ensure both SafeBoot subkeys exist with
+    ' the "Service" tag so the service starts in Safe Mode / Safe Mode w/ Network.
+    ' What SafeBoot keys off is the subkey's PRESENCE; the (Default) value is the
+    ' conventional tag. Read-only probe FIRST so an already-correct registration
+    ' is a true no-op (no writable handle opened, no churn - mirrors
+    ' RepairHostsBlock returning Nothing on an intact block); only a missing key
+    ' (probe returns Nothing) or a tampered tag triggers CreateSubKey + SetValue.
+    ' Per-key Try (like RemoveSafeBootRegistration) so a hiccup on one key still
+    ' attempts the other; best-effort throughout - a registry failure must never
+    ' crash the enforcement tick.
+    Private Sub AssertSafeBootRegistration()
+        For Each subKey As String In New String() {SafeBootMinimalKey, SafeBootNetworkKey}
+            Try
+                Dim current As String = Nothing
+                Using rk As RegistryKey = Registry.LocalMachine.OpenSubKey(subKey)
+                    If rk IsNot Nothing Then current = TryCast(rk.GetValue(String.Empty, ""), String)
+                End Using
+                If Not SafeBootValueIsCorrect(current) Then
+                    Using rk As RegistryKey = Registry.LocalMachine.CreateSubKey(subKey)
+                        If rk IsNot Nothing Then rk.SetValue(String.Empty, SafeBootValue, RegistryValueKind.String)
+                    End Using
+                End If
+            Catch ex As Exception
+            End Try
+        Next
+    End Sub
+
+    ' Remove both SafeBoot subkeys (B3 teardown at a genuine expiry). Best-effort
+    ' and no throw if already absent; the two deletes are independent so a failure
+    ' on one still attempts the other. A clean expiry must leave no SafeBoot
+    ' registration behind for a service that is about to stop.
+    Private Sub RemoveSafeBootRegistration()
+        Try
+            Registry.LocalMachine.DeleteSubKeyTree(SafeBootMinimalKey, False)
+        Catch ex As Exception
+        End Try
+        Try
+            Registry.LocalMachine.DeleteSubKeyTree(SafeBootNetworkKey, False)
+        Catch ex As Exception
+        End Try
+    End Sub
+
     Private Sub stopMe()
 
         Dim fileReader As String = ""
@@ -441,6 +521,12 @@ Public Class Service1
             System.IO.File.Delete(Application.StartupPath + "\monkmode_hosts.block")
         Catch ex As Exception
         End Try
+
+        ' B3: drop the SafeBoot registration too - a genuinely expired block must
+        ' leave nothing that keeps the (about-to-stop) service starting in Safe
+        ' Mode. Best-effort; the OnStart path also removes stale keys on a restart
+        ' into an already-expired block.
+        RemoveSafeBootRegistration()
 
         ' B1 layer 2: tear the guardian down too (best effort). It would also
         ' stand down by itself on its next tick - it reads the same parsed,

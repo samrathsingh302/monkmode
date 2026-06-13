@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 night (**B1 LIVE-VERIFIED — elevated smoke test 47/47**; ARCHITECTURE B1 severity High → Medium. Lesson: rebuild `dist\` before every smoke test — see §8).
+Last updated: 2026-06-13 night (**B3 Safe Mode resistance implemented** — service self-registers under the SafeBoot keys; code-complete + unit-tested 136/136 + verifier-SHIP, awaiting live verification: the 52-check smoke test AND a one-time manual Safe Mode reboot. Prior: B1 LIVE-VERIFIED 47/47, B1 severity → Medium. Always rebuild `dist\` before smoke-testing — see §8).
 
 ---
 
@@ -329,6 +329,42 @@ bypasses the manifest's UAC prompt:
   via `tools\build-dist.ps1`; second run 47/47. Lesson recorded in §8. No repo
   code changed this session (suite untouched at 123/123); docs only.
 
+- 🔶 **B3 Safe Mode resistance — implemented (2026-06-13, NOT live-verified yet)** —
+  the next Phase 3 slice (closes the "boot into Safe Mode and tamper unopposed"
+  bypass). Verifier-confirmed SHIP; purely additive; service-owned (no CLI
+  change). **What it does:** the service registers `MONKMODE` under BOTH
+  `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\MONKMODE` and
+  `…\Network\MONKMODE` (each `(Default)=Service`) so it starts in plain Safe Mode
+  AND Safe Mode with Networking. Mirrors the hosts-lock pattern exactly:
+  written at `OnStart` (active path only — an expired block hits `stopMe()` and
+  `End`s first), re-asserted every 10s tick while active (fail-CLOSED via
+  `Not BlockHasExpired`; **read-only probe first so an intact registration is a
+  true no-op — no churn**), removed at genuine expiry (`stopMe`). Only MonkMode's
+  own two leaf keys are ever touched (no-data-loss fence). All in `Service1.vb`:
+  new `Friend Const SafeBootMinimalKey/SafeBootNetworkKey/SafeBootValue`, pure
+  `SafeBootValueIsCorrect` gate, private `AssertSafeBootRegistration` (per-key
+  Try) + `RemoveSafeBootRegistration`, three call sites.
+  1. **Tests 123 → 136 green**: 13 new in `MonkMode.Tests/SafeBootTests.cs` —
+     pin the exact key paths + ordinal `"Service"` tag (drift = silent disarm,
+     like the B1 recovery-policy pinning), and the predicate truth table incl.
+     null/blank/case-variant/whitespace (null-safe, no NRE).
+  2. **Verifier (fresh-context): SHIP.** Refuted the data-loss, fail-closed,
+     same-tick-race, brick-Safe-Mode and null-safety concerns; 3 P3/Low findings,
+     2 fixed same-session (per-key Try on the assert; read-only-probe no-op on an
+     intact tick), the 3rd = this very "track the manual Safe Mode verification"
+     note.
+  3. **Smoke test extended 47 → 52 checks** (`run-smoketest.ps1`, authoring only,
+     parses clean): +2 SafeBoot keys present at block start; new **section 2d**
+     self-heal drill (delete both keys → service re-asserts ≤15s); +1 both keys
+     removed after expiry. Teardown AND `cleanup.ps1` now also delete the keys
+     (failure-path rescue). `dist\` rebuilt with the B3 binaries.
+  ⚠️ **Two-part live gate before B3 flips to mitigated/Low** (neither done): (a)
+  run the 52-check smoke test elevated (proves keys written/re-asserted/removed);
+  (b) a one-time **MANUAL Safe Mode reboot** — start a block, reboot into Safe
+  Mode, confirm `sc query MONKMODE` = RUNNING and hosts still blocks, reboot back.
+  (b) is the one thing a normal-mode test cannot prove; until both pass, B3 stays
+  Critical in ARCHITECTURE.
+
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
   auto-lift, verified cleanup, and tore everything down. Reusable scripts live in
@@ -385,7 +421,12 @@ bypasses the manifest's UAC prompt:
    - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
      ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
      and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
-   - `SafeBoot` service registration so it runs in Safe Mode (B3).
+   - ~~`SafeBoot` service registration so it runs in Safe Mode (B3).~~
+     🔶 Implemented in software 13/06/2026 (service self-registers under the
+     SafeBoot Minimal+Network keys, self-healed each tick, removed at expiry;
+     136/136, verifier-SHIP). **Live gate pending: run the 52-check smoke test
+     elevated, then a one-time MANUAL Safe Mode reboot** to confirm it actually
+     runs there — only then does ARCHITECTURE B3 flip Critical → Low.
    - Monotonic/authenticated time instead of trusting `DateTime.Now` (B4; the
      notifier's clock-change compensation is only a partial mitigation).
    - WFP/firewall-layer enforcement so DNS/DoH/VPN can't trivially bypass hosts (B5).
@@ -402,7 +443,7 @@ bypasses the manifest's UAC prompt:
 - `MonkMode/Crypto.vb` — Simple3Des.
 - `MonkMode/ServiceTools.vb` — advapi32 service install/start + SCM recovery policy (authored by us).
 - `MonkMode/IniFileVb.vb` — INI reader/writer (inherited).
-- `MonkMode_srv/MonkMode_srv/Service1.vb` — the enforcement service (inherited logic + tested fail-closed gates: strip/repair/expiry/peer-spawn).
+- `MonkMode_srv/MonkMode_srv/Service1.vb` — the enforcement service (inherited logic + tested fail-closed gates: strip/repair/expiry/peer-spawn/safeboot).
 - `MM_notify/MM_notify/Form1.vb` — notifier (toast + app-kill + clock comp).
 - `MM_guard/MM_guard/Guardian.vb` — guardian decision gates (pure, tested).
 - `MM_guard/MM_guard/Program.vb` — guardian loop + SCM restart + CreateProcessAsUser notifier relaunch.
