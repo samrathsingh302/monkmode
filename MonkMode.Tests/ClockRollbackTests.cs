@@ -181,6 +181,103 @@ public class NextHighWaterTests
     }
 }
 
+// B4 creep fix: CapHighWaterAdvance bounds the per-tick advance to REAL elapsed.
+// NextHighWater alone caps each step at the 120s ceiling but not the RATE, so a
+// clock nudged +119s before each 10s tick walked the mark ~12x faster than real
+// time (audit-found P1). These pin the cap, incl. the regression the audit said
+// the old tests structurally couldn't see (they advanced the synthetic clock at
+// the honest 10s/tick cadence, never the adversarial +119s/10s one).
+public class CapHighWaterAdvanceTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static string T(DateTime dt) => dt.ToString(EnCa);
+    private static readonly DateTime Base = new(2026, 6, 25, 12, 0, 0);
+
+    [Fact]
+    public void HonestStep_WithinBudget_KeepsFullAdvance()
+    {
+        // +10s wall with 10s real elapsed: the full advance is within budget.
+        var cand = Base.AddSeconds(10);
+        Assert.Equal(T(cand), monkmode.Service1.CapHighWaterAdvance(T(Base), T(cand), 10));
+    }
+
+    [Fact]
+    public void OverBudgetStep_IsCappedToRealElapsed()
+    {
+        // THE CREEP STEP: +119s wall but only 10s real elapsed => credit only 10s.
+        var cand = Base.AddSeconds(119);
+        Assert.Equal(T(Base.AddSeconds(10)), monkmode.Service1.CapHighWaterAdvance(T(Base), T(cand), 10));
+    }
+
+    [Fact]
+    public void NoAdvance_CandidateEqualsStored_Unchanged()
+    {
+        // Jump/backward already kept stored => candidate == stored => no change.
+        Assert.Equal(T(Base), monkmode.Service1.CapHighWaterAdvance(T(Base), T(Base), 10));
+    }
+
+    [Fact]
+    public void SlowerWall_TracksWall_NotBudget()
+    {
+        // Wall ran slower than real (+5s wall, 10s real): credit the smaller (5s),
+        // i.e. keep the candidate - never advance the mark past the wall clock.
+        var cand = Base.AddSeconds(5);
+        Assert.Equal(T(cand), monkmode.Service1.CapHighWaterAdvance(T(Base), T(cand), 10));
+    }
+
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("")]
+    public void UnparseableStored_ReturnsCandidate(string stored)
+    {
+        var cand = Base.AddSeconds(10);
+        Assert.Equal(T(cand), monkmode.Service1.CapHighWaterAdvance(stored, T(cand), 10));
+    }
+
+    [Fact]
+    public void NegativeBudget_ClampsToZero_NoAdvance()
+    {
+        // A defensive guard: a non-positive monotonic delta credits nothing.
+        var cand = Base.AddSeconds(119);
+        Assert.Equal(T(Base), monkmode.Service1.CapHighWaterAdvance(T(Base), T(cand), -5));
+    }
+
+    // THE REGRESSION the audit asked for. Compose NextHighWater (Trusted => wall
+    // 'now') with CapHighWaterAdvance (RealTickSeconds=10 of real elapsed per tick),
+    // attacker nudging the wall +119s before each tick against a 10-MINUTE block.
+    // OLD behaviour (NextHighWater alone, no cap) advanced the mark ~+119s/tick and
+    // would cross the 600s Until in ~6 ticks => early lift. With the cap the mark
+    // advances at most the real elapsed (and in fact freezes once the racing wall
+    // gets >ceiling ahead), so it never approaches Until.
+    [Fact]
+    public void Creep_CannotOutrunRealTime_BlockDoesNotLiftEarly()
+    {
+        const int Ticks = 10;
+        const int CreepStep = 119;   // attacker's per-tick wall nudge (<= ceiling, so each is "Trusted")
+        const int RealTick = 10;     // real seconds of monotonic elapsed per tick
+        var until = Base.AddMinutes(10);   // 600s block
+        var mark = T(Base);                // HighWater seeded at arm
+        var wall = Base;
+        for (int i = 0; i < Ticks; i++)
+        {
+            wall = wall.AddSeconds(CreepStep);                                   // attacker nudges the clock
+            var candidate = monkmode.Service1.NextHighWater(mark, T(wall), 120); // Trusted => wall 'now'
+            mark = monkmode.Service1.CapHighWaterAdvance(mark, candidate, RealTick); // capped to real elapsed
+        }
+        var marked = DateTime.Parse(mark, EnCa);
+        // Security property: the mark never reaches Until, so the block does NOT lift early.
+        Assert.True(marked < until, $"mark {marked:O} must stay below Until {until:O}");
+        // Rate bound: the total advance can never exceed the summed real elapsed
+        // (Ticks * RealTick), no matter how far the wall was nudged.
+        Assert.True((marked - Base).TotalSeconds <= Ticks * RealTick,
+            $"mark advanced {(marked - Base).TotalSeconds}s; must be <= {Ticks * RealTick}s of real elapsed");
+        // Sanity that the attack WOULD work without the cap: an uncapped run
+        // (NextHighWater alone) advances ~CreepStep/tick and crosses Until here.
+        Assert.True(Base.AddSeconds(Ticks * CreepStep) > until,
+            "test params must be such that the uncapped creep would cross Until");
+    }
+}
+
 public class ClockRollbackRegressionTests
 {
     // THE headline B4 test: the clock-forward bypass, pinned shut. Drives the

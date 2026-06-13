@@ -158,17 +158,25 @@ bypasses the manifest's UAC prompt:
        gates). All four autonomous/user re-stamp sites are now macValid-gated.
        Covered live by a new `b7-failclosed-test.ps1` §4b (`add` must not change
        the corrupted MAC). Suite still 257 (CLI file-I/O path, no unit seam).
-     - **B4 → P1 OPEN: within-ceiling clock-creep.** HighWater is capped per
-       *step* (≤120 s) but NOT bound to real elapsed time (no monotonic clock).
-       Nudging the clock +119 s before each 10 s real tick walks HighWater ~12×
-       faster than honest time → early lift (1 h block in ~5 min; +120 s per
-       `OnStart` restart compounds it). The pure `ClockRollbackTests` can't see it
-       (they step the synthetic clock 10 s/tick = the honest cadence). **NOT yet
-       fixed** — the fix (bound each tick's credit to `Environment.TickCount64`
-       monotonic elapsed, `credited = min(wallDelta, monoElapsed + small slack)`)
-       is timing-sensitive and wants the live B4 clock test to tune the slack, so
-       it should be its own focused slice, not shipped blind. ARCHITECTURE B4 kept
-       at **High** (single-jump + tamper closed; creep open). Verifier also
+     - **B4 → P1 within-ceiling clock-creep — FIXED IN CODE (`CapHighWaterAdvance`).**
+       HighWater was capped per *step* (≤120 s) but NOT bound to real elapsed time
+       (no monotonic clock), so nudging the clock +119 s before each 10 s tick
+       walked HighWater ~12× faster than honest time → early lift. **Fix:** each
+       tick's credit is now bounded by REAL monotonic elapsed via a new instance
+       anchor `lastMonoMs = Environment.TickCount64` (clock-immune): pure
+       `Service1.CapHighWaterAdvance(stored, candidate, monoElapsedSeconds)` credits
+       `min(wallDelta, monoElapsed)`. A creep step credits only the ~10 s of real
+       time (and freezes the mark once the racing wall gets > ceiling ahead — extra
+       fail-closed); honest ticks credit the full ~10 s and lift normally. `OnStart`
+       no longer credits the boot gap (no monotonic anchor survives a restart),
+       which also closes the OnStart compounding vector. `NextHighWater` signature
+       unchanged (guardian parity untouched). **Tests 257 → 265** — new
+       `CapHighWaterAdvanceTests` incl. the creep regression the audit said was
+       missing (compose NextHighWater + cap; attacker +119 s/tick vs 10 min block;
+       assert no early lift + advance ≤ real elapsed). **NOT yet live-verified** —
+       the monotonic wiring (`TickCount64`, timer jitter, the `lastMonoMs` thread)
+       wants the live B4 clock drill; ARCHITECTURE B4 → **Medium** (creep closed in
+       code; pending live test before Low). Verifier also
        confirmed: B6 sc-delete refusal + brick-safety + escape-hatch ordering are
        sound (Q1–Q4 accept); the ~10 s inter-tick re-assert window is an accepted
        residual; B4 single-jump/backward/restart/HighWater-tamper all hold.

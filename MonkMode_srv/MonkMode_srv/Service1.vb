@@ -154,7 +154,15 @@ Public Class Service1
                 ' clock-forward). A clock rolled forward while off is likewise a
                 ' jump and never lifts the block here.
                 Dim storedHw As String = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "HighWater"))
-                Dim newHw As String = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
+                ' B4 creep fix: seed the monotonic anchor for the timer ticks, and
+                ' do NOT advance HighWater at OnStart. A restart has no trustworthy
+                ' monotonic elapsed from the previous run to bound an advance by
+                ' (TickCount64 resets across reboots), and crediting a wall gap here
+                ' was itself a creep vector (+ceiling per restart). So the boot gap
+                ' is never credited and OnStart expiry is decided off the STORED
+                ' mark; live ticks advance it, bounded by real elapsed.
+                lastMonoMs = Environment.TickCount64
+                Dim newHw As String = storedHw
                 Dim asOfHw As DateTime = DateTime.MinValue
                 Dim parsedHw As DateTime
                 If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then asOfHw = parsedHw
@@ -167,15 +175,15 @@ Public Class Service1
                     ' tampered/invalid MAC keeps the block standing (fail closed).
                     stopMe()
                 ElseIf ShouldRestampOnStart(macValidAtStart, newHw, storedHw) Then
-                    ' A rare Trusted advance at OnStart (a fast restart within the
-                    ' ceiling): persist the moved high-water mark and re-stamp the
-                    ' MAC over the new canonical with the existing key. Normally the
-                    ' boot gap is a jump so newHw = storedHw and this is a no-op.
-                    ' B7 fail-open FIX: gated on macValidAtStart - NEVER re-stamp over
-                    ' a tampered/invalid MAC. Without the guard, a guardian SCM-restart
-                    ' within the HighWater ceiling would re-bless a tampered [Time]
-                    ' Until at boot (a Trusted advance => re-stamp), exactly the
-                    ' heartbeat P0 via OnStart. Invalid MAC => leave it frozen.
+                    ' CURRENTLY INERT (retained as a guard): since the B4 creep fix,
+                    ' OnStart sets newHw = storedHw (it never advances - no monotonic
+                    ' anchor survives a restart to bound an advance), so this branch's
+                    ' guard (newHw <> storedHw, inside ShouldRestampOnStart) is never
+                    ' true and OnStart never re-stamps. It is kept as the fail-closed
+                    ' gate IN CASE a future change re-introduces an OnStart advance:
+                    ' the B7 hole it closes is a guardian SCM-restart within the
+                    ' HighWater ceiling re-blessing a tampered [Time] Until at boot,
+                    ' so any re-added advance MUST stay gated on macValidAtStart here.
                     iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
                     RestampMacWithExistingKey(iniFile)
                     iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
@@ -257,6 +265,13 @@ Public Class Service1
         iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
     End Sub
 
+    ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
+    ' immune to wall-clock changes) captured at the last HighWater advance. The
+    ' per-tick HighWater credit is capped by the real elapsed since this anchor, so
+    ' nudging the wall clock forward each tick can't advance the mark faster than
+    ' real time. Seeded at OnStart; 0 = not yet seeded (=> credit 0 that tick).
+    Private lastMonoMs As Long = 0
+
     Private Sub timer_Elapsed(ByVal sender As System.Object, ByVal e As System.Timers.ElapsedEventArgs) Handles timer.Elapsed
 
         Dim processList As System.Diagnostics.Process() = Nothing
@@ -300,7 +315,18 @@ Public Class Service1
             ' whole B4 fix. The new value is persisted in the heartbeat save
             ' below (one save) so it advances each live tick.
             Dim storedHw As String = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "HighWater"))
-            newHw = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
+            ' B4 creep fix: NextHighWater gives the candidate (wall 'now' on a Trusted
+            ' tick, else the stored value unchanged), then CapHighWaterAdvance bounds
+            ' the ACTUAL advance to the REAL monotonic elapsed (Environment.TickCount64,
+            ' clock-change-immune) since the last tick. So a wall clock nudged +119s
+            ' before each 10s tick credits only the real ~10s - defeating the
+            ' within-ceiling creep that the per-step 120s ceiling alone allowed.
+            ' monoElapsed is 0 on the first tick after OnStart seeded the anchor.
+            Dim nowMono As Long = Environment.TickCount64
+            Dim monoElapsedSeconds As Long = If(lastMonoMs <= 0, 0L, (nowMono - lastMonoMs) \ 1000L)
+            lastMonoMs = nowMono
+            Dim candidateHw As String = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
+            newHw = CapHighWaterAdvance(storedHw, candidateHw, monoElapsedSeconds)
             Dim parsedHw As DateTime
             If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then
                 newHwAsOf = parsedHw
@@ -653,6 +679,31 @@ Public Class Service1
             Return nowText
         End If
         Return storedHwText
+    End Function
+
+    ' B4 CREEP FIX. NextHighWater alone only caps each STEP at the 120s ceiling, not
+    ' the RATE: an attacker who nudges the wall clock +119s right before each 10s
+    ' real tick gets a Trusted advance every tick and walks the mark ~12x faster
+    ' than honest time, lifting a block early. This bounds the advance from
+    ' storedHw -> candidateHw to the REAL elapsed time (monoElapsedSeconds, from
+    ' Environment.TickCount64, which the wall clock can't move): credit the SMALLER
+    ' of the wall advance and the monotonic elapsed. So a +119s wall step with only
+    ' ~10s of real time credits ~10s; an honest +10s/10s step credits the full 10s.
+    ' Pure + Shared so the creep regression test can pin it (the test the audit
+    ' said was missing). Fail-safe: unparseable stored/candidate, or a non-positive
+    ' or already-within-budget advance, returns candidateHwText unchanged.
+    Friend Shared Function CapHighWaterAdvance(ByVal storedHwText As String, ByVal candidateHwText As String, ByVal monoElapsedSeconds As Long) As String
+        Dim ca As New CultureInfo("en-CA")
+        Dim storedHw As DateTime, candidateHw As DateTime
+        If Not DateTime.TryParse(storedHwText, ca, DateTimeStyles.None, storedHw) Then Return candidateHwText
+        If Not DateTime.TryParse(candidateHwText, ca, DateTimeStyles.None, candidateHw) Then Return candidateHwText
+        Dim advance As Long = DateDiff(DateInterval.Second, storedHw, candidateHw)
+        Dim budget As Long = If(monoElapsedSeconds < 0, 0L, monoElapsedSeconds)
+        ' No forward advance (jump/backward already kept stored), or the advance is
+        ' within the real elapsed budget: keep the candidate as-is.
+        If advance <= 0 OrElse advance <= budget Then Return candidateHwText
+        ' Otherwise the wall ran ahead of real time (creep): credit only the budget.
+        Return storedHw.AddSeconds(budget).ToString(ca)
     End Function
 
     ' Returns the hosts-file text with the MonkMode marker block (the marker
