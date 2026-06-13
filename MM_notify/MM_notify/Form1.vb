@@ -179,6 +179,21 @@ Public Class Form1
         End Try
     End Sub
 
+    ' B7: is [Integrity] Mac currently valid over the canonical? DPAPI-unprotect
+    ' [Integrity] Key and FixedTimeEquals-compare. Returns False (never throws) on
+    ' any failure - absent/invalid MAC, unreadable key, foreign-machine blob.
+    ' Mirrors the service's ConfigMacIsValidForIni; used to refuse re-stamping a
+    ' tampered ini on a clock change (the B7 fail-open fix).
+    Private Function ConfigMacIsValidForIni(ByVal ini As IniFile) As Boolean
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(ini.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return False
+            Return ConfigIntegrity.ConfigMacIsValid(CanonicalFromIni(ini), ini.GetKeyValue(IntegritySection, IntegrityMacName), key)
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' Keep the remaining time stable across a system-clock change so a block
     ' cannot be shortened by moving the clock forward.
     Private Sub SystemEvents_TimeChanged(ByVal sender As Object, ByVal e As EventArgs)
@@ -191,23 +206,29 @@ Public Class Form1
             System.Threading.Thread.Sleep(2000)
             ini.Load(IniPath())
 
-            ' Fail CLOSED: if either stored value is unparseable, leave Until
-            ' alone — rewriting it from garbage would end the block early.
-            Dim newUntil As DateTime? = ComputeCompensatedUntil(
-                enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")),
-                enc.DecryptData(ini.GetKeyValue("Time", "Until")),
-                DateTime.Now)
-            If newUntil.HasValue Then
-                ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.Value.ToString(CA)))
-                ' B7: we just rewrote a MAC-covered field ([Time] Until), so
-                ' re-stamp [Integrity] Mac over the new canonical with the
-                ' existing [Integrity] Key (clock-comp doesn't re-arm the block,
-                ' so reuse the key - never mint a new one). Without this the
-                ' service/guardian would see a MAC mismatch every time the clock
-                ' changes and (correctly, but needlessly) refuse to ever lift.
-                ' If the key can't be unprotected, leave the now-stale MAC: the
-                ' readers fail closed (keep enforcing), which is the safe way.
-                RestampMacWithExistingKey(ini)
+            ' B7 fail-open FIX: only compensate + re-stamp when the config's MAC is
+            ' CURRENTLY valid. Clock-comp rewrites [Time] Until (a MAC-covered
+            ' field) and re-stamps; doing that over a TAMPERED ini (invalid MAC)
+            ' would re-bless the tamper with a fresh valid MAC - the same hole as
+            ' the service heartbeat. An attacker who edits Until then nudges the
+            ' clock would otherwise launder the tamper through the notifier. When
+            ' the MAC is invalid we touch nothing but TimeChanging; the service
+            ' holds the block (fail-closed) until it is re-armed from the CLI.
+            If ConfigMacIsValidForIni(ini) Then
+                ' Fail CLOSED: if either stored value is unparseable, leave Until
+                ' alone — rewriting it from garbage would end the block early.
+                Dim newUntil As DateTime? = ComputeCompensatedUntil(
+                    enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")),
+                    enc.DecryptData(ini.GetKeyValue("Time", "Until")),
+                    DateTime.Now)
+                If newUntil.HasValue Then
+                    ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.Value.ToString(CA)))
+                    ' We just rewrote a MAC-covered field ([Time] Until) over a
+                    ' config whose MAC was valid (the only change is ours), so
+                    ' re-stamp [Integrity] Mac with the existing key (clock-comp
+                    ' doesn't re-arm the block, so reuse the key - never mint one).
+                    RestampMacWithExistingKey(ini)
+                End If
             End If
             ini.SetKeyValue("Time", "TimeChanging", "no")
             ini.Save(IniPath())

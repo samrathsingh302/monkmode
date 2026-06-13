@@ -159,17 +159,23 @@ Public Class Service1
                 Dim parsedHw As DateTime
                 If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then asOfHw = parsedHw
 
-                If EffectiveBlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), asOfHw, 0, ConfigMacIsValidForIni(iniFile)) Then
+                Dim macValidAtStart As Boolean = ConfigMacIsValidForIni(iniFile)
+                If EffectiveBlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), asOfHw, 0, macValidAtStart) Then
                     ' The ONLY OnStart path that may lift the block: a successfully
                     ' parsed, genuinely past end time (measured against the trusted
                     ' high-water mark) AND a valid B7 MAC. An unparseable Until or a
                     ' tampered/invalid MAC keeps the block standing (fail closed).
                     stopMe()
-                ElseIf newHw <> "" AndAlso newHw <> storedHw Then
+                ElseIf ShouldRestampOnStart(macValidAtStart, newHw, storedHw) Then
                     ' A rare Trusted advance at OnStart (a fast restart within the
                     ' ceiling): persist the moved high-water mark and re-stamp the
                     ' MAC over the new canonical with the existing key. Normally the
                     ' boot gap is a jump so newHw = storedHw and this is a no-op.
+                    ' B7 fail-open FIX: gated on macValidAtStart - NEVER re-stamp over
+                    ' a tampered/invalid MAC. Without the guard, a guardian SCM-restart
+                    ' within the HighWater ceiling would re-bless a tampered [Time]
+                    ' Until at boot (a Trusted advance => re-stamp), exactly the
+                    ' heartbeat P0 via OnStart. Invalid MAC => leave it frozen.
                     iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
                     RestampMacWithExistingKey(iniFile)
                     iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
@@ -436,30 +442,45 @@ Public Class Service1
             ' NOT raw DateTime.Now - this is the headline B4 change. A clock
             ' rolled forward past Until does not advance HighWater (the jump is
             ' refused), so this stays "not expired" and stopMe() is not called.
-            If EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
-                stopMe()
-            Else
-                Dim iniFile = New IniFile
-                iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-                ' B4: persist the advanced high-water mark in the SAME save as the
-                ' heartbeat (one write). newHw is "now" on a Trusted tick and the
-                ' unchanged stored value on a jump/rollback (monotonic), so this
-                ' only ever moves HighWater forward at the real tick rate. Skip
-                ' when newHw is "" (a tick that couldn't read it - never blank a
-                ' good value).
-                If newHw <> "" Then
-                    iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
-                End If
-                ' B7/B4: the heartbeat just rewrote [CurrentTime] Now AND [Time]
-                ' HighWater, both MAC-covered fields, so re-stamp [Integrity] Mac
-                ' over the new canonical with the existing key - otherwise the MAC
-                ' would go invalid on the very next tick and (correctly, but
-                ' needlessly) freeze the block from ever auto-lifting. Reuses the
-                ' stored key; never re-arms.
-                RestampMacWithExistingKey(iniFile)
-                iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-            End If
+            ' B7 fail-open FIX: route the heartbeat through the pure ClassifyHeartbeat
+            ' gate. The OLD code took an If/Else on EffectiveBlockHasExpired and
+            ' re-stamped the MAC in the Else branch UNCONDITIONALLY - so a tampered
+            ' [Time] Until (macValid=False, detected this tick) was re-blessed with a
+            ' fresh valid MAC the same tick, and lifted the block next tick. That
+            ' defeated B7 with a plain Until edit (no HMAC forge, no clock change).
+            ' Now: only LIFT on a valid MAC + genuinely past end time; only RE-STAMP
+            ' when the MAC was already valid (the service's own Now/HighWater writes
+            ' are MAC-covered, so a legit config must be re-stamped or it'd go stale);
+            ' otherwise HOLD - never re-stamp over an invalid MAC. B4 unchanged:
+            ' expiry is still decided off newHwAsOf (the trusted high-water mark).
+            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds))
+                Case HeartbeatAction.Lift
+                    stopMe()
+                Case HeartbeatAction.Restamp
+                    Dim iniFile = New IniFile
+                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+                    iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
+                    ' B4: persist the advanced high-water mark in the SAME save as the
+                    ' heartbeat (one write). newHw is "now" on a Trusted tick and the
+                    ' unchanged stored value on a jump/rollback (monotonic), so this
+                    ' only ever moves HighWater forward at the real tick rate. Skip
+                    ' when newHw is "" (a tick that couldn't read it - never blank a
+                    ' good value).
+                    If newHw <> "" Then
+                        iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+                    End If
+                    ' The heartbeat just rewrote [CurrentTime] Now AND [Time] HighWater,
+                    ' both MAC-covered fields, so re-stamp [Integrity] Mac over the new
+                    ' canonical with the existing key - safe here because macValid was
+                    ' True (the only changes are ours). Reuses the stored key; never re-arms.
+                    RestampMacWithExistingKey(iniFile)
+                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+                Case HeartbeatAction.Hold
+                    ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
+                    ' Fail CLOSED - do NOT re-stamp (that would re-bless the tamper and
+                    ' let it lift next tick: the B7 bypass) and do NOT lift. The block
+                    ' stays frozen until re-armed from the CLI / removed via unblock --force.
+            End Select
         End If
     End Sub
 
@@ -517,6 +538,48 @@ Public Class Service1
     ' produces macValid (ConfigMacIsValidForIni) is the smoke-tested seam.
     Friend Shared Function EffectiveBlockHasExpired(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
+    End Function
+
+    ' What the active-block heartbeat does on a given tick (TimeChanging="no").
+    Friend Enum HeartbeatAction
+        Lift     ' valid MAC + genuinely past end time => stopMe()
+        Restamp  ' valid MAC, not yet expired => rewrite Now/HighWater + re-stamp the MAC
+        Hold     ' INVALID MAC => fail closed: neither lift nor re-stamp (freeze)
+    End Enum
+
+    ' B7 fail-open FIX (the pure, pinned decision behind the heartbeat). The bug
+    ' it closes: the old heartbeat re-stamped the MAC in the "not expired" branch
+    ' UNCONDITIONALLY, so a tampered [Time] Until (macValid=False) was re-blessed
+    ' with a fresh valid MAC the same tick and lifted the block the next tick -
+    ' defeating B7 with a plain Until edit (the 3DES key is known by design; only
+    ' the HMAC stops it). The rule:
+    '   * Lift ONLY when macValid AND the block has genuinely expired. This is
+    '     EXACTLY EffectiveBlockHasExpired (macValid AndAlso blockExpired), so the
+    '     lift condition is unchanged.
+    '   * Re-stamp ONLY when macValid (and not expired): the service's own
+    '     Now/HighWater writes are MAC-covered, so a LEGIT config must be
+    '     re-stamped or its MAC would go stale and needlessly freeze it.
+    '   * HOLD when the MAC is invalid: NEVER re-stamp over an unverified config
+    '     (that is the bug) and never lift. The block stays frozen until re-armed.
+    ' A regression test pins ClassifyHeartbeat(macValid:=False, blockExpired:=True)
+    ' = Hold (the old code would have re-stamped here). Pure + Shared so the
+    ' guardian-parity-style unit tests can pin it.
+    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean) As HeartbeatAction
+        If Not macValid Then Return HeartbeatAction.Hold
+        If blockExpired Then Return HeartbeatAction.Lift
+        Return HeartbeatAction.Restamp
+    End Function
+
+    ' B7 fail-open FIX (the OnStart sibling of ClassifyHeartbeat). OnStart re-stamps
+    ' the MAC only on a rare Trusted HighWater advance (a fast restart within the
+    ' 120s ceiling). That re-stamp MUST also require a currently-valid MAC: without
+    ' it, a guardian SCM-restart within the ceiling would re-bless a tampered
+    ' [Time] Until at boot (a Trusted advance => unguarded re-stamp => the block
+    ' lifts next heartbeat) - the same P0 as the old timer hole, via OnStart. So
+    ' re-stamp ONLY when macValid AND there is a genuine advance to persist.
+    ' Pure + Shared so it is pinned by a regression test.
+    Friend Shared Function ShouldRestampOnStart(ByVal macValid As Boolean, ByVal newHw As String, ByVal storedHw As String) As Boolean
+        Return macValid AndAlso newHw <> "" AndAlso newHw <> storedHw
     End Function
 
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----

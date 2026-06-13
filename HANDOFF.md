@@ -114,6 +114,36 @@ bypasses the manifest's UAC prompt:
   but **none has had a live elevated smoke test**, and `dist\` is stale (03:47,
   predates B4/B7). Severities in ARCHITECTURE are therefore unchanged pending
   that run.
+  0. **🔴 B7 fail-open FOUND + FIXED (2026-06-13, verifier-confirmed P0 ×2).**
+     While authoring the B7 live test I found B7 did NOT actually close its bypass:
+     the service heartbeat re-stamped `[Integrity] Mac` **unconditionally** every
+     active tick, so a plain `[Time] Until` edit (the Simple3Des key is known by
+     design; only the HMAC was meant to stop it) was detected on tick N
+     (`macValid=False`, block held) but **re-blessed with a fresh valid MAC the
+     same tick** → lifted on tick N+1 (~20s, no HMAC forge, no clock change). An
+     independent verifier confirmed P0, then a second verifier pass on the fix
+     found **two more** unguarded autonomous re-stamp sites of the same class:
+     the **notifier** clock-change handler (`Form1.vb` — launder via a clock
+     nudge) and **OnStart** (`Service1.vb` `ElseIf` Trusted-HighWater-advance —
+     launder via a guardian SCM-restart within the 120 s ceiling). **All three
+     are now guarded on `macValid`** (never re-stamp over an unverified config):
+     - Service heartbeat → pure `ClassifyHeartbeat(macValid, blockExpired)` gate
+       → {Lift, Restamp, **Hold**}; Hold = tampered → freeze, never re-stamp,
+       never lift. Lift semantics unchanged (`macValid AndAlso blockExpired`).
+     - OnStart → pure `ShouldRestampOnStart(macValid, newHw, storedHw)` gate.
+     - Notifier → gated behind a new `ConfigMacIsValidForIni(ini)` check
+       (`TimeChanging` is not MAC-covered, so legit clock-comp still works).
+     Guardian only reads the MAC (clean); CLI `WriteConfig`/`add` re-stamp but
+     are deliberate user commands (documented lower-risk residual, not fixed).
+     **Tests 250 → 257 → all green at 257:** `HeartbeatRestampTests.cs` pins both
+     gates incl. the keystones `ClassifyHeartbeat(False,True)=Hold` and
+     `ShouldRestampOnStart(False, advance)=False` (the exact bug cases).
+     **Effect: a tampered config now never auto-lifts — the only exit is
+     `unblock --force`** (the intended escape hatch). Standalone live test
+     authored: `b7-failclosed-test.ps1` (corrupts the MAC — safe, never touches
+     the 3DES-encrypted Until which would hit DecryptData→End — and asserts the
+     service does NOT re-stamp + keeps enforcing; exits via `unblock --force`).
+     NOT yet committed/live-run as of this note → see the commit + gate below.
   1. **B7 — tamper-evident config (`1794bde`, committed).** HMAC-SHA256 over the
      *decrypted* ini canonical, key = random 32 bytes DPAPI-protected
      (LocalMachine scope so service/guardian/notifier/CLI can all unprotect).
