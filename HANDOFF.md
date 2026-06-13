@@ -4,7 +4,7 @@ This file lets a new chat (or a new session) pick up exactly where we left off.
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and
 `README` (usage/build).
 
-Last updated: 2026-06-13 (B1 watchdog layer-2 guardian wired — mutual pair complete in software, NOT live-verified).
+Last updated: 2026-06-13 (B1 smoke-test extension AUTHORED — 47 checks ready in `C:\Users\samra\monkmode-smoketest\`; awaiting Samrath's elevated run before B1 flips to live-verified).
 
 ---
 
@@ -276,6 +276,38 @@ bypasses the manifest's UAC prompt:
   (stopMe ⇄ SCM-recovery/guardian interaction was reasoned about + verifier-
   walked, but never run live).
 
+- 🔶 **B1 smoke-test extension session (2026-06-13, authored, NOT YET RUN)** —
+  extended the elevated smoke test (`C:\Users\samra\monkmode-smoketest\`) from
+  27 → **47 checks** to cover BOTH B1 watchdog layers; **no repo code touched**
+  (suite untouched at 123/123). Samrath must run it elevated; only after it
+  passes does ARCHITECTURE B1 flip to live-verified/Medium.
+  1. **Baseline (+5)**: `sc qfailure MONKMODE` shows the exact policy (3×
+     RESTART, 1000 ms delay each, reset INFINITE — pins
+     `ServiceTools.SetRecoveryOptions` landed); mm_guard spawned by the
+     service's first tick (≤25s) and running in session 0 (SYSTEM).
+  2. **Kill drills (+12, section 2c)**: **K1** taskkill service → SCM restarts
+     ≤5s (layer 1), still exactly ONE mm_guard (no duplicate spawn); **K2**
+     taskkill mm_guard → service respawns it (new PID) ≤15s; **K3** taskkill
+     mm_notify → guardian relaunches it ≤15s AND it lands in the interactive
+     user session (the CreateProcessAsUser assertion); **K4** `sc failure
+     reset= 0 actions= ""` (recovery disabled, verified) + kill service →
+     guardian ALONE restarts it ≤15s (layer-2-only path), then policy restored
+     + re-verified; final check: block still enforced after all drills.
+  3. **Expiry (+3)**: 30s tight-poll (500ms) watch after the lift — service
+     STAYS stopped (no stopMe ⇄ SCM-recovery/guardian restart loop — the
+     never-run-live interaction), no stray mm_guard, mm_notify self-exits
+     after the toast.
+  4. **Authoring decisions**: block bumped 3 → 5 min (B2 tamper ~100s + B1
+     drills ~75s would have collided with expiry); "≤10s" bounds from the
+     design are nominal — checks use 15s ceilings (worst case = one full 10s
+     tick + process-start slack) and print actual elapsed; K1/K4 wait for the
+     service to be observed DOWN before polling for the restart (a stale
+     'Running' read in the instant after taskkill would fake-pass); teardown
+     AND cleanup.ps1 now disarm B1 first (`sc failure … reset= 0 actions= ""`,
+     then kill mm_guard + service together in a retry loop) — the old order
+     would fight the watchdogs mid-teardown. Both scripts parse clean (PS 5.1
+     parser); not run (fence: authoring only).
+
 - ✅ **Live elevated smoke test (2026-06-10) — PASSED 15/15.** Built `dist\`, ran an
   elevated 2-minute block on example.com, verified it was live, waited for the
   auto-lift, verified cleanup, and tore everything down. Reusable scripts live in
@@ -326,12 +358,11 @@ bypasses the manifest's UAC prompt:
 3. **Phase 3 — hardening** (closes B1–B11), e.g.:
    - ~~Watchdog (B1): service ⇄ a protected helper restart each other (the old
      MM_notify2 twin was a weak version — reinstate properly).~~ *Both layers
-     code-complete 13/06/2026 (layer 1 SCM auto-restart + layer 2 mutual
-     `mm_guard` pair) — **next step: extend + run the elevated smoke test**
-     (kill service → SCM restarts ≤~1s; `sc qfailure MONKMODE` shows policy;
-     kill guardian → respawned ≤10s; kill service with recovery disabled →
-     guardian restarts it ≤10s; expiry → clean teardown, no restart loop,
-     no stray mm_guard).*
+     code-complete 13/06/2026; smoke test EXTENDED to 47 checks same day —
+     **next step: Samrath runs it elevated**
+     (`powershell -ExecutionPolicy Bypass -File C:\Users\samra\monkmode-smoketest\run-smoketest.ps1`,
+     ~8 min; `cleanup.ps1` is the rescue). On 47/47 → ARCHITECTURE B1 row →
+     live-verified, severity High → Medium.*
    - ~~Re-assert hosts every few seconds + tamper-detect/restore (B2).~~
      ✅ Done 12/06/2026 (software side; snapshot-deletion residual documented)
      and **live-verified 12/06/2026 night — elevated smoke test 27/27**.
