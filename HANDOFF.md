@@ -8,6 +8,12 @@ Last updated: 2026-06-14 early hours (**B6, B7, B4 all code-complete + unit-test
 
 > **⚠️ DOC-DRIFT NOTE (2026-06-13 late night):** the B4 (`a32a0cd`) and B7 (`1794bde`) commits shipped code + tests but touched NO docs, so the ARCHITECTURE B4/B6/B7 rows still show their *original* (pre-mitigation) severities. Those severities are intentionally NOT yet lowered — the gate is a live elevated smoke test, which has not run for any of B4/B7/B6. See the consolidated entry at the top of §5.
 
+> **🌙 Overnight audit (14/06/2026):** read-only correctness sweep of the
+> B4/B6/B7 + cross-slice wave (`06490f9..322b63c`) — **0 P0 / 0 P1**, repo green
+> (273/273). Only doc-drift fixed (`36f0572`); all code findings (3 P2 / 8 P3,
+> none an active bypass) parked with exact patches; the elevated live smoke test
+> stays the gate. Full report: `docs/handoffs/2026-06-14-overnight-audit.md`.
+
 ---
 
 ## 1. What MonkMode is
