@@ -12,3 +12,6 @@
 
 # Assembled run folder
 dist/
+
+# Local Claude Code config (developer-local; may reference MCP servers others lack)
+.claude/settings.local.json

@@ -163,6 +163,14 @@ Ranked roughly by how easily a motivated user pulls them off.
 > ACCEPTs; this preserves B4's existing guarantee, so it changes **no** B-row
 > severity. (Also landed: audit fixes #2 timer re-entrancy, #3 atomic ini write,
 > #4 heartbeat TOCTOU re-validate, #10 `DefineTrace=false`.)
+>
+> **Known residual (Codex P2, both verify passes agree):** a BACKWARD wall-clock
+> change (DST fall-back, a large NTP/manual correction) freezes HighWater until the
+> wall catches back up, so an active block OVER-RUNS by the rollback amount. This is
+> fail-CLOSED (it over-blocks, never lets a block escape early) and low-frequency,
+> but it is a real correctness deviation. The proper fix is to track REAL monotonic
+> elapsed directly — advance HighWater on monotonic time regardless of wall
+> direction — a careful B4-core change deferred to a future session.
 
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|
