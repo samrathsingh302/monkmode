@@ -148,6 +148,21 @@ Ranked roughly by how easily a motivated user pulls them off.
 > test's clock-restore left the system clock +10 min fast (a `run-smoketest.ps1`
 > bug, since fixed with a monotonic Stopwatch); the service behaved correctly
 > throughout — it refused to lift on a dishonest clock (fail-closed).
+>
+> **Status update 2026-06-15: the notifier's clock-change compensation was
+> REMOVED (bench-verified, on-time-lift re-smoke pending).** While running the
+> parked audit fixes, the re-smoke surfaced a real EARLY-LIFT: the notifier's
+> `ComputeCompensatedUntil` could rewrite `[Time] Until` into the PAST (a backward
+> clock jiggle, after the service wrote a jumped `[CurrentTime] Now`, made stored
+> "remaining" negative) → the block lifted ~3 min early; a never-shorten clamp
+> turned that into an OVER-RUN instead. Since **B4's monotonic HighWater already
+> decides expiry off real elapsed time** (not the wall clock), the notifier's
+> `Until`-rewriting was redundant AND harmful, so `SystemEvents_TimeChanged` now
+> only toggles the `TimeChanging` cooperation flag — B4 ends the block after the
+> correct real duration across any clock change. Suite 281/281 + two verifier
+> ACCEPTs; this preserves B4's existing guarantee, so it changes **no** B-row
+> severity. (Also landed: audit fixes #2 timer re-entrancy, #3 atomic ini write,
+> #4 heartbeat TOCTOU re-validate, #10 `DefineTrace=false`.)
 
 | # | Bypass | Why it works now | Severity |
 |---|---|---|---|
