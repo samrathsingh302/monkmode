@@ -59,23 +59,65 @@ Public Class IniFile
         oReader.Close()
     End Sub
 
-    ' Used to save the data back to the file or your choice
+    ' Used to save the data back to the file or your choice.
+    ' ATOMIC WRITE (audit P2 #3): serialize to a unique temp file in the same
+    ' directory, then rename it over the target with File.Move(overwrite:=True)
+    ' (MoveFileEx REPLACE_EXISTING - atomic on NTFS, same volume). The old
+    ' StreamWriter(sFileName, False) truncated-then-rewrote in place, so a
+    ' concurrent reader (the notifier clock-comp read, or a fresh service tick)
+    ' could observe a half-written/empty ini, and two cross-process writers
+    ' (service heartbeat + notifier) could tear each other's write. With the
+    ' rename a reader always sees either the whole old file or the whole new one;
+    ' the worst residual is a benign last-writer-wins (fail-closed: a dropped
+    ' HighWater advance / clock-comp only makes the block run LONGER). The unique
+    ' temp name keeps two concurrent Saves from clobbering each other's temp, and
+    ' on any failure the existing target is left untouched.
     Public Sub Save(ByVal sFileName As String)
-        Dim oWriter As New StreamWriter(sFileName, False)
-        For Each s As IniSection In Sections
-            Trace.WriteLine(String.Format("Writing Section: [{0}]", s.Name))
-            oWriter.WriteLine(String.Format("[{0}]", s.Name))
-            For Each k As IniSection.IniKey In s.Keys
-                If k.Value <> String.Empty Then
-                    Trace.WriteLine(String.Format("Writing Key: {0}={1}", k.Name, k.Value))
-                    oWriter.WriteLine(String.Format("{0}={1}", k.Name, k.Value))
-                Else
-                    Trace.WriteLine(String.Format("Writing Key: {0}", k.Name))
-                    oWriter.WriteLine(String.Format("{0}", k.Name))
-                End If
-            Next
-        Next
-        oWriter.Close()
+        Dim dir As String = Path.GetDirectoryName(sFileName)
+        If String.IsNullOrEmpty(dir) Then dir = "."
+        Dim tmp As String = Path.Combine(dir, Path.GetFileName(sFileName) & "." & System.Guid.NewGuid().ToString("N") & ".tmp")
+        Try
+            Using oWriter As New StreamWriter(tmp, False)
+                For Each s As IniSection In Sections
+                    Trace.WriteLine(String.Format("Writing Section: [{0}]", s.Name))
+                    oWriter.WriteLine(String.Format("[{0}]", s.Name))
+                    For Each k As IniSection.IniKey In s.Keys
+                        If k.Value <> String.Empty Then
+                            Trace.WriteLine(String.Format("Writing Key: {0}={1}", k.Name, k.Value))
+                            oWriter.WriteLine(String.Format("{0}={1}", k.Name, k.Value))
+                        Else
+                            Trace.WriteLine(String.Format("Writing Key: {0}", k.Name))
+                            oWriter.WriteLine(String.Format("{0}", k.Name))
+                        End If
+                    Next
+                Next
+            End Using
+            ' Atomic replace with a short bounded retry. File.Move(overwrite:=True)
+            ' maps to MoveFileEx REPLACE_EXISTING, which throws a sharing/access
+            ' violation if a concurrent reader (IniFile.Load opens FileShare.ReadWrite)
+            ' holds the target at the rename instant. Retry briefly so a colliding read
+            ' does not drop the write; if it still cannot replace, the outer Catch
+            ' cleans up the temp and rethrows (a heartbeat tick swallows it, fail-closed
+            ' - a dropped tick, never a torn file or an early lift). Works whether or
+            ' not the target already exists.
+            Dim attempt As Integer = 0
+            Do
+                Try
+                    File.Move(tmp, sFileName, True)
+                    Exit Do
+                Catch ex As Exception When (TypeOf ex Is System.IO.IOException OrElse TypeOf ex Is System.UnauthorizedAccessException) AndAlso attempt < 8
+                    attempt += 1
+                    System.Threading.Thread.Sleep(25)
+                End Try
+            Loop
+        Catch
+            ' Leave the existing target intact; clean up the temp so we don't litter.
+            Try
+                If File.Exists(tmp) Then File.Delete(tmp)
+            Catch
+            End Try
+            Throw
+        End Try
     End Sub
 
     ' Gets all the sections

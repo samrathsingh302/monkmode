@@ -272,7 +272,20 @@ Public Class Service1
     ' real time. Seeded at OnStart; 0 = not yet seeded (=> credit 0 that tick).
     Private lastMonoMs As Long = 0
 
+    ' #2 (audit P2): serialize timer ticks. System.Timers.Timer runs with
+    ' AutoReset=True and no SynchronizingObject, so a tick that overruns the 10s
+    ' interval (it does Process.GetProcesses() + file/registry/SCM I/O) would
+    ' re-enter on another threadpool thread and race lastMonoMs + the [Time]
+    ' HighWater read-modify-write. TryEnter SKIPS a tick while one is still
+    ' running - benign (the next tick re-asserts every gate), and never blocks a
+    ' threadpool thread the way a plain SyncLock could.
+    Private ReadOnly tickLock As New Object
+
     Private Sub timer_Elapsed(ByVal sender As System.Object, ByVal e As System.Timers.ElapsedEventArgs) Handles timer.Elapsed
+        ' Re-entrancy guard (#2): if the previous tick is still running, skip this
+        ' one rather than racing it. Released in the Finally at the end of the Sub.
+        If Not Threading.Monitor.TryEnter(tickLock) Then Return
+        Try
 
         Dim processList As System.Diagnostics.Process() = Nothing
         Dim Proc As System.Diagnostics.Process
@@ -485,22 +498,34 @@ Public Class Service1
                 Case HeartbeatAction.Restamp
                     Dim iniFile = New IniFile
                     iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                    iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-                    ' B4: persist the advanced high-water mark in the SAME save as the
-                    ' heartbeat (one write). newHw is "now" on a Trusted tick and the
-                    ' unchanged stored value on a jump/rollback (monotonic), so this
-                    ' only ever moves HighWater forward at the real tick rate. Skip
-                    ' when newHw is "" (a tick that couldn't read it - never blank a
-                    ' good value).
-                    If newHw <> "" Then
-                        iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+                    ' #4 (audit P2->P3) TOCTOU FIX: macValid (above) was computed on
+                    ' the EARLIER read; this branch RELOADS the ini. A script that
+                    ' swaps a past [Time] Until + stale MAC into the read->reload
+                    ' window must not get blessed by the re-stamp below. Re-validate
+                    ' the MAC on the RELOADED object and only re-stamp if it STILL
+                    ' verifies; otherwise treat the tick as Hold - no re-stamp, no lift
+                    ' (fail-closed), next tick re-evaluates fresh. The sibling sites
+                    ' (OnStart, AppendAddToHosts, notifier) already validate the same
+                    ' object they mutate; the heartbeat was the one site that reloaded.
+                    If ConfigMacIsValidForIni(iniFile) Then
+                        iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
+                        ' B4: persist the advanced high-water mark in the SAME save as the
+                        ' heartbeat (one write). newHw is "now" on a Trusted tick and the
+                        ' unchanged stored value on a jump/rollback (monotonic), so this
+                        ' only ever moves HighWater forward at the real tick rate. Skip
+                        ' when newHw is "" (a tick that couldn't read it - never blank a
+                        ' good value).
+                        If newHw <> "" Then
+                            iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+                        End If
+                        ' The heartbeat just rewrote [CurrentTime] Now AND [Time] HighWater,
+                        ' both MAC-covered fields, so re-stamp [Integrity] Mac over the new
+                        ' canonical with the existing key - safe here because the MAC was
+                        ' re-verified just above (the only changes are ours). Reuses the
+                        ' stored key; never re-arms.
+                        RestampMacWithExistingKey(iniFile)
+                        iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
                     End If
-                    ' The heartbeat just rewrote [CurrentTime] Now AND [Time] HighWater,
-                    ' both MAC-covered fields, so re-stamp [Integrity] Mac over the new
-                    ' canonical with the existing key - safe here because macValid was
-                    ' True (the only changes are ours). Reuses the stored key; never re-arms.
-                    RestampMacWithExistingKey(iniFile)
-                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
                 Case HeartbeatAction.Hold
                     ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
                     ' Fail CLOSED - do NOT re-stamp (that would re-bless the tamper and
@@ -508,6 +533,10 @@ Public Class Service1
                     ' stays frozen until re-armed from the CLI / removed via unblock --force.
             End Select
         End If
+        Finally
+            ' #2: always release the per-tick lock so the next tick can run.
+            Threading.Monitor.Exit(tickLock)
+        End Try
     End Sub
 
     ' The enforcement cadence. Friend Consts so the guardian's unit tests can

@@ -14,6 +14,11 @@
     <OptionStrict>Off</OptionStrict>
     <OptionInfer>On</OptionInfer>
     <OptionCompare>Binary</OptionCompare>
+    <!-- #10 (audit P3): TRACE off in all configs - the inherited IniFile Trace.WriteLine
+         calls echo the DPAPI [Integrity] Key/Mac + 3DES ciphertext to OutputDebugString
+         (DebugView-capturable) on every config read/write; TRACE is on by default in
+         Release. Off here compiles those calls out entirely. -->
+    <DefineTrace>false</DefineTrace>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
   </PropertyGroup>
 

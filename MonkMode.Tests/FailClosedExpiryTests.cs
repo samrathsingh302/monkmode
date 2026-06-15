@@ -91,4 +91,45 @@ public class NotifierClockCompensationTests
         var result = mm_notify.Form1.ComputeCompensatedUntil(oldNow.ToString(EnCa), until.ToString(EnCa), newClock);
         Assert.Equal(newClock.AddMinutes(90), result);
     }
+
+    [Fact]
+    public void BackwardClockChange_DoesNotShortenTheBlock()
+    {
+        // Clock rolled BACKWARD: the naive formula moves Until earlier (shortening
+        // the block). Clock-comp must never shorten - clamp to oldUntil.
+        var oldNow = new DateTime(2026, 6, 25, 12, 0, 0);
+        var until = oldNow.AddMinutes(90);                  // 13:30
+        var newClock = new DateTime(2026, 6, 25, 11, 0, 0); // rolled back 1h
+        var result = mm_notify.Form1.ComputeCompensatedUntil(oldNow.ToString(EnCa), until.ToString(EnCa), newClock);
+        Assert.Equal(until, result); // held at oldUntil, NOT 12:30
+    }
+
+    [Fact]
+    public void PoisonedNow_PastStoredUntil_DoesNotProducePastUntil_NoEarlyLift()
+    {
+        // THE 14/06/2026 smoke-test regression. During the -IncludeClockTest drill
+        // the service wrote [CurrentTime] Now = the +10min jumped clock, overshooting
+        // Until (Now > Until => negative remaining). On the clock RESTORE the notifier
+        // computed newUntil = restoredNow + (Until - Now) = a time in the PAST, which
+        // the service then read as expired (HighWater >= past-Until) and lifted EARLY.
+        // Without the clamp this assertion fails (result is ~17:51:19); with it, held.
+        var storedUntil = new DateTime(2026, 6, 25, 18, 1, 19);
+        var poisonedNow = storedUntil.AddMinutes(7);   // service advanced Now past Until (18:08:19)
+        var restoredNow = storedUntil.AddMinutes(-3);  // clock restored below Until (17:58:19)
+        var result = mm_notify.Form1.ComputeCompensatedUntil(
+            poisonedNow.ToString(EnCa), storedUntil.ToString(EnCa), restoredNow);
+        Assert.Equal(storedUntil, result);
+        Assert.True(result >= storedUntil, "clock-comp must never move Until earlier (no early lift)");
+    }
+
+    [Fact]
+    public void ForwardClockChange_StillExtends_AfterTheClamp()
+    {
+        // The clamp must not break the legit forward case (block preserves remaining).
+        var oldNow = new DateTime(2026, 6, 25, 12, 0, 0);
+        var until = oldNow.AddMinutes(90);            // 13:30
+        var newClock = oldNow.AddMinutes(30);         // 12:30 (forward 30min)
+        var result = mm_notify.Form1.ComputeCompensatedUntil(oldNow.ToString(EnCa), until.ToString(EnCa), newClock);
+        Assert.Equal(newClock.AddMinutes(90), result); // 14:00 (extended, > oldUntil)
+    }
 }

@@ -137,7 +137,20 @@ Public Class Form1
         Dim oldNow As DateTime, oldUntil As DateTime
         If Not DateTime.TryParse(storedNow, CA, DateTimeStyles.None, oldNow) Then Return Nothing
         If Not DateTime.TryParse(storedUntil, CA, DateTimeStyles.None, oldUntil) Then Return Nothing
-        Return DateAdd(DateInterval.Second, DateDiff(DateInterval.Second, oldNow, oldUntil), currentTime)
+        Dim compensated As DateTime = DateAdd(DateInterval.Second, DateDiff(DateInterval.Second, oldNow, oldUntil), currentTime)
+        ' NEVER SHORTEN THE BLOCK (fail-closed). Clock-comp exists ONLY to stop a
+        ' block being shortened by rolling the clock; it must never itself move
+        ' Until earlier. A forward clock change yields compensated > oldUntil => keep
+        ' it (extend). A backward change, OR a poisoned [CurrentTime] Now that the
+        ' service advanced PAST Until during a forward clock excursion (remaining went
+        ' negative), yields compensated < oldUntil and would push Until BELOW the
+        ' monotonic HighWater => the service reads "expired" and lifts EARLY (the
+        ' 14/06/2026 smoke-test regression: surfaced by the -IncludeClockTest drill
+        ' once #3's atomic write made the notifier's past-Until write durable). Clamp
+        ' so Until only ever holds or grows; B4's HighWater still ends the block after
+        ' the correct real duration.
+        If compensated < oldUntil Then Return oldUntil
+        Return compensated
     End Function
 
     ' B7 tamper-evident config: same [Integrity] section the CLI stamps. The
@@ -194,8 +207,24 @@ Public Class Form1
         End Try
     End Function
 
-    ' Keep the remaining time stable across a system-clock change so a block
-    ' cannot be shortened by moving the clock forward.
+    ' Cooperate with a system-clock change. B4 (the monotonic HighWater mark) owns
+    ' clock-rollback now - expiry is decided off real elapsed time, not the wall
+    ' clock - so this handler NO LONGER rewrites [Time] Until. It used to, and that
+    ' was the cause of two 14/06/2026 smoke-test bugs once B4 was in place:
+    '   (a) after the service wrote a jumped [CurrentTime] Now during a forward clock
+    '       excursion, a backward correction made the comp push Until into the PAST
+    '       => the block lifted EARLY (a real bypass);
+    '   (b) a forward jump EXTENDED Until and the never-shorten clamp could not undo
+    '       it => the block OVER-RAN.
+    ' B4 already ends the block after the correct REAL duration across ANY clock
+    ' change (a forward jump > ceiling does not advance HighWater; a backward roll
+    ' leaves it untouched), so leaving Until alone is both correct and simpler. We
+    ' keep ONLY the TimeChanging cooperation flag (NOT a MAC-covered field): the
+    ' service pauses its expiry/re-stamp decisions while the flag is "yes", so it
+    ' never acts on a half-updated config mid clock-change. NOTE: this leaves the
+    ' notifier's B7 comp helpers (ConfigMacIsValidForIni / RestampMacWithExistingKey
+    ' / CanonicalFromIni / ComputeCompensatedUntil) unused - retained for now, safe
+    ' to delete in a later cleanup.
     Private Sub SystemEvents_TimeChanged(ByVal sender As Object, ByVal e As EventArgs)
         Try
             Dim ini As New IniFile
@@ -204,32 +233,8 @@ Public Class Form1
             ini.Save(IniPath())
 
             System.Threading.Thread.Sleep(2000)
-            ini.Load(IniPath())
 
-            ' B7 fail-open FIX: only compensate + re-stamp when the config's MAC is
-            ' CURRENTLY valid. Clock-comp rewrites [Time] Until (a MAC-covered
-            ' field) and re-stamps; doing that over a TAMPERED ini (invalid MAC)
-            ' would re-bless the tamper with a fresh valid MAC - the same hole as
-            ' the service heartbeat. An attacker who edits Until then nudges the
-            ' clock would otherwise launder the tamper through the notifier. When
-            ' the MAC is invalid we touch nothing but TimeChanging; the service
-            ' holds the block (fail-closed) until it is re-armed from the CLI.
-            If ConfigMacIsValidForIni(ini) Then
-                ' Fail CLOSED: if either stored value is unparseable, leave Until
-                ' alone — rewriting it from garbage would end the block early.
-                Dim newUntil As DateTime? = ComputeCompensatedUntil(
-                    enc.DecryptData(ini.GetKeyValue("CurrentTime", "Now")),
-                    enc.DecryptData(ini.GetKeyValue("Time", "Until")),
-                    DateTime.Now)
-                If newUntil.HasValue Then
-                    ini.SetKeyValue("Time", "Until", enc.EncryptData(newUntil.Value.ToString(CA)))
-                    ' We just rewrote a MAC-covered field ([Time] Until) over a
-                    ' config whose MAC was valid (the only change is ours), so
-                    ' re-stamp [Integrity] Mac with the existing key (clock-comp
-                    ' doesn't re-arm the block, so reuse the key - never mint one).
-                    RestampMacWithExistingKey(ini)
-                End If
-            End If
+            ini.Load(IniPath())
             ini.SetKeyValue("Time", "TimeChanging", "no")
             ini.Save(IniPath())
         Catch ex As Exception
