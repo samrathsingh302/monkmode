@@ -239,7 +239,10 @@ Module Blocker
         If File.Exists(path) Then existing = File.ReadAllText(path)
         Dim baseText As String = StripOurBlock(existing)
         Dim block As String = BuildMonkModeBlock(domains)
-        File.WriteAllText(path, baseText & vbCrLf & block)
+        ' C1: atomic write (temp + rename) so a crash mid-write can never blank or
+        ' half-write hosts and lose the user's own entries. Read-only was cleared
+        ' above, so the rename can replace the target.
+        AtomicHosts.WriteAtomic(path, baseText & vbCrLf & block)
         ' Persist the exact block just written so the service can restore it if
         ' hosts is tampered with mid-block (B2 self-heal). Best-effort: a failed
         ' snapshot write must not abort DoBlock between the hosts write and the
@@ -490,7 +493,9 @@ Module Blocker
         ClearReadOnly(path)
         Dim text As String = File.ReadAllText(path)
         If text.IndexOf(Marker, StringComparison.Ordinal) < 0 Then Return
-        File.WriteAllText(path, StripOurBlock(text))
+        ' C1: atomic write - this path's whole job is preserving the user's own
+        ' hosts content, so a torn rewrite here is the worst case to guard against.
+        AtomicHosts.WriteAtomic(path, StripOurBlock(text))
     End Sub
 
     ' Remove the B2 hosts snapshot so a reinstalled service can't self-heal the

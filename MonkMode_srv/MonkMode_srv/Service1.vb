@@ -398,13 +398,14 @@ Public Class Service1
                 If repaired IsNot Nothing Then
                     If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbNormal)
                     Try
-                        Using sw As New StreamWriter(New FileStream(hostDirS, FileMode.Create, FileAccess.Write, FileShare.Read))
-                            sw.Write(repaired)
-                        End Using
+                        ' C1: atomic write (temp + rename) - this self-heal fires
+                        ' every 10s tick, so an in-place truncate-rewrite here was
+                        ' opening a blank-hosts/lost-user-entries window constantly.
+                        AtomicHosts.WriteAtomic(hostDirS, repaired)
                     Finally
                         ' Even if the write throws mid-way, never leave hosts
-                        ' writable or a write handle leaked (a held handle stops
-                        ' the DNS client re-reading hosts — the flushdns bug).
+                        ' writable (a writable hosts is the fail-OPEN state the
+                        ' DNS client would then re-read around).
                         SetAttr(hostDirS, vbReadOnly)
                     End Try
                 End If
@@ -1088,10 +1089,12 @@ Public Class Service1
         If hostsFileNeedsRemoval Then
             original = StripMonkModeBlock(fileReader)
 
-            Dim fs2 As New FileStream(hostDirS, FileMode.Create, FileAccess.Write, FileShare.Read)
-            Dim sw2 As New StreamWriter(fs2)
-            sw2.Write(original)
-            sw2.Close()
+            ' C1: atomic write (temp + rename) so a crash while stripping our block
+            ' at expiry can never blank hosts or lose the user's own entries
+            ' (read-only was cleared above). SetAttr below keeps the existing
+            ' expiry behaviour - it is NOT a Try/Finally re-assert (which would
+            ' wrongly lock a clean hosts on the early-return paths).
+            AtomicHosts.WriteAtomic(hostDirS, original)
             SetAttr(hostDirS, vbReadOnly)
 
             Dim iniFile = New IniFile
