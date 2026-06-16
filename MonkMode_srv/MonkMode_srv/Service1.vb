@@ -1153,29 +1153,50 @@ Public Class Service1
 
     Private Sub adder_Changed(ByVal sender As System.Object, ByVal e As System.IO.FileSystemEventArgs) Handles adder.Changed
 
-        If My.Computer.FileSystem.FileExists(sWinDir & "\system32\drivers\etc\add_to_hosts") Then
-            Dim toAdd As String
-            toAdd = System.IO.File.ReadAllText(sWinDir & "\system32\drivers\etc\add_to_hosts")
-            SetAttr(hostDirS, vbNormal)
-            System.IO.File.AppendAllText(hostDirS, toAdd)
-            SetAttr(hostDirS, vbReadOnly)
-            ' Mirror the append into the repair snapshot (best effort) so a
-            ' later B2 self-heal restores the added sites too. Only when the
-            ' snapshot already exists: creating one here would make a
-            ' marker-less "expected block" that a repair would then write and
-            ' the expiry strip could never remove.
+        ' FAIL-OPEN FIX (audit #2): this is a FileSystemWatcher callback. It
+        ' clears hosts' read-only attribute to append, so an unhandled throw
+        ' here (a locked/IO-erroring hosts, a transient read) both crashes the
+        ' LocalSystem service AND leaves hosts WRITABLE - a fail-OPEN window
+        ' against the fail-closed doctrine. Mirror the timer self-heal pattern:
+        ' Try/Catch the whole body so the watcher thread/service survives, and a
+        ' Finally that ALWAYS re-asserts read-only so hosts is never left
+        ' writable on any exit path. Best-effort append; a failed add must never
+        ' weaken the block.
+        Try
+            If My.Computer.FileSystem.FileExists(sWinDir & "\system32\drivers\etc\add_to_hosts") Then
+                Dim toAdd As String
+                toAdd = System.IO.File.ReadAllText(sWinDir & "\system32\drivers\etc\add_to_hosts")
+                SetAttr(hostDirS, vbNormal)
+                System.IO.File.AppendAllText(hostDirS, toAdd)
+                ' Mirror the append into the repair snapshot (best effort) so a
+                ' later B2 self-heal restores the added sites too. Only when the
+                ' snapshot already exists: creating one here would make a
+                ' marker-less "expected block" that a repair would then write and
+                ' the expiry strip could never remove.
+                Try
+                    Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
+                    If My.Computer.FileSystem.FileExists(snapshotPath) Then
+                        System.IO.File.AppendAllText(snapshotPath, toAdd)
+                    End If
+                Catch ex As Exception
+                End Try
+                Try
+                    System.IO.File.Delete(sWinDir & "\system32\drivers\etc\add_to_hosts")
+                Catch ex As Exception
+                End Try
+            End If
+        Catch ex As Exception
+            ' Swallow so a throw can never escape the watcher callback and crash
+            ' the service. The Finally below re-locks hosts (fail-closed).
+        Finally
+            ' ALWAYS re-assert read-only - even if the append threw after the
+            ' attribute was cleared, hosts must not be left writable. Guarded +
+            ' best-effort so the re-lock itself can never throw out of Finally.
             Try
-                Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-                If My.Computer.FileSystem.FileExists(snapshotPath) Then
-                    System.IO.File.AppendAllText(snapshotPath, toAdd)
-                End If
+                If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbReadOnly)
             Catch ex As Exception
             End Try
-            Try
-                System.IO.File.Delete(sWinDir & "\system32\drivers\etc\add_to_hosts")
-            Catch ex As Exception
-            End Try
-        End If
+        End Try
 
     End Sub
 
