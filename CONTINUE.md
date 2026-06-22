@@ -19,10 +19,10 @@ everything, verify it works.
 1. **Purge "Cold-Turkey-Serious" naming.** GitHub repo is already `monkmode`
    (no rename needed). Source is clean — only docs mention Cold Turkey (keep
    minimal GPL fork attribution in README/COPYING). Remaining offender: the
-   **local folder name** `C:\Users\samra\Atlas\repos\Cold-Turkey-Serious`. Cannot
+   **local folder name** `C:\Users\samra\repos\Cold-Turkey-Serious`. Cannot
    rename mid-session (session cwd lock). End-of-session plan: try
    `Rename-Item` → if locked, fallback: fresh `git clone` to
-   `C:\Users\samra\Atlas\repos\Monk-Mode`, set remote to GitHub, leave cleanup
+   `C:\Users\samra\repos\Monk-Mode`, set remote to GitHub, leave cleanup
    script + note in old folder. Then update memory files + HANDOFF path refs.
 2. **Generate improvement plan first** (user explicitly asked plan-before-code).
 3. **Refactor entire codebase** for correctness/clarity/efficiency.

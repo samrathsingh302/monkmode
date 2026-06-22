@@ -15,10 +15,10 @@ The overnight autonomous audit (`docs/handoffs/2026-06-14-overnight-audit.md`, ~
 Your job: re-derive the true git state, decide whether `d90eb92`'s smoke-pass claim is real (or back it out), independently verify the uncommitted parked-finding code (gates → two-pass → the elevated smoke is the load-bearing close), and leave the branch ready for Samrath's merge/push call. **Nothing pushed. `_shared-context` untouched.**
 
 ## 1. Orient (read in this order)
-1. `CLAUDE.md` (fences — hosts-file/live-service danger) → `HANDOFF.md` → `ARCHITECTURE.md` (bypass surface B1–B11; check whether the B4/B6/B7 severities really got dropped) → `docs/handoffs/2026-06-14-overnight-audit.md` (the authoritative overnight report) → the newest 1–2 other dated handoffs → `C:\Users\samra\Atlas\repos\_shared-context\` SAMRATH.md + ORCHESTRATION.md (+ the Codex/Opus two-pass doctrine).
+1. `CLAUDE.md` (fences — hosts-file/live-service danger) → `HANDOFF.md` → `ARCHITECTURE.md` (bypass surface B1–B11; check whether the B4/B6/B7 severities really got dropped) → `docs/handoffs/2026-06-14-overnight-audit.md` (the authoritative overnight report) → the newest 1–2 other dated handoffs → `C:\Users\samra\vault\_shared-context\` SAMRATH.md + ORCHESTRATION.md (+ the Codex/Opus two-pass doctrine).
 2. **Re-derive the live git state** (do **not** trust the snapshot below — confirm it):
-   - `git -C "C:/Users/samra/Atlas/repos/Cold-Turkey-Serious" log --oneline --decorate --graph -15`
-   - `git -C "C:/Users/samra/Atlas/repos/Cold-Turkey-Serious" status`
+   - `git -C "C:/Users/samra/repos/Cold-Turkey-Serious" log --oneline --decorate --graph -15`
+   - `git -C "C:/Users/samra/repos/Cold-Turkey-Serious" status`
    - base is **`monkmode`** (the default branch), **not** `main` — `git rev-list --left-right --count monkmode...overnight-audit-2026-06-14`
    - `git diff --stat monkmode..overnight-audit-2026-06-14` (committed surface) **and** `git diff --stat` (the **uncommitted** surface — do not miss it) **and** `git status --porcelain` (the untracked test).
 
@@ -70,7 +70,7 @@ The report parked 9 code findings. Four are now **in the working tree, uncommitt
 **Still the headline gate (unchanged):** the elevated smoke (§3) is the only thing that closes B4/B6/B7. It is Samrath-gated.
 
 ## 5. Already handled — DO NOT redo
-- The overnight `_shared-context/AUDIT_LOG.md` errant-write incident the report flags (a read-only auditor used Bash `>>`): **leave it — it is the morning vault roll-up's job, already reconciled vault-side.** **Do NOT touch `C:\Users\samra\Atlas\repos\_shared-context` at all** — it is OFF-LIMITS for this repo's session (its own state, guard-hardening commits, and Samrath's push gate live there).
+- The overnight `_shared-context/AUDIT_LOG.md` errant-write incident the report flags (a read-only auditor used Bash `>>`): **leave it — it is the morning vault roll-up's job, already reconciled vault-side.** **Do NOT touch `C:\Users\samra\vault\_shared-context` at all** — it is OFF-LIMITS for this repo's session (its own state, guard-hardening commits, and Samrath's push gate live there).
 - The doc-drift cluster (#1) and the ARCHITECTURE §1 historical line (#11) were fixed in `36f0572` — don't redo.
 - The weak 3DES / `mm_textbox` crypto is **B7-owned and documented by design** — do **not** re-flag it (CLAUDE.md fence).
 

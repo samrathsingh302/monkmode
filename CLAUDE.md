@@ -1,6 +1,6 @@
 # MonkMode — Claude Code instructions
 **Read order, every session:** 1) this file · 2) HANDOFF.md (always — current state, gotchas) + ARCHITECTURE.md (bypass surface B1–B11) + README
-· 3) C:\Users\samra\Atlas\repos\_shared-context\SAMRATH.md + PROMPTING_GUIDE.md + ORCHESTRATION.md (who you work for, how we prompt, how to split work across agents).
+· 3) C:\Users\samra\vault\_shared-context\SAMRATH.md + PROMPTING_GUIDE.md + ORCHESTRATION.md (who you work for, how we prompt, how to split work across agents).
 If _shared-context is unreachable, say so; key defaults: free tiers only · British English, dd/mm/yyyy, £ · evidence over intuition · no data loss · don't ask about things SAMRATH.md §3 lets you decide; always ask about §4.
 
 ## What this is
