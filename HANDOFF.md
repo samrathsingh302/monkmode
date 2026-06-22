@@ -2,7 +2,7 @@
 
 Read this first, then `ARCHITECTURE.md` (component map + bypass surface) and `README` (usage/build). **Planning/backlog → [`TASKS.md`](TASKS.md).**
 
-**Current state (22/06/2026):** `monkmode` (the working branch; `master` = untouched upstream Cold Turkey) @ **`546c66d`**, **pushed and in sync with `monkmode/monkmode`** (0 ahead/0 behind), tree clean. **Unit-test gate VERIFIED green this run: `dotnet test` → 286/286** (0 failed/0 skipped, via the user-scoped SDK `C:\Users\samra\.dotnet\dotnet.exe`; CA1416 platform warnings only). Clean build; 16/06 morning-fix merged (C1 atomic hosts writes, #2 hosts fail-OPEN closed, CI Node-24); fresh-Opus-verifier SHIP.
+**Current state (22/06/2026):** `monkmode` (the working branch; `master` = untouched upstream Cold Turkey), **pushed and in sync with `monkmode/monkmode`** (0 ahead/0 behind), tree clean. **Unit-test gate VERIFIED green this run: `dotnet test` → 286/286** (0 failed/0 skipped, via the user-scoped SDK `C:\Users\samra\.dotnet\dotnet.exe`; CA1416 platform warnings only). Clean build; 16/06 morning-fix merged (C1 atomic hosts writes, #2 hosts fail-OPEN closed, CI Node-24); fresh-Opus-verifier SHIP.
 
 > ⚠️ **Everything *security-behavioural* since the 15/06 audit is BENCH-verified, NOT LIVE-verified.** The standing open gate is the **elevated smoke** (needs Administrator + arms a live LocalSystem service — a Claude session cannot run it; it's the fence). The only smoke *log* on disk is a stale **FAILED 53/11 pre-fix run** — do **not** read it as current; a clean post-fix smoke (`run-smoketest -IncludeClockTest` → 64/0; `b7-failclosed` → 10/0) has not yet been run. See `TASKS.md` ⚙ G1/G2.
 
