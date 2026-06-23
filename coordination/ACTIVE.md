@@ -1,4 +1,4 @@
-# ACTIVE.md — write-claim file for Cold-Turkey-Serious / MonkMode (ORCHESTRATION.md §14)
+# ACTIVE.md — write-claim file for Cold-Turkey-Serious / MonkMode (`LOOP-GUIDE.md` §5)
 
 No active claim.
 

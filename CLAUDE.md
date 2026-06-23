@@ -1,6 +1,6 @@
 # MonkMode — Claude Code instructions
 **Read order, every session:** 1) this file · 2) HANDOFF.md (always — current state, gotchas) + ARCHITECTURE.md (bypass surface B1–B11) + README
-· 3) C:\Users\samra\vault\_shared-context\SAMRATH.md + PROMPTING_GUIDE.md + ORCHESTRATION.md (who you work for, how we prompt, how to split work across agents).
+· 3) C:\Users\samra\vault\_shared-context\SAMRATH.md + LOOP-GUIDE.md (who you work for; how we prompt + split work across agents + run the autonomous loop — LOOP-GUIDE consolidates the former PROMPTING_GUIDE + ORCHESTRATION).
 If _shared-context is unreachable, say so; key defaults: free tiers only · British English, dd/mm/yyyy, £ · evidence over intuition · no data loss · don't ask about things SAMRATH.md §3 lets you decide; always ask about §4.
 
 ## What this is
@@ -23,6 +23,6 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 - Crypto is documented-weak by design (`Simple3Des`/`mm_textbox`, hardcoded symmetric key, no HMAC) and is **Phase-3-owned (B7)** — not a new finding; don't re-flag it.
 
 ## Working style
-One slice per session · decompose across agents first (ORCHESTRATION.md: how does this split?) ·
+One slice per session · decompose across agents first (LOOP-GUIDE.md §3: how does this split?) ·
 Phase 1 done; Phase 2 (threat model) deferred — don't start without asking; Phase 3 (hardening, B1–B11) is the backlog ·
-end every session: update HANDOFF + emit the carry-on prompt (PROMPTING_GUIDE §4).
+end every session: update HANDOFF + emit the carry-on prompt (LOOP-GUIDE.md §14).
