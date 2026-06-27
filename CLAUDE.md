@@ -1,6 +1,6 @@
 # MonkMode — Claude Code instructions
 **Read order, every session:** 1) this file · 2) current state = newest dated handoff in `C:\Users\samra\vault\dev\handoffs\Cold-Turkey-Serious\` (always — gotchas; handoffs moved to the vault 26/06/2026, no repo HANDOFF.md) + ARCHITECTURE.md (bypass surface B1–B11) + README
-· 3) C:\Users\samra\vault\_shared-context\SAMRATH.md + LOOP-GUIDE.md (who you work for; how we prompt + split work across agents + run the autonomous loop — LOOP-GUIDE consolidates the former PROMPTING_GUIDE + ORCHESTRATION).
+· 3) C:\Users\samra\vault\dev\_shared-context\SAMRATH.md + LOOP-GUIDE.md (who you work for; how we prompt + split work across agents + run the autonomous loop — LOOP-GUIDE consolidates the former PROMPTING_GUIDE + ORCHESTRATION).
 If _shared-context is unreachable, say so; key defaults: free tiers only · British English, dd/mm/yyyy, £ · evidence over intuition · no data loss · don't ask about things SAMRATH.md §3 lets you decide; always ask about §4.
 
 ## What this is
