@@ -1,5 +1,5 @@
 # MonkMode — Claude Code instructions
-**Read order, every session:** 1) this file · 2) HANDOFF.md (always — current state, gotchas) + ARCHITECTURE.md (bypass surface B1–B11) + README
+**Read order, every session:** 1) this file · 2) current state = newest dated handoff in `C:\Users\samra\vault\dev\handoffs\Cold-Turkey-Serious\` (always — gotchas; handoffs moved to the vault 26/06/2026, no repo HANDOFF.md) + ARCHITECTURE.md (bypass surface B1–B11) + README
 · 3) C:\Users\samra\vault\_shared-context\SAMRATH.md + LOOP-GUIDE.md (who you work for; how we prompt + split work across agents + run the autonomous loop — LOOP-GUIDE consolidates the former PROMPTING_GUIDE + ORCHESTRATION).
 If _shared-context is unreachable, say so; key defaults: free tiers only · British English, dd/mm/yyyy, £ · evidence over intuition · no data loss · don't ask about things SAMRATH.md §3 lets you decide; always ask about §4.
 
@@ -25,4 +25,13 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 ## Working style
 One slice per session · decompose across agents first (LOOP-GUIDE.md §3: how does this split?) ·
 Phase 1 done; Phase 2 (threat model) deferred — don't start without asking; Phase 3 (hardening, B1–B11) is the backlog ·
-end every session: update HANDOFF + emit the carry-on prompt (LOOP-GUIDE.md §14).
+end every session: write a dated handoff to `C:\Users\samra\vault\dev\handoffs\Cold-Turkey-Serious\` (newest = current state) + emit the carry-on prompt (LOOP-GUIDE.md §14).
+
+---
+
+## Markdown lives in the vault `dev/` zone (26/06/2026 — supersedes "repo reality wins" for working md)
+All working/generated markdown for **Cold-Turkey-Serious** now lives in the Obsidian vault, NOT in this repo:
+- **Handoffs** -> `C:\Users\samra\vault\dev\handoffs\Cold-Turkey-Serious\` — newest dated file = current state (no `HANDOFF.md` in the repo anymore)
+- **Tasks** -> `C:\Users\samra\vault\dev\tasks\Cold-Turkey-Serious.md`
+- **Logs** `dev\logs\Cold-Turkey-Serious\` · **Specs** `dev\specs\Cold-Turkey-Serious\` · **Plans** `dev\plans\Cold-Turkey-Serious\` · **Guides** `dev\guides\Cold-Turkey-Serious\` · **Prompts** `dev\prompts\Cold-Turkey-Serious\`
+End a session by writing a dated handoff `YYYY-MM-DD-HHmm-<slug>.md` to `dev\handoffs\Cold-Turkey-Serious\`. Write all of the above there, never in this repo. This repo keeps only code + `README.md` + `CLAUDE.md` + skills/agents + fixtures + product content; a few design docs that code loads by path stay here by necessity. Cheap context: vault `dev\index.md` + `ROUTER.md` route intent -> exact file.
