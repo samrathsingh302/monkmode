@@ -1,16 +1,17 @@
 # MonkMode — CV & interview pack
 
 Everything you need to put this project on your CV and talk about it under
-pressure. Numbers and claims below are true as of 12/06/2026 — if the project
+pressure. Numbers and claims below are true as of 14/06/2026 — if the project
 moves on, update this file in the same session.
 
 **Honesty rules (read first, they protect you):**
 - It is a **fork**. Say "forked and modernised an open-source GPLv3 blocker" —
   never imply you designed the original enforcement model. The migration,
-  CLI, tests, smoke-test bug hunt, fail-closed redesign and self-healing
-  hardening ARE yours; the three-process architecture and hosts-sinkhole idea
-  are inherited. Interviewers respect the distinction; blurring it is the
-  fastest way to lose them.
+  CLI, tests, smoke-test bug hunt, fail-closed redesign, self-healing
+  hardening and the watchdog guardian (the fourth process) ARE yours; the
+  three-process enforcement core and hosts-sinkhole idea are inherited.
+  Interviewers respect the distinction; blurring it is the fastest way to lose
+  them.
 - The crypto is **deliberately weak by design inheritance** (TripleDES,
   hardcoded key, no integrity check). If asked, own it: "known-weak, catalogued
   as bypass B7, fix planned (HMAC/signed config) — not silently ignored."
@@ -40,9 +41,9 @@ moves on, update this file in the same session.
   migrated VB.NET 2010/.NET 2.0 → .NET 8, converted the WinForms GUI to a CLI,
   and wrote the missing Windows service install/start layer via advapi32
   P/Invoke.
-- Produced a ranked bypass-surface analysis (B1–B11) of the three-process
-  enforcement design (CLI, LocalSystem service, user-session notifier) with an
-  honestly documented threat ceiling.
+- Produced a ranked bypass-surface analysis (B1–B11) of the four-process
+  enforcement design (elevated CLI, LocalSystem service, user-session notifier,
+  SYSTEM watchdog guardian) with an honestly documented threat ceiling.
 - Ran an elevated end-to-end smoke test (15/15) that exposed three bugs static
   checks missed — including Windows' DNS resolver silently ignoring `0.0.0.0`
   hosts entries and a file-handle bug that let `ipconfig /flushdns` defeat the
@@ -183,20 +184,23 @@ moves on, update this file in the same session.
 > BitLocker, a BIOS boot lock. The honest threat model is the feature.
 
 **"What's the architecture?"**
-> Three processes with different privilege levels: an elevated CLI that
+> Four processes with different privilege levels: an elevated CLI that
 > configures everything, a LocalSystem service with `CanStop=False` as the
-> enforcement core on a 10-second loop, and a per-user notifier for app-kills,
-> clock-change compensation and the expiry toast. They share state through an
+> enforcement core on a 10-second loop, a per-user notifier for app-kills,
+> clock-change compensation and the expiry toast, and a SYSTEM-session watchdog
+> guardian that SCM-restarts the service if it is force-killed and relaunches
+> the notifier (the B1 layer-2 mitigation). They share state through an
 > encrypted ini and a hosts-file marker convention — the config contract is the
-> sacred interface; all three binaries must agree on it byte-for-byte.
+> sacred interface; all four binaries must agree on it byte-for-byte.
 
 **"What would you do next?"**
-> Phase 3 in priority order: a watchdog pair so force-killing the service gets
-> it restarted (B1); Safe Mode registration (B3); moving from hosts-file to
-> WFP/firewall-layer enforcement so DoH and VPNs can't sidestep DNS (B5); and
-> an HMAC over the config so editing the end time is rejected rather than
-> trusted (B7). Each maps to a named bypass — hardening without a threat model
-> is just decoration.
+> Phase 3 has already closed the casual-to-determined kills, all live-verified:
+> a watchdog pair so force-killing the service gets it restarted (B1), Safe Mode
+> registration (B3), and an HMAC over the config so editing the end time is
+> rejected rather than trusted (B7). The biggest item still open is moving from
+> hosts-file to WFP/firewall-layer enforcement so DoH and VPNs can't sidestep
+> DNS (B5) — the one remaining Critical. Each maps to a named bypass — hardening
+> without a threat model is just decoration.
 
 **"What did you learn?"**
 > Three things I'll reuse anywhere: (1) runtime verification beats static
@@ -215,7 +219,7 @@ moves on, update this file in the same session.
 
 | Number | Fact |
 |---|---|
-| 3 | cooperating processes (elevated CLI / LocalSystem service / user notifier) |
+| 4 | cooperating processes (elevated CLI / LocalSystem service / user notifier / SYSTEM watchdog guardian) |
 | .NET 2.0 → 8 | platform migration (VS2010 VB.NET → SDK-style, 5 solutions → 1) |
 | 11 | catalogued bypasses (B1–B11), ranked, with honest ceiling (B10) |
 | 15/15 | live elevated smoke-test checks passed (block → enforce → expire → teardown) |

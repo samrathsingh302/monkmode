@@ -20,7 +20,7 @@
 (.NET 2.0, x86) programs** built from five Visual Studio 2010 solutions, with
 **no C++** (the "service" is also VB.NET).
 
-Current (post-migration) components — three cooperating VB.NET (.NET 8,
+Current (post-migration) components — four cooperating VB.NET (.NET 8,
 net8.0-windows) programs:
 
 | Project | Output exe | Runs as | Role |
@@ -28,6 +28,7 @@ net8.0-windows) programs:
 | `MonkMode` | `monkmode.exe` | User (elevated, requireAdministrator) | CLI. Parses `block`/`status`/`add`, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
 | `MonkMode_srv` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcer. Holds the hosts file locked, kills blocked session-0 processes, restores hosts & stops itself when the timer expires. |
 | `MM_notify` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, compensates for clock changes, shows a tray-balloon toast when the block ends. |
+| `MM_guard` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Guardian (B1 layer-2 watchdog). Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
 The original inherited design (described below) was a **four**-program VB.NET
 2.0 set with a WinForms GUI plus `MM_notify2` and an `MM_popup` window; those
