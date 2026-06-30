@@ -64,8 +64,9 @@ service on a 10-second loop.
   removes them when the block ends; only its own keys are ever touched.
 - **Clock-change compensation.** The notifier detects system clock changes and
   rewrites the end time so rolling the clock forward doesn't end the block.
-- **Honest threat model.** [ARCHITECTURE.md](ARCHITECTURE.md) catalogues the
-  full bypass surface (B1–B11), ranked by effort. While the user keeps admin
+- **Honest threat model.** `ARCHITECTURE.md` (kept in the project vault at
+  `vault/dev/specs/Cold-Turkey-Serious/`) catalogues the full bypass surface
+  (B1–B11), ranked by effort. While the user keeps admin
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to
   document the rest honestly rather than claim "unbreakable". Closing the

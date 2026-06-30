@@ -171,7 +171,7 @@ Module Program
     ' B6 escape hatch — the guaranteed-removal / clean-exit path. Once B1/B2/B3/
     ' B4/B7 are all fail-closed, a tampered or corrupted block never auto-lifts,
     ' and the service now resists `sc delete`. This verb is the deliberate,
-    ' documented way out (brick-insurance — see ARCHITECTURE B6 / the honest
+    ' documented way out (brick-insurance — see vault\dev\specs\Cold-Turkey-Serious\ARCHITECTURE.md B6 / the honest
     ' ceiling). It is UNCONDITIONAL by design but gated behind an explicit
     ' --force, so it can never be a casual one-word bypass: you must consciously
     ' ask to tear an active block down. Every step is best-effort and ordered so
