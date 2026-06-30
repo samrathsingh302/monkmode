@@ -15,3 +15,8 @@ dist/
 
 # Local Claude Code config (developer-local; may reference MCP servers others lack)
 .claude/settings.local.json
+
+# Secrets — never commit real env files
+.env
+.env.*
+!.env.example
