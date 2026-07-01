@@ -123,6 +123,14 @@ Module Program
             End Try
         End If
         Blocker.WriteConfig(domains, apps, untilDate)
+        ' B5a: snapshot the user's current browser DoH policy BEFORE the service
+        ' starts and forces it off, so teardown restores the pre-block state (no
+        ' data loss). Must precede InstallAndStart - the service sets the policy in
+        ' its OnStart. Never aborts arming the block; if it fails, teardown will
+        ' leave the DoH-off policy in place rather than risk deleting a user value.
+        If Not Blocker.WriteDohSnapshot() Then
+            Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at expiry rather than restore/remove it.")
+        End If
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
         Blocker.RegisterAndLaunchNotifier()
 
@@ -214,6 +222,10 @@ Module Program
         '    autorun, so a future install can't self-heal the old block back.
         Step_("Removing the hosts snapshot", Sub() Blocker.DeleteSnapshot())
         Step_("Removing the Safe Mode registration", Sub() Blocker.RemoveSafeBootKeys())
+        ' B5a: restore the user's prior browser DoH policy (or remove our lingering
+        ' "off") from the snapshot, then consume it - no data loss, so a reinstall
+        ' can't re-restore a stale prior.
+        Step_("Restoring browser DoH policy", Sub() Blocker.RemoveDohPolicy())
         Step_("Clearing the notifier autorun", Sub() Blocker.ClearNotifierAutorun())
 
         Console.WriteLine("Done. MonkMode has been removed. If your browser still shows a block, flush DNS / reopen it.")

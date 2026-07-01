@@ -216,6 +216,12 @@ Public Class Service1
         ' above, which Ends the process before here (and removes any stale keys).
         AssertSafeBootRegistration()
 
+        ' B5a: force browser DoH off on the active path (same active-path-only
+        ' placement as the SafeBoot registration - an expired/invalid block
+        ' stopMe()s above, which restores the user's prior DoH policy from the
+        ' snapshot). AssertDohPolicy is per-entry Try internally, so no outer Try.
+        AssertDohPolicy()
+
         ' B6: deny DELETE on the service object so `sc delete MONKMODE` is refused
         ' while the block is active. Same active-path-only placement as the
         ' SafeBoot registration (an expired/invalid block stopMe()s above). The
@@ -443,6 +449,21 @@ Public Class Service1
         Try
             If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
                 AssertSafeBootRegistration()
+            End If
+        Catch ex As Exception
+        End Try
+
+        ' B5a DoH-off self-heal: re-assert the browser Secure-DNS policy every tick
+        ' while the block is active (an admin can flip a browser's DoH back on or
+        ' delete our policy value between ticks). Same VERBATIM fail-closed gate as
+        ' the B3 SafeBoot re-assert above - an unparseable Until OR an invalid B7 MAC
+        ' keeps the policy asserted; stopMe() restores the user's prior at a genuine
+        ' expiry. B4: asOf is newHwAsOf (trusted high-water mark), not DateTime.Now,
+        ' so a clock-forward can't drop the policy early. Own Try so a registry hiccup
+        ' here never disturbs the SafeBoot re-assert or crashes the tick.
+        Try
+            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
+                AssertDohPolicy()
             End If
         Catch ex As Exception
         End Try
@@ -871,6 +892,112 @@ Public Class Service1
         End Try
     End Sub
 
+    ' ===== B5a: browser DoH-off policy (self-heal + no-data-loss restore) =====
+    ' Mirrors the B3 SafeBoot pair (AssertSafeBootRegistration / RemoveSafeBoot-
+    ' Registration) but over the heterogeneous browser Secure-DNS policy values in
+    ' DohPolicy.Entries, and with a SNAPSHOT-AWARE restore (B3 blind-deleted its own
+    ' dedicated leaf key; these are SHARED vendor keys that may hold the user's own
+    ' policies, so teardown must restore the user's prior value at the VALUE level -
+    ' no data loss). The pure decisions (ValueIsBlocked / RestoreActionFor / snapshot
+    ' parse) live in DohPolicy.vb and are unit-tested; the live registry/file I/O
+    ' here is the smoke-tested seam, exactly like the B3 live wiring.
+
+    ' Read one policy value (String for REG_SZ, boxed Int32 for a DWORD, or Nothing
+    ' if the value/key is absent). Read-only OpenSubKey.
+    Private Function ReadDohValue(ByVal entry As DohPolicy.DohPolicyEntry) As Object
+        Using rk As RegistryKey = Registry.LocalMachine.OpenSubKey(entry.SubKey)
+            If rk Is Nothing Then Return Nothing
+            Return rk.GetValue(entry.ValueName, Nothing)
+        End Using
+    End Function
+
+    ' Write one policy value at its Kind (creating the key path if needed).
+    Private Sub SetDohValue(ByVal entry As DohPolicy.DohPolicyEntry, ByVal value As Object)
+        Using rk As RegistryKey = Registry.LocalMachine.CreateSubKey(entry.SubKey)
+            If rk IsNot Nothing Then rk.SetValue(entry.ValueName, value, entry.Kind)
+        End Using
+    End Sub
+
+    ' Delete ONLY our value (never the subkey tree - the vendor key may hold the
+    ' user's own policies). No-op if the value/key is already absent.
+    Private Sub DeleteDohValue(ByVal entry As DohPolicy.DohPolicyEntry)
+        Using rk As RegistryKey = Registry.LocalMachine.OpenSubKey(entry.SubKey, True)
+            If rk IsNot Nothing Then rk.DeleteValue(entry.ValueName, False)
+        End Using
+    End Sub
+
+    ' B5a self-heal (live wiring). Force every browser Secure-DNS policy value to
+    ' its blocked setting so the block can't be bypassed by tunnelling DNS over
+    ' HTTPS. Read-only probe FIRST so an already-blocked value is a true no-op
+    ' (mirrors the B3 SafeBoot probe / RepairHostsBlock returning Nothing on an
+    ' intact block); only an absent or changed value triggers a write. Per-entry Try
+    ' (like AssertSafeBootRegistration) so a hiccup on one hive still attempts the
+    ' rest; best-effort - a registry failure must never crash the enforcement tick.
+    Private Sub AssertDohPolicy()
+        For Each entry As DohPolicy.DohPolicyEntry In DohPolicy.Entries
+            Try
+                If Not DohPolicy.ValueIsBlocked(entry, ReadDohValue(entry)) Then
+                    SetDohValue(entry, entry.BlockedValue)
+                End If
+            Catch ex As Exception
+            End Try
+        Next
+    End Sub
+
+    ' B5a teardown at a genuine expiry (the CLI escape hatch has its own copy).
+    ' Restore each policy value to the user's PRIOR state from the snapshot the CLI
+    ' persisted at block start (monkmode_doh.snapshot, next to the exes): restore the
+    ' prior value, or delete our value where it was ABSENT before. NO DATA LOSS - the
+    ' snapshot is authoritative for the pre-block state (an all-absent snapshot
+    ' correctly deletes our values). The snapshot is then CONSUMED (like stopMe
+    ' deleting the hosts snapshot) so a later restart into the still-expired block
+    ' can't re-restore a now-stale prior. When there is NO snapshot (the write failed
+    ' at block start, or a prior teardown already consumed it) we DO NOTHING: with no
+    ' authoritative record that WE created the current value, deleting it could clobber
+    ' the user's own value (e.g. a security-conscious user who already had DoH off, or
+    ' an already-restored prior after a first teardown) - the paramount no-data-loss
+    ' fence. The only cost is a rare lingering "off" if the snapshot write failed -
+    ' fail-safe (leaves enforcement, never deletes a value we can't prove is ours).
+    ' Per-entry Try; best-effort.
+    Private Sub RemoveDohPolicy()
+        Dim snapshotPath As String = Application.StartupPath + "\monkmode_doh.snapshot"
+        Dim haveSnapshot As Boolean = False
+        Dim parsed As Object() = Nothing
+        Try
+            If My.Computer.FileSystem.FileExists(snapshotPath) Then
+                parsed = DohPolicy.ParseSnapshot(My.Computer.FileSystem.ReadAllText(snapshotPath))
+                haveSnapshot = True
+            End If
+        Catch ex As Exception
+            haveSnapshot = False
+        End Try
+
+        ' No authoritative snapshot => do nothing (see the header: never delete a
+        ' value we cannot prove we created).
+        If Not haveSnapshot Then Return
+
+        Dim ents As DohPolicy.DohPolicyEntry() = DohPolicy.Entries
+        For i As Integer = 0 To ents.Length - 1
+            Dim entry As DohPolicy.DohPolicyEntry = ents(i)
+            Try
+                Dim action = DohPolicy.RestoreActionFor(entry, parsed(i))
+                If action.delete Then
+                    DeleteDohValue(entry)
+                Else
+                    SetDohValue(entry, action.value)
+                End If
+            Catch ex As Exception
+            End Try
+        Next
+
+        ' Consume the snapshot so a later restart into the expired block takes the
+        ' safe do-nothing path above instead of re-restoring a now-stale prior.
+        Try
+            System.IO.File.Delete(snapshotPath)
+        Catch ex As Exception
+        End Try
+    End Sub
+
     ' B7: build the canonical (decrypted plaintext, fixed field order) the MAC is
     ' computed over, from a loaded ini. Byte-identical construction to the CLI's
     ' Blocker.CanonicalFromIni and the notifier/guardian readers - all parties
@@ -1117,6 +1244,12 @@ Public Class Service1
         ' Mode. Best-effort; the OnStart path also removes stale keys on a restart
         ' into an already-expired block.
         RemoveSafeBootRegistration()
+
+        ' B5a: restore the user's prior browser DoH policy (or remove ours) from the
+        ' snapshot - a genuinely expired block must undo the DoH-off enforcement with
+        ' no data loss. Snapshot-aware + per-entry Try internally; consumes the
+        ' snapshot so a restart into the expired block can't re-restore a stale prior.
+        RemoveDohPolicy()
 
         ' B1 layer 2: tear the guardian down too (best effort). It would also
         ' stand down by itself on its next tick - it reads the same parsed,

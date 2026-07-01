@@ -31,6 +31,9 @@ Module Blocker
     Public Const ServiceDisplay As String = "MonkMode"
     Public Const IniName As String = "monkmode_settings.ini"
     Public Const SnapshotName As String = "monkmode_hosts.block"
+    ' B5a: the browser-DoH-policy snapshot (the user's prior policy values captured
+    ' at block start) so teardown can restore them with no data loss.
+    Public Const DohSnapshotName As String = "monkmode_doh.snapshot"
     Public Const Marker As String = "#### MonkMode Entries ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
@@ -73,6 +76,13 @@ Module Blocker
     ' or blanks hosts between ticks (B2 self-heal).
     Public Function SnapshotPath() As String
         Return Path.Combine(AppDir(), SnapshotName)
+    End Function
+
+    ' B5a: the browser-DoH-policy snapshot path, next to the exes like the hosts
+    ' snapshot. Written by WriteDohSnapshot at block start; read by RemoveDohPolicy
+    ' (the escape hatch) and the service's own RemoveDohPolicy at expiry.
+    Public Function DohSnapshotPath() As String
+        Return Path.Combine(AppDir(), DohSnapshotName)
     End Function
 
     Public Function HostsPath() As String
@@ -517,6 +527,105 @@ Module Blocker
             Catch
             End Try
         Next
+    End Sub
+
+    ' ---- B5a: browser DoH-off policy (snapshot at block start + escape-hatch
+    ' restore). The CLI writes the pre-block snapshot and owns the escape-hatch
+    ' teardown; the service (its own RemoveDohPolicy) re-asserts + restores at
+    ' expiry. The pure decisions live in DohPolicy.vb; the live registry/file I/O
+    ' here is the smoke-tested seam. This RemoveDohPolicy is the CLI copy of the
+    ' service's (same shared pure helpers), for the `unblock --force` path. ----
+
+    ' Read one policy value (String for REG_SZ, boxed Int32 for a DWORD, or Nothing
+    ' if absent). Read-only OpenSubKey.
+    Private Function ReadDohValue(ByVal entry As DohPolicy.DohPolicyEntry) As Object
+        Using rk As RegistryKey = Registry.LocalMachine.OpenSubKey(entry.SubKey)
+            If rk Is Nothing Then Return Nothing
+            Return rk.GetValue(entry.ValueName, Nothing)
+        End Using
+    End Function
+
+    ' Write one policy value at its Kind (creating the key path if needed).
+    Private Sub SetDohValue(ByVal entry As DohPolicy.DohPolicyEntry, ByVal value As Object)
+        Using rk As RegistryKey = Registry.LocalMachine.CreateSubKey(entry.SubKey)
+            If rk IsNot Nothing Then rk.SetValue(entry.ValueName, value, entry.Kind)
+        End Using
+    End Sub
+
+    ' Delete ONLY our value (never the shared vendor subkey tree). No-op if absent.
+    Private Sub DeleteDohValue(ByVal entry As DohPolicy.DohPolicyEntry)
+        Using rk As RegistryKey = Registry.LocalMachine.OpenSubKey(entry.SubKey, True)
+            If rk IsNot Nothing Then rk.DeleteValue(entry.ValueName, False)
+        End Using
+    End Sub
+
+    ' B5a: snapshot the user's CURRENT browser DoH policy values BEFORE the service
+    ' forces them off, so teardown can restore the pre-block state with no data
+    ' loss. Called at block start, BEFORE InstallAndStart (the service sets the
+    ' policy in its OnStart, after this). Best-effort: a failed snapshot write must
+    ' not abort arming the block - teardown then degrades to "remove only our
+    ' lingering off" (RemoveDohPolicy's no-snapshot path), like B2 without its snapshot.
+    ' Returns True on success. False => teardown can't restore the user's prior DoH
+    ' policy (it will DO NOTHING at expiry - fail-safe, our "off" may linger), so the
+    ' caller warns the user. Never throws / never aborts arming the block.
+    Public Function WriteDohSnapshot() As Boolean
+        Try
+            Dim ents As DohPolicy.DohPolicyEntry() = DohPolicy.Entries
+            Dim priors(ents.Length - 1) As Object
+            For i As Integer = 0 To ents.Length - 1
+                priors(i) = ReadDohValue(ents(i))
+            Next
+            File.WriteAllText(DohSnapshotPath(), DohPolicy.BuildSnapshot(priors))
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' B5a escape-hatch teardown (the CLI copy of the service's RemoveDohPolicy).
+    ' Restore each browser DoH policy value to the user's prior state from the
+    ' snapshot (no data loss - restore the prior, or delete our value where it was
+    ' ABSENT before), then consume the snapshot. When there is NO snapshot (write
+    ' failed at block start, or a prior teardown consumed it) DO NOTHING: with no
+    ' authoritative record that WE created the current value, deleting it could
+    ' clobber the user's own value (e.g. a user who already had DoH off) - the
+    ' paramount no-data-loss fence. Cost = a rare lingering "off"; fail-safe.
+    ' Best-effort, per-entry.
+    Public Sub RemoveDohPolicy()
+        Dim path As String = DohSnapshotPath()
+        Dim haveSnapshot As Boolean = False
+        Dim parsed As Object() = Nothing
+        Try
+            If File.Exists(path) Then
+                parsed = DohPolicy.ParseSnapshot(File.ReadAllText(path))
+                haveSnapshot = True
+            End If
+        Catch
+            haveSnapshot = False
+        End Try
+
+        ' No authoritative snapshot => do nothing (never delete a value we cannot
+        ' prove we created).
+        If Not haveSnapshot Then Return
+
+        Dim ents As DohPolicy.DohPolicyEntry() = DohPolicy.Entries
+        For i As Integer = 0 To ents.Length - 1
+            Dim entry As DohPolicy.DohPolicyEntry = ents(i)
+            Try
+                Dim action = DohPolicy.RestoreActionFor(entry, parsed(i))
+                If action.delete Then
+                    DeleteDohValue(entry)
+                Else
+                    SetDohValue(entry, action.value)
+                End If
+            Catch
+            End Try
+        Next
+
+        Try
+            File.Delete(path)
+        Catch
+        End Try
     End Sub
 
     ' Clear the HKCU Run autorun for the notifier. Best-effort.
