@@ -787,9 +787,13 @@ Public Class Service1
         ' terminator was CRLF and silently ate one character of the user's
         ' own content whenever the hosts file used LF endings.
         original = Microsoft.VisualBasic.Left(fileReader, startpos)
-        If original.EndsWith(vbCrLf) Then
+        ' Ordinal EndsWith (matching the ordinal marker IndexOf above): the drop
+        ' is by index, so a culture-sensitive match on a CRLF followed by a
+        ' Unicode-ignorable char (e.g. U+00AD) would chop by count and leave a
+        ' dangling CR. Ordinal keeps the strip byte-exact.
+        If original.EndsWith(vbCrLf, StringComparison.Ordinal) Then
             original = Microsoft.VisualBasic.Left(original, original.Length - 2)
-        ElseIf original.EndsWith(vbLf) OrElse original.EndsWith(vbCr) Then
+        ElseIf original.EndsWith(vbLf, StringComparison.Ordinal) OrElse original.EndsWith(vbCr, StringComparison.Ordinal) Then
             original = Microsoft.VisualBasic.Left(original, original.Length - 1)
         End If
 

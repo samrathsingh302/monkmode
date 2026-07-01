@@ -186,3 +186,106 @@ public class CliStripOurBlockTests
         Assert.Equal(baseText, monkmode.Service1.StripMonkModeBlock(written));
     }
 }
+
+public class CliServiceStripParityTests
+{
+    private const string Marker = "#### MonkMode Entries ####";
+
+    // #7 (audit P3): the CLI's LIFT strip (Blocker.StripMonkModeBlock, used by
+    // RestoreHostsFromStrip / `unblock --force`) must be byte-for-byte identical
+    // to the service's expiry strip (Service1.StripMonkModeBlock), so lifting a
+    // block via the escape hatch and via a natural expiry leave hosts in the
+    // exact same state. Before the fix the lift path called StripOurBlock, which
+    // trims trailing whitespace, so the two teardowns diverged on a user's
+    // trailing blank line above the marker (whitespace-only, but a real
+    // divergence and a false "same strip" code comment).
+    [Theory]
+    [InlineData("")]
+    [InlineData("# my hosts\r\n127.0.0.1 box\r\n")]                                                // no marker, trailing CRLF
+    [InlineData("# my hosts\r\n127.0.0.1 box")]                                                    // no marker, no trailing newline
+    [InlineData("# my hosts   \t \r\n")]                                                           // no marker, trailing spaces+tab
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n")]               // block at end, CRLF
+    [InlineData("127.0.0.1 box\n#### MonkMode Entries ####\n0.0.0.0 x.com\n")]                     // LF endings
+    [InlineData("127.0.0.1 box\r\n\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n")]           // user blank line before marker (the divergence)
+    [InlineData("127.0.0.1 box\r\n  \t\r\n#### MonkMode Entries ####\r\n")]                        // user whitespace-only line before marker
+    [InlineData("127.0.0.1 box#### MonkMode Entries ####\r\n")]                                    // marker glued to content
+    [InlineData("#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n")]                                // whole file is ours
+    [InlineData("#### MONKMODE ENTRIES ####\r\n127.0.0.1 box\r\n#### MonkMode Entries ####\r\n")]  // case-variant above the real marker
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 a\r\n#### MonkMode Entries ####\r\n")] // doubled marker
+    public void CliLiftStrip_MatchesServiceExpiryStrip_ByteForByte(string hosts)
+    {
+        Assert.Equal(
+            monkmode.Service1.StripMonkModeBlock(hosts),
+            MonkMode.Blocker.StripMonkModeBlock(hosts));
+    }
+
+    // The re-block strip (StripOurBlock, used by WriteHostsBlock) must be
+    // behaviour-identical to the ORIGINAL ordinal implementation (IndexOf +
+    // Substring + TrimEnd) - the refactor's "zero behaviour change" claim.
+    // Asserted against an independent reimplementation (LegacyStripOurBlock), NOT
+    // against StripOurBlock's own new definition, so it has real teeth.
+    [Theory]
+    [InlineData("")]
+    [InlineData("# my hosts\r\n127.0.0.1 box\r\n")]
+    [InlineData("# my hosts   \t \r\n")]
+    [InlineData("127.0.0.1 box\r\n\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n")]
+    [InlineData("127.0.0.1 box\r\n  \t\r\n#### MonkMode Entries ####\r\n")]
+    [InlineData("#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n")]
+    public void ReBlockStrip_MatchesLegacyOrdinalSemantics(string hosts)
+    {
+        Assert.Equal(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
+    }
+
+    // A CRLF followed by a Unicode-ignorable char (U+00AD soft hyphen) right
+    // before the marker is the one input class where a culture-sensitive
+    // EndsWith would diverge from the ordinal original: it would match "\r\n",
+    // drop two chars BY INDEX (the LF + the ignorable) and leave a dangling CR.
+    // Both StripMonkModeBlock copies use ordinal EndsWith, so the ignorable is
+    // preserved and the strip matches the legacy ordinal impl. Built with (char)
+    // code points so the source stays pure-ASCII (no invisible bytes on disk).
+    [Fact]
+    public void SoftHyphenBeforeMarker_OrdinalStrip_KeepsItAndMatchesLegacy()
+    {
+        string soft = ((char)0x00AD).ToString();
+        string hosts = "127.0.0.1 box\r\n" + soft + Marker + "\r\n";
+        Assert.Equal(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
+        Assert.Equal("127.0.0.1 box\r\n" + soft, MonkMode.Blocker.StripMonkModeBlock(hosts)); // ignorable kept, no dangling CR
+        Assert.Equal(                                                                          // CLI<->service parity holds here too
+            monkmode.Service1.StripMonkModeBlock(hosts),
+            MonkMode.Blocker.StripMonkModeBlock(hosts));
+    }
+
+    [Fact]
+    public void ZeroWidthSpaceBeforeMarker_OrdinalStrip_KeepsItAndMatchesLegacy()
+    {
+        string zwsp = ((char)0x200B).ToString();
+        string hosts = "127.0.0.1 box\r\n" + zwsp + Marker + "\r\n";
+        Assert.Equal(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
+        Assert.Equal("127.0.0.1 box\r\n" + zwsp, MonkMode.Blocker.StripMonkModeBlock(hosts));
+        Assert.Equal(
+            monkmode.Service1.StripMonkModeBlock(hosts),
+            MonkMode.Blocker.StripMonkModeBlock(hosts));
+    }
+
+    // The original pre-refactor StripOurBlock, verbatim, as an independent oracle
+    // for the tests above (ordinal IndexOf + Substring + TrimEnd).
+    private static string LegacyStripOurBlock(string text)
+    {
+        int idx = text.IndexOf(Marker, System.StringComparison.Ordinal);
+        if (idx >= 0) text = text.Substring(0, idx);
+        return text.TrimEnd('\r', '\n', ' ', '\t');
+    }
+
+    // The concrete case #7 closes: a user's blank line above the marker now
+    // survives an `unblock` lift byte-for-byte, exactly as it already survived a
+    // natural service expiry (the CLI lift used to trim it away).
+    [Fact]
+    public void UserBlankLineBeforeMarker_SurvivesCliLift_LikeServiceExpiry()
+    {
+        const string hosts = "127.0.0.1 box\r\n\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n";
+        Assert.Equal("127.0.0.1 box\r\n", MonkMode.Blocker.StripMonkModeBlock(hosts));
+        Assert.Equal(
+            monkmode.Service1.StripMonkModeBlock(hosts),
+            MonkMode.Blocker.StripMonkModeBlock(hosts));
+    }
+}

@@ -228,10 +228,44 @@ Module Blocker
         End If
     End Sub
 
+    ' The service's stopMe() marker-block strip, ported into the CLI so the
+    ' `unblock` LIFT path (RestoreHostsFromStrip) removes our block EXACTLY as the
+    ' service does at a genuine expiry: cut at the first ordinal marker, then drop
+    ' only the single line terminator the writer placed before it, so the user's
+    ' own content - including any trailing blank line - is preserved byte-for-byte.
+    ' Kept behaviourally identical to monkmode.Service1.StripMonkModeBlock and
+    ' pinned by the CLI<->service parity tests; a CLI-side copy is needed because
+    ' MonkMode (CLI) and monkmode (service) are separate assemblies that cannot
+    ' reference one another - the same reason ServiceSecurity / ConfigIntegrity /
+    ' DohPolicy are duplicated and parity-pinned.
+    Friend Function StripMonkModeBlock(ByVal text As String) As String
+        Dim startpos As Integer = text.IndexOf(Marker, StringComparison.Ordinal)
+        If startpos < 0 Then
+            Return text
+        End If
+        Dim original As String = Microsoft.VisualBasic.Left(text, startpos)
+        ' Ordinal EndsWith (matching the ordinal marker IndexOf above): the drop
+        ' is by index, so a culture-sensitive match on a CRLF followed by a
+        ' Unicode-ignorable char (e.g. U+00AD) would chop by count and leave a
+        ' dangling CR. Ordinal keeps the strip byte-exact.
+        If original.EndsWith(vbCrLf, StringComparison.Ordinal) Then
+            original = Microsoft.VisualBasic.Left(original, original.Length - 2)
+        ElseIf original.EndsWith(vbLf, StringComparison.Ordinal) OrElse original.EndsWith(vbCr, StringComparison.Ordinal) Then
+            original = Microsoft.VisualBasic.Left(original, original.Length - 1)
+        End If
+        Return original
+    End Function
+
+    ' The tail-normalising strip used by the RE-BLOCK path (WriteHostsBlock):
+    ' remove our marker block via the byte-for-byte StripMonkModeBlock, then trim
+    ' any trailing CR/LF/space/tab, because the caller immediately re-appends
+    ' vbCrLf + a fresh block - normalising the tail stops a blank line
+    ' accumulating before the marker across repeated blocks. Deliberately NOT
+    ' byte-for-byte (that is StripMonkModeBlock's job, used by the lift path):
+    ' StripOurBlock(x) == StripMonkModeBlock(x) with the trailing whitespace
+    ' trimmed, pinned by the strip-parity tests.
     Friend Function StripOurBlock(ByVal text As String) As String
-        Dim idx As Integer = text.IndexOf(Marker, StringComparison.Ordinal)
-        If idx >= 0 Then text = text.Substring(0, idx)
-        Return text.TrimEnd(CChar(vbCr), CChar(vbLf), " "c, CChar(vbTab))
+        Return StripMonkModeBlock(text).TrimEnd(CChar(vbCr), CChar(vbLf), " "c, CChar(vbTab))
     End Function
 
     ' The exact MonkMode-owned text appended to hosts: the marker line plus the
@@ -495,8 +529,13 @@ Module Blocker
     End Function
 
     ' Unlock hosts and strip ONLY the MonkMode marker block, preserving the
-    ' user's own content (reuses StripOurBlock - the same data-loss-safe strip
-    ' the service's expiry path uses). No-op if hosts has no MonkMode block.
+    ' user's own content byte-for-byte via StripMonkModeBlock - the SAME strip
+    ' the service's expiry path (stopMe -> StripMonkModeBlock) uses, so lifting a
+    ' block through `unblock --force` and lifting it through a natural expiry
+    ' leave hosts in identical states. (This path previously called StripOurBlock,
+    ' which trims the tail, so the two teardowns diverged on a user's trailing
+    ' blank line - whitespace-only, but a real divergence; audit P3 #7.) No-op if
+    ' hosts has no MonkMode block.
     Public Sub RestoreHostsFromStrip()
         Dim path As String = HostsPath()
         If Not File.Exists(path) Then Return
@@ -505,7 +544,7 @@ Module Blocker
         If text.IndexOf(Marker, StringComparison.Ordinal) < 0 Then Return
         ' C1: atomic write - this path's whole job is preserving the user's own
         ' hosts content, so a torn rewrite here is the worst case to guard against.
-        AtomicHosts.WriteAtomic(path, StripOurBlock(text))
+        AtomicHosts.WriteAtomic(path, StripMonkModeBlock(text))
     End Sub
 
     ' Remove the B2 hosts snapshot so a reinstalled service can't self-heal the

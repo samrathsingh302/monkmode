@@ -204,6 +204,50 @@ public class RemoveDenyDeleteAceTests
         const string input = "O:SYG:SYD:(A;;FA;;;SY)S:(D;;SD;;;BA)";
         Assert.Equal(input, MonkMode.ServiceSecurity.RemoveDenyDeleteAce(input));
     }
+
+    // #8 (audit P3): teardown must strip EVERY deny-DELETE ACE, not just the
+    // first. AddDenyDeleteAce never stacks a duplicate, but an attacker can
+    // hand-add a second (D;;SD;;;BA) via `sc sdset` mid-block; if teardown left
+    // one behind the service would stay DELETE-denied and `unblock --force` /
+    // expiry could no longer delete it.
+    [Fact]
+    public void RemovesEveryDenyAce_NotJustTheFirst()
+    {
+        const string input = "O:SYG:SYD:(D;;SD;;;BA)(D;;SD;;;BA)(A;;FA;;;SY)(A;;FA;;;BA)";
+        const string expected = "O:SYG:SYD:(A;;FA;;;SY)(A;;FA;;;BA)";
+        string cleaned = MonkMode.ServiceSecurity.RemoveDenyDeleteAce(input);
+        Assert.Equal(expected, cleaned);
+        Assert.False(MonkMode.ServiceSecurity.SddlHasDenyDelete(cleaned)); // now deletable
+    }
+
+    // Duplicates need not be adjacent - the fixed-point loop clears them wherever
+    // they sit in the DACL.
+    [Fact]
+    public void RemovesNonAdjacentDuplicates()
+    {
+        const string input = "O:SYG:SYD:(D;;SD;;;BA)(A;;FA;;;SY)(D;;SD;;;BA)(A;;FA;;;BA)";
+        const string expected = "O:SYG:SYD:(A;;FA;;;SY)(A;;FA;;;BA)";
+        Assert.Equal(expected, MonkMode.ServiceSecurity.RemoveDenyDeleteAce(input));
+    }
+
+    // A lower-cased hand-edited duplicate is stripped too (case-insensitive).
+    [Fact]
+    public void RemovesMixedCaseDuplicates()
+    {
+        const string input = "O:SYG:SYD:(D;;SD;;;BA)(d;;sd;;;ba)(A;;FA;;;SY)";
+        const string expected = "O:SYG:SYD:(A;;FA;;;SY)";
+        Assert.Equal(expected, MonkMode.ServiceSecurity.RemoveDenyDeleteAce(input));
+    }
+
+    // Even when clearing multiple DACL denies, an identical token in the SACL is
+    // never touched - the loop respects the D: section boundary on every pass.
+    [Fact]
+    public void RemovesAllDaclDenies_ButNeverTheSacl()
+    {
+        const string input = "O:SYG:SYD:(D;;SD;;;BA)(D;;SD;;;BA)(A;;FA;;;SY)S:(D;;SD;;;BA)";
+        const string expected = "O:SYG:SYD:(A;;FA;;;SY)S:(D;;SD;;;BA)";
+        Assert.Equal(expected, MonkMode.ServiceSecurity.RemoveDenyDeleteAce(input));
+    }
 }
 
 public class BrickSafetyRoundTripTests
@@ -244,6 +288,7 @@ public class ServiceSecurityParityTests
     [InlineData("O:SYG:SYD:(A;;FA;;;SY)(A;;FA;;;BA)")]
     [InlineData("O:SYG:SYD:PAI(A;;FA;;;SY)")]
     [InlineData("O:SYG:SYD:(D;;SD;;;BA)(A;;FA;;;SY)")]
+    [InlineData("O:SYG:SYD:(D;;SD;;;BA)(D;;SD;;;BA)(A;;FA;;;SY)")] // #8: doubled deny stripped identically by both copies
     [InlineData("O:SYG:SY")]
     public void Functions_AgreeAcrossCopies(string sddl)
     {

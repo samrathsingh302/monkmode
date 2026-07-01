@@ -96,18 +96,28 @@ Namespace Global.MonkMode
         End Function
 
         ' The exact inverse of AddDenyDeleteAce: remove the deny-DELETE-for-BA
-        ' ACE wherever it sits in the DACL, leaving everything else byte-for-byte
-        ' intact. Removes the first matching occurrence (idempotent in practice -
-        ' AddDenyDeleteAce never inserts a duplicate). Case-insensitive match (a
-        ' lower-cased hand-edited copy is still removed). Returns the input
-        ' unchanged when the ACE is absent, so RemoveDenyDeleteAce(x) == x for
-        ' any x without the ACE - and therefore RemoveDenyDeleteAce(
-        ' AddDenyDeleteAce(x)) == x (the brick-safety / teardown-undo proof).
+        ' ACE(s) wherever they sit in the DACL, leaving everything else
+        ' byte-for-byte intact. Removes EVERY matching occurrence, not just the
+        ' first: AddDenyDeleteAce never stacks a duplicate, but an attacker can
+        ' hand-add a second (D;;SD;;;BA) via `sc sdset` mid-block, and a single
+        ' leftover would keep the object DELETE-denied so the `unblock --force`
+        ' escape hatch / expiry teardown could no longer delete the service.
+        ' Looping to a fixed point (each pass strips one occurrence, so the SDDL
+        ' strictly shrinks and the loop always terminates) guarantees teardown
+        ' leaves a removable service. Case-insensitive match (a lower-cased
+        ' hand-edited copy is still removed); only the D: (DACL) portion is
+        ' touched, never a SACL copy of the token. Returns the input unchanged
+        ' when no ACE is present, so RemoveDenyDeleteAce(x) == x for any x without
+        ' the ACE - and therefore RemoveDenyDeleteAce(AddDenyDeleteAce(x)) == x
+        ' (the brick-safety / teardown-undo proof).
         Friend Function RemoveDenyDeleteAce(ByVal sddl As String) As String
             If sddl Is Nothing Then Return Nothing
             Dim idx As Integer = IndexOfDenyAce(sddl)
-            If idx < 0 Then Return sddl
-            Return sddl.Substring(0, idx) & sddl.Substring(idx + DenyDeleteAce.Length)
+            Do While idx >= 0
+                sddl = sddl.Substring(0, idx) & sddl.Substring(idx + DenyDeleteAce.Length)
+                idx = IndexOfDenyAce(sddl)
+            Loop
+            Return sddl
         End Function
 
         ' ---- SDDL parsing helpers (private) ----
