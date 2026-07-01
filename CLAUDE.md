@@ -1,5 +1,5 @@
 # MonkMode — Claude Code instructions
-**Read order, every session:** 1) this file · 2) current state = newest dated handoff in `C:\Users\samra\vault\dev\Cold-Turkey-Serious\handoffs\` (always — gotchas; handoffs moved to the vault 26/06/2026, no repo HANDOFF.md) + `C:\Users\samra\vault\dev\Cold-Turkey-Serious\specs\ARCHITECTURE.md` (bypass surface B1–B11) + README
+**Read order, every session:** 1) this file · 2) current state = newest dated handoff in `C:\Users\samra\vault\dev\monk-mode\handoffs\` (always — gotchas; handoffs moved to the vault 26/06/2026, no repo HANDOFF.md) + `C:\Users\samra\vault\dev\monk-mode\specs\ARCHITECTURE.md` (bypass surface B1–B11) + README
 · 3) C:\Users\samra\vault\dev\_shared-context\SAMRATH.md + LOOP-GUIDE.md (who you work for; how we prompt + split work across agents + run the autonomous loop — LOOP-GUIDE consolidates the former PROMPTING_GUIDE + ORCHESTRATION).
 If _shared-context is unreachable, say so; key defaults: free tiers only · British English, dd/mm/yyyy, £ · evidence over intuition · no data loss · don't ask about things SAMRATH.md §3 lets you decide; always ask about §4.
 
@@ -13,7 +13,7 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 - `MM_notify/` → `mm_notify.exe` (user-session notifier: app-kill, clock-change comp, tray-toast at expiry).
 - `MM_guard/` → `mm_guard.exe` (SYSTEM-session watchdog guardian spawned by the service: SCM-restarts a killed service, relaunches the notifier; exits only on genuine expiry).
 - Build: `C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release` (SDK is user-scoped, not on PATH).
-- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is the manual elevated smoke test (last run **63/63, 14/06/2026** — B1 + B2 + B4 + B6 + B7 live-verified, B3 registration live-verified; the B3 in-Safe-Mode run was not reboot-tested, by choice; rebuild `dist\` first via `tools\build-dist.ps1`, see `C:\Users\samra\vault\dev\Cold-Turkey-Serious\specs\ARCHITECTURE.md` §4).
+- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is the manual elevated smoke test (last run **63/63, 14/06/2026** — B1 + B2 + B4 + B6 + B7 live-verified, B3 registration live-verified; the B3 in-Safe-Mode run was not reboot-tested, by choice; rebuild `dist\` first via `tools\build-dist.ps1`, see `C:\Users\samra\vault\dev\monk-mode\specs\ARCHITECTURE.md` §4).
 
 ## Fences
 - **Never run the service / CLI during dev or audit** — it edits the LIVE hosts file, adds an HKCU `Run` entry, and installs a `CanStop=False` LocalSystem service. Read-only analysis unless Samrath explicitly asks for a live test. Unit tests must never touch real hosts/registry/SCM either.
@@ -25,21 +25,21 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 ## Working style
 One slice per session · decompose across agents first (LOOP-GUIDE.md §3: how does this split?) ·
 Phase 1 done; Phase 2 (threat model) deferred — don't start without asking; Phase 3 (hardening, B1–B11) is the backlog ·
-end every session: write a dated handoff to `C:\Users\samra\vault\dev\Cold-Turkey-Serious\handoffs\` (newest = current state) + emit the carry-on prompt (LOOP-GUIDE.md §14).
+end every session: write a dated handoff to `C:\Users\samra\vault\dev\monk-mode\handoffs\` (newest = current state) + emit the carry-on prompt (LOOP-GUIDE.md §14).
 
 ---
 
 ## Markdown lives in the vault `dev/` zone (26/06/2026 — supersedes "repo reality wins" for working md)
-All working/generated markdown for **Cold-Turkey-Serious** now lives in the Obsidian vault, NOT in this repo:
-- **Handoffs** -> `C:\Users\samra\vault\dev\Cold-Turkey-Serious\handoffs\` — newest dated file = current state (no `HANDOFF.md` in the repo anymore)
-- **Tasks** -> `C:\Users\samra\vault\dev\Cold-Turkey-Serious\tasks.md`
-- **Logs** `dev\Cold-Turkey-Serious\logs\` · **Specs** `dev\Cold-Turkey-Serious\specs\` · **Plans** `dev\Cold-Turkey-Serious\plans\` · **Guides** `dev\Cold-Turkey-Serious\guides\` · **Prompts** `dev\Cold-Turkey-Serious\prompts\`
-End a session by writing a dated handoff `YYYY-MM-DD-HHmm-<slug>.md` to `dev\Cold-Turkey-Serious\handoffs\`. Write all of the above there, never in this repo. This repo keeps only code + `README.md` + `CLAUDE.md` + skills/agents + fixtures + product content; a few design docs that code loads by path stay here by necessity. Cheap context: vault `dev\index.md` + `ROUTER.md` route intent -> exact file.
+All working/generated markdown for **monk-mode** now lives in the Obsidian vault, NOT in this repo:
+- **Handoffs** -> `C:\Users\samra\vault\dev\monk-mode\handoffs\` — newest dated file = current state (no `HANDOFF.md` in the repo anymore)
+- **Tasks** -> `C:\Users\samra\vault\dev\monk-mode\tasks.md`
+- **Logs** `dev\monk-mode\logs\` · **Specs** `dev\monk-mode\specs\` · **Plans** `dev\monk-mode\plans\` · **Guides** `dev\monk-mode\guides\` · **Prompts** `dev\monk-mode\prompts\`
+End a session by writing a dated handoff `YYYY-MM-DD-HHmm-<slug>.md` to `dev\monk-mode\handoffs\`. Write all of the above there, never in this repo. This repo keeps only code + `README.md` + `CLAUDE.md` + skills/agents + fixtures + product content; a few design docs that code loads by path stay here by necessity. Cheap context: vault `dev\index.md` + `ROUTER.md` route intent -> exact file.
 
 ### Every session
-1. **Catch up** — read the newest file in `vault\dev\Cold-Turkey-Serious\handoffs\` first (where the last session stopped, what's next, gotchas).
-2. **Log as you go** — keep a `Now / Next` line in the live handoff; substantial logs → `vault\dev\Cold-Turkey-Serious\logs\`.
-3. **Hand off at the end** — write a dated `YYYY-MM-DD-HHmm-<slug>.md` to `vault\dev\Cold-Turkey-Serious\handoffs\` (status / goal / outcome / gotchas / carry-on), update `vault\dev\Cold-Turkey-Serious\tasks.md`, commit. A session without its handoff has failed its exit.
+1. **Catch up** — read the newest file in `vault\dev\monk-mode\handoffs\` first (where the last session stopped, what's next, gotchas).
+2. **Log as you go** — keep a `Now / Next` line in the live handoff; substantial logs → `vault\dev\monk-mode\logs\`.
+3. **Hand off at the end** — write a dated `YYYY-MM-DD-HHmm-<slug>.md` to `vault\dev\monk-mode\handoffs\` (status / goal / outcome / gotchas / carry-on), update `vault\dev\monk-mode\tasks.md`, commit. A session without its handoff has failed its exit.
 
 ### Too large? Split it
 If a task feels too big or token use is running high, **stop and propose splitting it into smaller, independently-verifiable slices** (one slice per session) before continuing — never barrel through one giant attempt.
