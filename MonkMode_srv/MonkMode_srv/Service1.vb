@@ -90,6 +90,14 @@ Public Class Service1
         '
         ServicesToRun = New System.ServiceProcess.ServiceBase() {New Service1}
 
+        ' AppDomain.UnhandledException backstop (fail-closed on crash): if an
+        ' exception escapes every local handler and is about to terminate the
+        ' LocalSystem service, re-assert the hosts enforcement BEFORE the process
+        ' dies, so a crash can never leave the block fail-OPEN. The process-wide
+        ' generalisation of the adder_Changed / timer self-heal Try/Finally re-lock
+        ' (2026-06-16 morning-fix #2). See OnUnhandledException.
+        AddHandler AppDomain.CurrentDomain.UnhandledException, AddressOf OnUnhandledException
+
         System.ServiceProcess.ServiceBase.Run(ServicesToRun)
     End Sub
 
@@ -1196,6 +1204,87 @@ Public Class Service1
         Finally
             If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
             If scm <> IntPtr.Zero Then CloseServiceHandle(scm)
+        End Try
+    End Sub
+
+    ' ===== AppDomain.UnhandledException backstop (fail-closed on crash) =====
+    '
+    ' A last-line safety net in the fail-closed doctrine. The hot enforcement paths
+    ' already re-lock hosts in their own Try/Finally (adder_Changed, the timer
+    ' self-heal), and the two framework paths that could throw - OnStart (ServiceBase
+    ' swallows it) and the Timers.Timer Elapsed tick (the timer swallows it) - do NOT
+    ' reach here AND can't leave hosts writable anyway (OnStart has not cleared the RO
+    ' attribute at the points it can throw; the tick's own Finally re-locks). This
+    ' handler catches the REMAINING case the doctrine still wants covered: a genuinely
+    ' unhandled exception on some other thread (a worker/callback not wrapped by a
+    ' framework try) that DOES terminate the process - so even then hosts is re-locked
+    ' before exit and a crash can never leave the block fail-OPEN. Registered in Main;
+    ' Shared so it needs no live Service1 instance (which may be in a bad state here).
+    '
+    ' It only re-asserts the HOSTS state, deliberately not the SafeBoot/DoH/deny-ACE
+    ' enforcement: those are persistent registry/SCM state a crash does not remove
+    ' (nothing to fail OPEN there), and the forced restart (SCM FailureActions + the
+    ' B1 guardian) re-asserts them anyway on the fresh OnStart. Keeping the crash
+    ' handler to the one thing a crash can leave OPEN - a writable / stripped hosts -
+    ' keeps it minimal and hard to make throw.
+    '
+    ' The wrapper feeds the testable core the REAL hosts + block-snapshot paths (the
+    ' same Environ("WinDir") / Application.StartupPath idioms the rest of the service
+    ' uses). Everything - including the path construction - is inside the Try so
+    ' nothing can throw back out of the handler (parity with the guardian/notifier
+    ' handlers). The core is split out with explicit path params so it can be
+    ' unit-tested against temp files (fence: unit tests never touch the real hosts).
+    Private Shared Sub OnUnhandledException(ByVal sender As Object, ByVal e As UnhandledExceptionEventArgs)
+        Try
+            ReassertHostsFailClosed(Environ("WinDir") & "\system32\drivers\etc\hosts",
+                                    Application.StartupPath & "\monkmode_hosts.block")
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' The testable core of the crash backstop. Re-assert the fail-closed hosts state:
+    '   1. Restore our marker block, gated on the CLI's block snapshot still being on
+    '      disk. stopMe() deletes that snapshot at a genuine expiry, so its PRESENCE
+    '      is the fail-closed "block still active, keep enforcing" signal and its
+    '      ABSENCE means "do not re-block" - no separate, throw-prone MAC/expiry read
+    '      is needed in a crash handler. The gate is snapshot presence, NOT hosts
+    '      presence: a crash that BLANKED or even DELETED hosts while the block is
+    '      active must be rebuilt from the snapshot too (a missing hosts reads as ""
+    '      and is recreated - exactly the timer self-heal's behaviour). The restore
+    '      reuses the pure, unit-tested RepairHostsBlock (intact block => no rewrite/
+    '      no churn; blanked/stripped/deleted hosts => our block re-appended with the
+    '      user's own content kept byte-for-byte). It only ADDS enforcement, never
+    '      lifts, which is always the safe direction: the fresh OnStart after the
+    '      forced restart makes the real expiry decision. (Rare edge: a crash DURING
+    '      stopMe(), after the strip but before the snapshot delete, briefly re-blocks
+    '      a just-expired block for one restart cycle - the fail-CLOSED over-block
+    '      direction, self-corrected on the next OnStart.)
+    '   2. ALWAYS leave hosts read-only - the single most important line, closing the
+    '      fail-OPEN window a crash mid-write (read-only cleared) would otherwise
+    '      leave. Mirrors the adder_Changed Finally.
+    ' Best-effort throughout; NEVER throws (a throw from an UnhandledException handler
+    ' is itself undefined behaviour). Friend Shared so the unit tests drive it against
+    ' temp files, exactly like AtomicHosts.
+    Friend Shared Sub ReassertHostsFailClosed(ByVal hostsPath As String, ByVal snapshotPath As String)
+        Try
+            If System.IO.File.Exists(snapshotPath) Then
+                Dim hostsText As String = If(System.IO.File.Exists(hostsPath), System.IO.File.ReadAllText(hostsPath), "")
+                Dim repaired As String = RepairHostsBlock(hostsText, System.IO.File.ReadAllText(snapshotPath))
+                If repaired IsNot Nothing Then
+                    If System.IO.File.Exists(hostsPath) Then SetAttr(hostsPath, vbNormal)
+                    AtomicHosts.WriteAtomic(hostsPath, repaired)
+                End If
+            End If
+        Catch ex As Exception
+            ' The block restore is best-effort - the Finally still re-locks hosts.
+        Finally
+            ' ALWAYS re-assert read-only (fail-closed), even if the restore above
+            ' threw after clearing the attribute. Guarded so the re-lock can never
+            ' itself throw out of the handler.
+            Try
+                If System.IO.File.Exists(hostsPath) Then SetAttr(hostsPath, vbReadOnly)
+            Catch ex As Exception
+            End Try
         End Try
     End Sub
 

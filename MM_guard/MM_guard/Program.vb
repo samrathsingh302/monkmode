@@ -73,6 +73,11 @@ Module Program
             Return
         End If
 
+        ' AppDomain.UnhandledException backstop (fail-closed on crash) - see
+        ' OnUnhandledException. Registered only once we are the single real
+        ' guardian instance (a throwaway second instance returned above).
+        AddHandler AppDomain.CurrentDomain.UnhandledException, AddressOf OnUnhandledException
+
         Try
             Do
                 ' Sleep first: the service that just spawned us has already
@@ -117,6 +122,34 @@ Module Program
             Loop
         Finally
             mtx.Dispose()
+        End Try
+    End Sub
+
+    ' AppDomain.UnhandledException backstop (fail-closed on crash). The guardian
+    ' holds no hosts/registry/config state of its own - it only READS the ini and
+    ' drives the SCM/notifier - so its own crash leaves nothing fail-OPEN. But its
+    ' whole purpose is to keep the enforcement core alive, so if an exception is
+    ' about to kill it, make ONE best-effort pass to (re)start the MONKMODE service
+    ' while the block is still active before dying - so the guardian's own death
+    ' never leaves the service down. Reuses the EXACT fail-closed gates the loop
+    ' uses (ReadBlockState fails CLOSED on any read/MAC error; the HighWater asOf;
+    ' Guardian.EffectiveBlockHasExpired; Guardian.ShouldRestartService inside
+    ' TryRestartService). The service reciprocally re-spawns the guardian
+    ' (ShouldRestartPeer), so this is defence-in-depth. Never throws.
+    Private Sub OnUnhandledException(ByVal sender As Object, ByVal e As UnhandledExceptionEventArgs)
+        Try
+            Dim until As String = ""
+            Dim highWater As String = ""
+            Dim macValid As Boolean = False
+            ReadBlockState(until, highWater, macValid)
+            Dim asOfHw As DateTime = DateTime.MinValue
+            Dim parsedHw As DateTime
+            If DateTime.TryParse(highWater, New Globalization.CultureInfo("en-CA"), Globalization.DateTimeStyles.None, parsedHw) Then
+                asOfHw = parsedHw
+            End If
+            Dim blockActive As Boolean = Not Guardian.EffectiveBlockHasExpired(until, asOfHw, ExpiryGraceSeconds, macValid)
+            TryRestartService(blockActive)
+        Catch ex As Exception
         End Try
     End Sub
 
