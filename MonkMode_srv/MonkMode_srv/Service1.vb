@@ -141,17 +141,21 @@ Public Class Service1
         Try
             Dim iniFile As IniFile = New IniFile
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-            If iniFile.Sections.Count < 2 Then
+            If Not ConfigBackup.PrimaryIsStructurallyUsable(iniFile.Sections.Count) Then
                 ' B7 fail-closed: a truncated/blanked ini (fewer than the expected
-                ' sections) is treated EXACTLY like a corrupt one - rewrite the
-                ' UNSTAMPED default block and keep enforcing, NEVER stopMe(). The
-                ' old code called stopMe() here, which let an attacker lift the
+                ' sections) is treated EXACTLY like a corrupt one - NEVER stopMe().
+                ' The old code called stopMe() here, which let an attacker lift the
                 ' block by truncating monkmode_settings.ini to <2 sections and
                 ' forcing a restart (no MAC forge needed) - strictly easier than
-                ' the recover-the-3DES-key attack B7 exists to stop. The default
-                ' is left unstamped, so the readers fail CLOSED (macValid = False)
-                ' and it holds until re-armed from the CLI.
-                WriteDefaultBlock()
+                ' the recover-the-3DES-key attack B7 exists to stop.
+                ' C1b (R8): recover instead of only defaulting - RESTORE the primary
+                ' from a MAC-valid backup if one exists (so the block keeps a
+                ' liftable config and ends at its real expiry), else write the
+                ' UNSTAMPED default (unchanged behaviour: readers fail CLOSED,
+                ' macValid=False, holds until re-armed from the CLI). Either way the
+                ' block keeps enforcing (fall-through below); the next tick evaluates
+                ' expiry off the recovered config.
+                RecoverPrimaryConfig()
             Else
                 ' B4: decide the OnStart expiry off the HIGH-WATER MARK, not raw
                 ' DateTime.Now. NextHighWater advances the stored value to "now"
@@ -199,9 +203,11 @@ Public Class Service1
             End If
 
         Catch ex As Exception
-            ' Corrupt/unreadable ini: rewrite the safe default 7-day block (fail
-            ' closed, same as the <2 sections branch above).
-            WriteDefaultBlock()
+            ' Corrupt/unreadable ini: recover fail-closed, same as the <2 sections
+            ' branch above. C1b (R8): RESTORE from a MAC-valid backup if one exists
+            ' (block ends at its real expiry), else rewrite the safe UNSTAMPED
+            ' default 7-day block (readers fail CLOSED until re-armed).
+            RecoverPrimaryConfig()
         End Try
 
         If Not My.Computer.FileSystem.FileExists(hostDirS) Then
@@ -279,6 +285,60 @@ Public Class Service1
         iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
     End Sub
 
+    ' ===== C1b (R8, LOAD-BEARING): config shadow-backup recovery =====
+    '
+    ' Recover a corrupt/blanked/short primary ini. RESTORE the primary from a
+    ' MAC-valid backup if one exists - so the block keeps a LIFTABLE, MAC-valid
+    ' config and lifts at its real expiry - instead of freezing into the UNSTAMPED
+    ' WriteDefaultBlock (which macValid=False keeps standing until a manual CLI
+    ' re-arm; harmless-but-TRAPPING now that R1 removed the unconditional escape).
+    ' Only if there is NO trustworthy backup do we fall back to WriteDefaultBlock
+    ' (the prior behaviour). Returns True iff the primary was restored from a good
+    ' backup.
+    '
+    ' This is ONLY reached from the OnStart/tick CORRUPT paths (a parse/decrypt
+    ' throw, or < 2 sections). A parseable-but-MAC-invalid (TAMPERED) config takes
+    ' the normal path and FREEZES per B7 - it is never "recovered" (that
+    ' distinction is the whole point: a tamper must not be silently undone).
+    Private Function RecoverPrimaryConfig() As Boolean
+        If TryRestorePrimaryFromBackup() Then Return True
+        WriteDefaultBlock()
+        Return False
+    End Function
+
+    ' Restore the primary from the shadow backup iff the backup is MAC-valid. THE
+    ' load-bearing gate is ConfigMacIsValidForIni(backupIni): a corrupt, tampered
+    ' or unstamped backup reads as invalid and CopyIfSourceValid refuses to copy it
+    ' over the primary (no data loss) - so corrupt-primary + corrupt-backup falls
+    ' through to WriteDefaultBlock, exactly as today. Best-effort; never throws.
+    Private Function TryRestorePrimaryFromBackup() As Boolean
+        Try
+            Dim backupPath As String = Application.StartupPath + "\" + ConfigBackup.BackupFileName
+            If Not My.Computer.FileSystem.FileExists(backupPath) Then Return False
+            Dim backupIni As New IniFile
+            backupIni.Load(backupPath)
+            Return ConfigBackup.CopyIfSourceValid(backupPath,
+                                                  Application.StartupPath + "\monkmode_settings.ini",
+                                                  ConfigMacIsValidForIni(backupIni))
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' Refresh the shadow backup from the primary after a LEGITIMATE (MAC-valid)
+    ' service write (the heartbeat Restamp). iniFile is the in-memory object just
+    ' saved to the primary; CopyIfSourceValid copies the file only when that object
+    ' is MAC-valid, so a corrupt/tampered primary can never overwrite the good
+    ' backup. Best-effort - a failed refresh just keeps the previous good backup.
+    Private Sub RefreshBackupFromValid(ByVal iniFile As IniFile)
+        Try
+            ConfigBackup.CopyIfSourceValid(Application.StartupPath + "\monkmode_settings.ini",
+                                           Application.StartupPath + "\" + ConfigBackup.BackupFileName,
+                                           ConfigMacIsValidForIni(iniFile))
+        Catch ex As Exception
+        End Try
+    End Sub
+
     ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
     ' immune to wall-clock changes) captured at the last HighWater advance. The
     ' per-tick HighWater credit is capped by the real elapsed since this anchor, so
@@ -323,6 +383,19 @@ Public Class Service1
         Try
             Dim iniFile = New IniFile
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+            ' C1b (R8): a blanked/truncated primary (< 2 sections, no parse throw)
+            ' recovers here - RESTORE from a MAC-valid backup if one exists, else the
+            ' unstamped default - then RELOAD so THIS tick enforces off the recovered
+            ' config (a restored block can then lift at its real expiry; an unstamped
+            ' default holds fail-closed with macValid=False). A genuinely corrupt read
+            ' below instead throws into the Catch, which recovers the same way. This is
+            ' the short-ini path the tick previously lacked (it only had the Catch), so
+            ' a blanked-mid-block primary no longer freezes when a good backup exists.
+            If Not ConfigBackup.PrimaryIsStructurallyUsable(iniFile.Sections.Count) Then
+                RecoverPrimaryConfig()
+                iniFile = New IniFile
+                iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+            End If
             iniUntil = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until"))
             iniTimeChanging = iniFile.GetKeyValue("Time", "TimeChanging")
             iniProcessList = iniFile.GetKeyValue("Process", "List")
@@ -359,31 +432,16 @@ Public Class Service1
                 newHwAsOf = parsedHw
             End If
         Catch ex As Exception
-            ' Corrupt/unreadable ini: rewrite the default 7-day block, left
-            ' UNSTAMPED on purpose (see the OnStart catch for the rationale) -
-            ' macValid stays False this tick so the block holds; re-arm from the
-            ' CLI to get a fresh MAC and a liftable block.
-            Dim iniFile = New IniFile
-            iniFile.AddSection("User")
-            iniFile.SetKeyValue("User", "CustomChecked", "abcdefghijk")
-            iniFile.SetKeyValue("User", "CustomSites", "null")
-            iniFile.SetKeyValue("User", "Done", "no")
-            iniFile.SetKeyValue("User", "NeedsAlerted", "yes")
-            iniFile.AddSection("Time")
-            ' Explicit en-CA, as above (timer threads don't inherit the
-            ' constructor's CurrentCulture).
-            iniFile.SetKeyValue("Time", "Until", encryptionW.EncryptData(DateAdd("d", 7, DateTime.Now).ToString(culture)))
-            iniFile.SetKeyValue("Time", "TimeChanging", "no")
-            ' B4: seed HighWater in the recovery default too (kept consistent with
-            ' the CLI-armed shape). This default is UNSTAMPED, so macValid stays
-            ' False and the block holds regardless of HighWater - but seeding it
-            ' keeps the ini shape uniform and gives the next tick a parseable base.
-            iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-            iniFile.AddSection("CurrentTime")
-            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-            iniFile.AddSection("Process")
-            iniFile.SetKeyValue("Process", "List", "null")
-            iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+            ' C1b (R8): corrupt/unreadable primary. RESTORE from a MAC-valid backup
+            ' if one exists, else write the UNSTAMPED default (the prior inline
+            ' behaviour, now centralised in RecoverPrimaryConfig -> WriteDefaultBlock;
+            ' re-arm from the CLI to get a fresh MAC + a liftable block). This tick
+            ' then proceeds fail-closed (macValid stays False, newHwAsOf MinValue =
+            ' the block holds); the NEXT tick reads the recovered config fresh and,
+            ' if it was restored, lifts normally at the REAL expiry instead of
+            ' over-running to the 7-day default (the old inline default extended
+            ' every corrupt tick to +7d; restoring from the backup avoids that).
+            RecoverPrimaryConfig()
         End Try
 
         ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
@@ -555,6 +613,12 @@ Public Class Service1
                         ' stored key; never re-arms.
                         RestampMacWithExistingKey(iniFile)
                         iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+                        ' C1b: the primary is MAC-valid (re-validated just above) and
+                        ' freshly saved - refresh the shadow backup so a later corrupt
+                        ' primary restores to THIS state (current HighWater/Now), not a
+                        ' stale one. Guarded on the in-memory MAC, so this can never
+                        ' overwrite the good backup with a bad primary.
+                        RefreshBackupFromValid(iniFile)
                     End If
                 Case HeartbeatAction.Hold
                     ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
@@ -1329,6 +1393,14 @@ Public Class Service1
         ' expired block leaves nothing behind to self-heal back in.
         Try
             System.IO.File.Delete(Application.StartupPath + "\monkmode_hosts.block")
+        Catch ex As Exception
+        End Try
+
+        ' C1b: drop the config shadow backup too - a genuinely expired block must
+        ' leave nothing behind to restore an old config from (mirrors the hosts
+        ' snapshot delete above + the CLI escape hatch's DeleteBackup). Best-effort.
+        Try
+            System.IO.File.Delete(Application.StartupPath + "\" + ConfigBackup.BackupFileName)
         Catch ex As Exception
         End Try
 

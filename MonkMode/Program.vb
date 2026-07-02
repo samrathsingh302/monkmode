@@ -29,6 +29,13 @@ Module Program
 
         Dim verb As String = args(0).ToLowerInvariant()
         Try
+            ' C1b (R8, CLI side of the restore-on-corrupt path): if the primary
+            ' config is corrupt/blanked/short and a MAC-valid backup exists, restore
+            ' it before dispatching - so status/add see the real (self-healed) block
+            ' instead of a fail-closed blank. Never writes a default and never
+            ' overwrites a usable primary (a tampered-but-parseable config is left to
+            ' freeze per B7); best-effort, never throws.
+            Blocker.RestorePrimaryFromBackupIfCorrupt()
             Select Case verb
                 Case "block" : Return DoBlock(args)
                 Case "status" : Return DoStatus()
@@ -229,6 +236,9 @@ Module Program
         ' 6-8. Remove the B2 snapshot, the B3 SafeBoot leaf keys, and the HKCU
         '    autorun, so a future install can't self-heal the old block back.
         Step_("Removing the hosts snapshot", Sub() Blocker.DeleteSnapshot())
+        ' C1b: remove the config shadow backup so a future install can't restore the
+        ' old config from it (mirrors the hosts-snapshot removal + stopMe's delete).
+        Step_("Removing the config backup", Sub() Blocker.DeleteBackup())
         Step_("Removing the Safe Mode registration", Sub() Blocker.RemoveSafeBootKeys())
         ' B5a: restore the user's prior browser DoH policy (or remove our lingering
         ' "off") from the snapshot, then consume it - no data loss, so a reinstall

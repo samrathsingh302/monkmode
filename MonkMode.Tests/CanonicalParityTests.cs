@@ -295,6 +295,11 @@ public class CanonicalParityTests
         finally
         {
             if (File.Exists(iniPath)) File.Delete(iniPath);
+            // C1b: WriteConfig now also refreshes a MAC-covered shadow backup next
+            // to the ini (when the DPAPI stamp succeeds). Clean it up too so the
+            // test leaves nothing behind in the bin directory.
+            var backupPath = MonkMode.Blocker.IniBackupPath();
+            if (File.Exists(backupPath)) File.Delete(backupPath);
         }
     }
 }

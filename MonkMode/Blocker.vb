@@ -70,6 +70,15 @@ Module Blocker
         Return Path.Combine(AppDir(), IniName)
     End Function
 
+    ' C1b (R8): the MAC-covered shadow copy of the ini, next to the exes/ini.
+    ' Written by RefreshBackup after every legitimate (MAC-valid) CLI write; the
+    ' service restores the primary from it if the primary is found corrupt/blanked/
+    ' short (instead of freezing into the unstamped panic default). ConfigBackup is
+    ' the parity-pinned single source of truth for the filename.
+    Public Function IniBackupPath() As String
+        Return Path.Combine(AppDir(), ConfigBackup.BackupFileName)
+    End Function
+
     ' Snapshot of the exact MonkMode hosts block written for the current block,
     ' kept next to the exes/ini. The service reads it every timer tick to
     ' restore the entries if an admin clears the read-only attribute and edits
@@ -362,6 +371,12 @@ Module Blocker
         StampFreshMac(ini)
 
         ini.Save(IniPath())
+        ' C1b: capture a MAC-covered shadow copy of the just-armed config, so a
+        ' later corrupt/blanked/short primary restores from it instead of freezing
+        ' into the unstamped panic default. Only copies if the fresh stamp is
+        ' MAC-valid (a DPAPI failure above left it unstamped -> no backup), so the
+        ' backup is always a genuinely liftable config.
+        RefreshBackup(ini)
     End Sub
 
     ' B7/B4: builds the canonical string the MAC is computed over, from a loaded
@@ -459,6 +474,12 @@ Module Blocker
                 RestampMacWithExistingKey(ini)
             End If
             ini.Save(IniPath())
+            ' C1b: keep the shadow backup current with a legitimate `add` (captures
+            ' the new CustomSites). RefreshBackup only copies when the ini is
+            ' MAC-valid, so a tampered config (macValid=False above, NOT re-stamped)
+            ' never overwrites the good backup - the tamper stays frozen and the
+            ' backup keeps the last legitimate state.
+            RefreshBackup(ini)
         Catch
         End Try
     End Sub
@@ -490,6 +511,63 @@ Module Blocker
             Return False
         End Try
     End Function
+
+    ' ---- C1b (R8): config shadow backup ----
+
+    ' Refresh the shadow backup from the primary after a LEGITIMATE write. `ini` is
+    ' the in-memory object just saved to IniPath(); CopyIfSourceValid copies the
+    ' file ONLY when that object is MAC-valid (the CLI just stamped/re-stamped it),
+    ' so a config with no/failed MAC never becomes the backup AND a corrupt primary
+    ' can never overwrite a good backup (no data loss). Best-effort: a failed
+    ' refresh just leaves the previous good backup in place - the block still arms.
+    Public Sub RefreshBackup(ByVal ini As IniFile)
+        Try
+            ConfigBackup.CopyIfSourceValid(IniPath(), IniBackupPath(), ConfigMacIsValidForIni(ini))
+        Catch
+        End Try
+    End Sub
+
+    ' Remove the shadow backup (escape-hatch teardown), mirroring DeleteSnapshot -
+    ' a torn-down block must leave nothing behind to restore an old config from.
+    ' Best-effort.
+    Public Sub DeleteBackup()
+        Try
+            File.Delete(IniBackupPath())
+        Catch
+        End Try
+    End Sub
+
+    ' The CLI side of the restore-on-corrupt path: if the primary ini is
+    ' corrupt/blanked/short AND a MAC-valid backup exists, restore the primary from
+    ' it, so a `status`/`add` sees the real block (self-healed) instead of a
+    ' fail-closed blank. Unlike the service's recovery, the CLI NEVER writes a
+    ' default block (a status/add on a fresh or idle machine must not arm
+    ' anything) - with no trustworthy backup it does nothing and the read paths
+    ' keep failing closed. A parseable-but-MAC-invalid (tampered) primary reads as
+    ' "usable" here (>= 2 sections) and is left UNTOUCHED, so this never overwrites
+    ' a tamper - B7's freeze holds; only a genuinely unreadable primary is
+    ' restored, and only from a MAC-valid backup (no data loss). Best-effort; never
+    ' throws.
+    Public Sub RestorePrimaryFromBackupIfCorrupt()
+        Try
+            Dim primaryUsable As Boolean = False
+            Try
+                Dim p As New IniFile
+                p.Load(IniPath())
+                primaryUsable = ConfigBackup.PrimaryIsStructurallyUsable(p.Sections.Count)
+            Catch
+                primaryUsable = False
+            End Try
+            If primaryUsable Then Return   ' nothing to recover; never clobber a usable primary
+            Dim backupPath As String = IniBackupPath()
+            If Not File.Exists(backupPath) Then Return
+            Dim b As New IniFile
+            b.Load(backupPath)
+            ' THE load-bearing gate: only a MAC-valid backup is ever trusted/copied.
+            ConfigBackup.CopyIfSourceValid(backupPath, IniPath(), ConfigMacIsValidForIni(b))
+        Catch
+        End Try
+    End Sub
 
     ' ---- B6 escape hatch primitives (the guaranteed-removal path) ----
     ' These are the brick-insurance teardown steps the `unblock --force` verb
