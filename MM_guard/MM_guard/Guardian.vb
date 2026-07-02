@@ -77,19 +77,31 @@ Friend Module Guardian
         Return coolOffUntil <= highWater
     End Function
 
+    ' C3b: is the block partner-code-unlocked? Byte-for-byte the same as
+    ' Service1.PartnerUnlocked (parity-pinned): a non-empty [Partner] UnlockedAt
+    ' (under the caller's macValid gate) = unlocked. LOAD-BEARING for the guardian:
+    ' its stand-down MUST fold this in, or a guardian tick in the stopMe() gap at
+    ' the end of a code-unlock would read "Until not passed + macValid => still
+    ' active" and SCM-resurrect the just-code-unlocked block.
+    Friend Function PartnerUnlocked(ByVal unlockedAtText As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(unlockedAtText)
+    End Function
+
     ' The ONE exit decision (the guardian's copy of Service1.EffectiveExit): the
     ' block may end ONLY when the MAC is valid AND (it genuinely expired OR a
-    ' pending cooling-off deadline has been reached), both measured against the
-    ' monotonic HighWater. The guardian's stand-down gates on this, so it agrees
-    ' with the service's lift within one tick - and never resurrects a
-    ' cooled-off block (worst case, one bounce: a restarted service's OnStart
-    ' immediately re-lifts, and the guardian's next read stands it down).
-    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+    ' pending cooling-off deadline has been reached OR a partner code has unlocked
+    ' it), the time-based arms measured against the monotonic HighWater. The
+    ' guardian's stand-down gates on this, so it agrees with the service's lift
+    ' within one tick - and never resurrects a cooled-off OR code-unlocked block
+    ' (worst case, one bounce: a restarted service's OnStart immediately re-lifts,
+    ' and the guardian's next read stands it down). Param order parity-pinned with
+    ' Service1.EffectiveExit (until, coolOffUntil, unlockedAt, highWater, grace, macValid).
+    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         If Not macValid Then Return False
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
-        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText)
+        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText) OrElse PartnerUnlocked(unlockedAtText)
     End Function
 
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----

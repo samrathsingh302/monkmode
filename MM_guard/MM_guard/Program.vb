@@ -84,13 +84,14 @@ Module Program
                 ' verified the world this tick - act on the NEXT tick.
                 Thread.Sleep(TickIntervalMs)
 
-                ' Read [Time] Until, [Time] HighWater, [Time] CoolOffUntil and the
-                ' B7 MAC validity in one ini load.
+                ' Read [Time] Until, [Time] HighWater, [Time] CoolOffUntil, the C3b
+                ' [Partner] UnlockedAt and the B7 MAC validity in one ini load.
                 Dim until As String = ""
                 Dim highWater As String = ""
                 Dim coolOffUntil As String = ""
+                Dim unlockedAt As String = ""
                 Dim macValid As Boolean = False
-                ReadBlockState(until, highWater, coolOffUntil, macValid)
+                ReadBlockState(until, highWater, coolOffUntil, unlockedAt, macValid)
 
                 ' Fail CLOSED on every axis: an unparseable Until OR an invalid/
                 ' absent B7 MAC (a tampered config) reads as NOT ended, so the
@@ -103,8 +104,10 @@ Module Program
                 ' clock can't stand the guardian down. C2b: folding cooling-off in
                 ' here is LOAD-BEARING - without it the guardian would SCM-restart
                 ' the service the moment a completed cooling-off tears it down,
-                ' resurrecting the cooled-off block.
-                Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, highWater, ExpiryGraceSeconds, macValid)
+                ' resurrecting the cooled-off block. C3b: folding the partner-code
+                ' UnlockedAt in is LOAD-BEARING for the identical reason - the
+                ' guardian must not resurrect a just-code-unlocked block.
+                Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, highWater, ExpiryGraceSeconds, macValid)
                 If Not blockActive Then
                     ' Genuinely expired (parsed, past end time, valid MAC): stand
                     ' down for good. The service's stopMe() also kills us at
@@ -136,11 +139,13 @@ Module Program
             Dim until As String = ""
             Dim highWater As String = ""
             Dim coolOffUntil As String = ""
+            Dim unlockedAt As String = ""
             Dim macValid As Boolean = False
-            ReadBlockState(until, highWater, coolOffUntil, macValid)
-            ' C2b: same EffectiveExit gate as the loop - the dying guardian must
-            ' not restart the service into a block that just cooled off.
-            Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, highWater, ExpiryGraceSeconds, macValid)
+            ReadBlockState(until, highWater, coolOffUntil, unlockedAt, macValid)
+            ' C2b/C3b: same EffectiveExit gate as the loop - the dying guardian must
+            ' not restart the service into a block that just cooled off OR was
+            ' code-unlocked.
+            Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, highWater, ExpiryGraceSeconds, macValid)
             TryRestartService(blockActive)
         Catch ex As Exception
         End Try
@@ -156,10 +161,11 @@ Module Program
     ' also reads active - so a deleted or corrupted config keeps the guardian
     ' guarding, never stands it down. One load (not four) so Until, HighWater,
     ' CoolOffUntil and the MAC are all evaluated against the same bytes.
-    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef coolOffUntilOut As String, ByRef macValidOut As Boolean)
+    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef coolOffUntilOut As String, ByRef unlockedOut As String, ByRef macValidOut As Boolean)
         untilOut = ""
         highWaterOut = ""
         coolOffUntilOut = ""
+        unlockedOut = ""
         macValidOut = False
         Try
             Dim ini As New IniFile
@@ -168,6 +174,9 @@ Module Program
             highWaterOut = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))
             Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
             coolOffUntilOut = If(coolOffEnc = "", "", enc.DecryptData(coolOffEnc))
+            ' C3b: [Partner] UnlockedAt is plaintext-as-stored (MAC-covered), not
+            ' decrypted; absent/"" = not code-unlocked (never an early stand-down).
+            unlockedOut = ini.GetKeyValue("Partner", "UnlockedAt")
             macValidOut = ConfigMacIsValidForIni(ini)
         Catch ex As Exception
         End Try
@@ -185,6 +194,12 @@ Module Program
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
+        ' C3b: the [Partner] fields are stored PLAINTEXT (as-stored, like CustomSites -
+        ' NOT decrypted like the datetimes); absent => "" (a v4 config read under v5
+        ' code therefore builds a different canonical and freezes, R9). MAC-covered.
+        Dim partnerSalt As String = ini.GetKeyValue("Partner", "Salt")
+        Dim partnerHash As String = ini.GetKeyValue("Partner", "Hash")
+        Dim partnerUnlockedAt As String = ini.GetKeyValue("Partner", "UnlockedAt")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -194,7 +209,7 @@ Module Program
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
     End Function
 
     ' B7 live MAC gate (DPAPI seam - smoke-tested). DPAPI-unprotect [Integrity]

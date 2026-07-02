@@ -172,6 +172,12 @@ Public Class Form1
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
+        ' C3b: the [Partner] fields are stored PLAINTEXT (as-stored, like CustomSites -
+        ' NOT decrypted like the datetimes); absent => "" (a v4 config read under v5
+        ' code therefore builds a different canonical and freezes, R9). MAC-covered.
+        Dim partnerSalt As String = ini.GetKeyValue("Partner", "Salt")
+        Dim partnerHash As String = ini.GetKeyValue("Partner", "Hash")
+        Dim partnerUnlockedAt As String = ini.GetKeyValue("Partner", "UnlockedAt")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -181,7 +187,7 @@ Public Class Form1
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
     End Function
 
     ' B7: recompute [Integrity] Mac over the current canonical with the already

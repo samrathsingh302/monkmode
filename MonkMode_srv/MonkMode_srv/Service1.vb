@@ -187,12 +187,19 @@ Public Class Service1
                 ' not-elapsed; a tampered one fails the MAC (freeze).
                 Dim coolOffEncAtStart As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
                 Dim coolOffAtStart As String = If(coolOffEncAtStart = "", "", encryptionW.DecryptData(coolOffEncAtStart))
-                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, storedHw, 0, macValidAtStart) Then
+                ' C3b: read the MAC-covered [Partner] UnlockedAt (plaintext, as-stored)
+                ' so OnStart's one lift path also re-lifts a code-unlocked block. This
+                ' is the LOAD-BEARING re-lift: if the service was resurrected in the
+                ' stopMe() gap after a code-unlock, OnStart sees the persisted flag and
+                ' completes the teardown (the same convergence cooling-off relies on).
+                Dim unlockedAtStart As String = iniFile.GetKeyValue("Partner", "UnlockedAt")
+                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, storedHw, 0, macValidAtStart) Then
                     ' The ONLY OnStart path that may lift the block: a valid B7 MAC
                     ' AND (a successfully parsed, genuinely past end time OR an
-                    ' elapsed cooling-off deadline), measured against the trusted
-                    ' high-water mark. An unparseable Until or a tampered/invalid
-                    ' MAC keeps the block standing (fail closed).
+                    ' elapsed cooling-off deadline OR a partner-verified code-unlock),
+                    ' measured against the trusted high-water mark. An unparseable
+                    ' Until or a tampered/invalid MAC keeps the block standing (fail
+                    ' closed).
                     stopMe()
                 ElseIf ShouldRestampOnStart(macValidAtStart, newHw, storedHw) Then
                     ' CURRENTLY INERT (retained as a guard): since the B4 creep fix,
@@ -440,6 +447,102 @@ Public Class Service1
         Return currentCoolOffUntil
     End Function
 
+    ' C3b live wiring: the per-tick partner-code verify poll. Runs INSIDE tickLock
+    ' and only while TimeChanging="no" (the caller gates both, exactly like the
+    ' cooling-off poll), right after ProcessCoolOffSignals, and returns the
+    ' (possibly newly-set) [Partner] UnlockedAt so THIS tick's heartbeat decides off
+    ' the post-verify state. currentUnlockedAt is this tick's already-read UnlockedAt;
+    ' macValid is this tick's already-computed MAC validity. The candidate is read
+    ' from the trigger; the VERIFIER (Salt/Hash) is read from the RELOADED,
+    ' MAC-revalidated ini - the same bytes UnlockedAt is written onto (see below),
+    ' never a value captured earlier in the tick.
+    '
+    ' Consume-after-persist (crash-safe, mirroring ProcessCoolOffSignals): on a MATCH
+    ' the ini (UnlockedAt set + re-stamped) is SAVED and the C1b backup refreshed
+    ' BEFORE the trigger is deleted - a crash between them leaves the trigger, and the
+    ' next tick classifies alreadyUnlocked => Ignore and just deletes it (no lost
+    ' unlock, no double-set). On a miss/Ignore, just delete the trigger (no ini
+    ' write). Best-effort throughout; a throw never crashes the tick (it continues
+    ' off the returned UnlockedAt).
+    Private Function ProcessPartnerCodeSignal(ByVal currentUnlockedAt As String, ByVal macValid As Boolean) As String
+        Try
+            Dim codePath As String = Application.StartupPath + "\" + PartnerCodeFileName
+            Dim triggerPresent As Boolean = System.IO.File.Exists(codePath)
+            ' Fast path: no trigger this tick (the overwhelmingly common case).
+            If Not triggerPresent Then Return currentUnlockedAt
+
+            ' Read the candidate, length-capped: an over-large trigger is a memory/DoS
+            ' lever, not a real attempt, so it reads as "" (a non-matching attempt) and
+            ' is simply deleted. The service NEVER logs the candidate.
+            Dim candidate As String = ""
+            Try
+                Dim fi As New FileInfo(codePath)
+                If fi.Length <= PartnerCodeTriggerMaxBytes Then
+                    candidate = System.IO.File.ReadAllText(codePath)
+                End If
+            Catch ex As Exception
+                candidate = ""
+            End Try
+
+            Select Case ClassifyPartnerCodeSignal(triggerPresent, Not String.IsNullOrWhiteSpace(candidate), currentUnlockedAt <> "", macValid)
+                Case PartnerCodeAction.Verify
+                    ' TOCTOU re-validate (the heartbeat's #4 rule): macValid was computed
+                    ' on the tick's EARLIER read; RELOAD the ini and re-validate its MAC,
+                    ' then verify the candidate against - and write UnlockedAt onto - that
+                    ' SAME reloaded, just-revalidated object. The service is the sole
+                    ' [Partner] writer and this runs inside tickLock, so the verifier
+                    ' bytes and the write bytes are provably one consistent MAC-valid
+                    ' config (no split-read seam). Never mint a key - re-stamp with the
+                    ' EXISTING key (this modifies an existing block).
+                    Dim iniFile = New IniFile
+                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+                    If Not ConfigMacIsValidForIni(iniFile) Then
+                        Try
+                            System.IO.File.Delete(codePath)
+                        Catch ex As Exception
+                        End Try
+                        Return currentUnlockedAt
+                    End If
+                    If ConfigIntegrity.PartnerCodeMatches(candidate, iniFile.GetKeyValue("Partner", "Salt"), iniFile.GetKeyValue("Partner", "Hash")) Then
+                        ' MATCH: set the MAC-covered UnlockedAt, re-stamp, save, refresh
+                        ' the backup - THEN delete the trigger (consume-after-persist).
+                        Dim unlockedAt As String = DateTime.Now.ToString(culture)
+                        iniFile.SetKeyValue("Partner", "UnlockedAt", unlockedAt)
+                        RestampMacWithExistingKey(iniFile)
+                        iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+                        RefreshBackupFromValid(iniFile)
+                        Try
+                            System.IO.File.Delete(codePath)
+                        Catch ex As Exception
+                        End Try
+                        Return unlockedAt
+                    Else
+                        ' A miss HOLDS the block: delete the trigger, NO ini write, and
+                        ' do NOT rotate/invalidate the code (only success rotates - else
+                        ' a user could grief-lock the partner's legitimate code by
+                        ' spamming misses, the PD6 availability concern).
+                        Try
+                            System.IO.File.Delete(codePath)
+                        Catch ex As Exception
+                        End Try
+                        Return currentUnlockedAt
+                    End If
+                Case Else
+                    ' Ignore (blank candidate, already unlocked, or a frozen config):
+                    ' delete any stale trigger so it doesn't re-classify forever; no
+                    ' ini write.
+                    Try
+                        System.IO.File.Delete(codePath)
+                    Catch ex As Exception
+                    End Try
+                    Return currentUnlockedAt
+            End Select
+        Catch ex As Exception
+            Return currentUnlockedAt
+        End Try
+        Return currentUnlockedAt
+    End Function
+
     ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
     ' immune to wall-clock changes) captured at the last HighWater advance. The
     ' per-tick HighWater credit is capped by the real elapsed since this anchor, so
@@ -471,6 +574,10 @@ Public Class Service1
         ' off pending, also the fail-closed default when the read fails - an
         ' unreadable deadline can never lift the block, only hold it).
         Dim iniCoolOffUntil As String = ""
+        ' C3b: the [Partner] UnlockedAt exit flag for THIS tick ("" = not code-
+        ' unlocked, the fail-closed default - a tick that couldn't read it holds
+        ' the block). Plaintext-as-stored (MAC-covered), not decrypted.
+        Dim iniPartnerUnlockedAt As String = ""
         ' B7: MAC validity for this tick. Default FALSE = fail closed: if the
         ' config can't even be read, or the MAC doesn't verify, the block is
         ' treated as active (never expired) and every self-heal gate keeps
@@ -507,6 +614,9 @@ Public Class Service1
             ' the other [Time] datetimes; absent/empty = none pending).
             Dim coolOffEnc As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
             iniCoolOffUntil = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
+            ' C3b: read the [Partner] UnlockedAt exit flag (plaintext, as-stored -
+            ' MAC-covered, not decrypted). Absent/"" = not code-unlocked.
+            iniPartnerUnlockedAt = iniFile.GetKeyValue("Partner", "UnlockedAt")
             iniProcessList = iniFile.GetKeyValue("Process", "List")
             If StrComp("null", iniProcessList) <> 0 Then
                 iniProcessList = encryptionW.DecryptData(iniProcessList)
@@ -561,6 +671,14 @@ Public Class Service1
         ' wins over an elapse the same tick (fail-closed: stay blocked).
         If StrComp("no", iniTimeChanging) = 0 Then
             iniCoolOffUntil = ProcessCoolOffSignals(iniCoolOffUntil, newHw, macValid)
+            ' C3b: poll the partner-code trigger AFTER cooling-off (still inside
+            ' tickLock + the TimeChanging="no" guard). Running it after ProcessCoolOff-
+            ' Signals is what makes a valid code beat a same-tick --cancel: UnlockedAt
+            ' is never cleared by cancel, so a correct code lifts even if a cooling-off
+            ' cancel landed the same tick (a partner-authorised exit is authoritative
+            ' over the user's own change-of-mind about the slow path). Returns the
+            ' post-verify UnlockedAt so THIS tick's heartbeat decides off it.
+            iniPartnerUnlockedAt = ProcessPartnerCodeSignal(iniPartnerUnlockedAt, macValid)
         End If
 
         ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
@@ -703,7 +821,12 @@ Public Class Service1
             ' second Lift trigger - a completed cooling-off converges on the same
             ' stopMe() as natural expiry. Folded inside ClassifyHeartbeat's
             ' macValid gate, so a tampered config can never cool off its way out.
-            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw))
+            ' C3b: PartnerUnlocked (over the post-verify [Partner] UnlockedAt) is the
+            ' THIRD lift trigger, folded inside ClassifyHeartbeat's macValid gate - a
+            ' tampered config can never code-unlock its way out (a raw-edited UnlockedAt
+            ' fails the MAC => Hold). Natural expiry, cooling-off and partner-code all
+            ' converge on the one Lift => stopMe().
+            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt))
                 Case HeartbeatAction.Lift
                     stopMe()
                 Case HeartbeatAction.Restamp
@@ -814,7 +937,7 @@ Public Class Service1
 
     ' What the active-block heartbeat does on a given tick (TimeChanging="no").
     Friend Enum HeartbeatAction
-        Lift     ' valid MAC + (genuinely past end time OR cooling-off elapsed) => stopMe()
+        Lift     ' valid MAC + (past end time OR cooling-off elapsed OR code-unlocked) => stopMe()
         Restamp  ' valid MAC, no exit due => rewrite Now/HighWater + re-stamp the MAC
         Hold     ' INVALID MAC => fail closed: neither lift nor re-stamp (freeze)
     End Enum
@@ -843,9 +966,16 @@ Public Class Service1
     ' macValid gate, so a tampered config can never cool off its way out
     ' (macValid=False => Hold regardless of coolOffElapsed) - the lift condition
     ' is exactly EffectiveExit, pinned by a test.
-    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean) As HeartbeatAction
+    '
+    ' C3b: codeUnlocked (PartnerUnlocked over the MAC-covered [Partner] UnlockedAt)
+    ' is the THIRD lift trigger - a partner-verified early exit converges on the
+    ' SAME stopMe(). Also folded INSIDE the macValid gate: a non-empty UnlockedAt
+    ' is only trusted UNDER a valid MAC (forging it by raw edit fails the MAC =>
+    ' Hold), so a code-unlock can only ever have come from the service verifying a
+    ' correct code. Lift <=> EffectiveExit still holds (now three OR-ed reasons).
+    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean) As HeartbeatAction
         If Not macValid Then Return HeartbeatAction.Hold
-        If blockExpired OrElse coolOffElapsed Then Return HeartbeatAction.Lift
+        If blockExpired OrElse coolOffElapsed OrElse codeUnlocked Then Return HeartbeatAction.Lift
         Return HeartbeatAction.Restamp
     End Function
 
@@ -883,6 +1013,19 @@ Public Class Service1
     ' SnapshotName/BackupFileName - a drift would silently break the channel.
     Friend Const CoolOffRequestFileName As String = "monkmode_cooloff.request"
     Friend Const CoolOffCancelFileName As String = "monkmode_cooloff.cancel"
+
+    ' C3b: the ONE content-bearing partner-code trigger. The CLI (unblock --code)
+    ' drops it carrying the CANDIDATE code; the service reads that content as a
+    ' verified ATTEMPT (R2 - it applies the KDF + compares to the MAC-covered
+    ' verifier, it never obeys it as a command). Parity-pinned with the CLI copy
+    ' (Blocker.PartnerCodeFileName), like CoolOff*FileName - a drift silently breaks
+    ' the channel. In Application.StartupPath (MonkMode's own state zone).
+    Friend Const PartnerCodeFileName As String = "monkmode_partner.code"
+
+    ' Cap the trigger read: a code is ~11 chars, so an over-large trigger file is a
+    ' memory/DoS lever, not a real attempt. A file above this reads as a
+    ' non-matching attempt (candidate stays "" => Ignore => the trigger is deleted).
+    Friend Const PartnerCodeTriggerMaxBytes As Long = 4096
 
     ' The compile-time FLOOR: the shortest cooling-off the service will ever
     ' grant, in seconds - THE one new C2b security parameter, pinned by a unit
@@ -954,21 +1097,78 @@ Public Class Service1
         Return CoolOffAction.Ignore
     End Function
 
+    ' ===== C3b: partner code (R1 - the FAST service-adjudicated early exit) =====
+    '
+    ' `monkmode unblock --code <CODE>` drops the ONE content-bearing trigger
+    ' (PartnerCodeFileName) carrying the candidate; on its next tick the SERVICE
+    ' (the sole verifier + sole stopMe() caller, R1) derives KDF(salt, candidate),
+    ' constant-time-compares it to the MAC-covered [Partner] Hash and, on a match,
+    ' sets the MAC-covered [Partner] UnlockedAt exit flag - the EXISTING EffectiveExit
+    ' machinery (tick/OnStart/guardian) then lifts via the SAME stopMe() natural
+    ' expiry and cooling-off use. The CLI has ZERO lift authority: it can only
+    ' SUBMIT a candidate; it cannot forge a KDF preimage (PD2xPD3), swap the verifier
+    ' (MAC-covered -> freeze, R6), or skip the service-side lift. The trigger's
+    ' content is a verified ATTEMPT, never an obeyed command (contrast cooling-off,
+    ' whose content is ignored entirely - R2). Polled inside tickLock while
+    ' TimeChanging="no", exactly like the cooling-off channel.
+
+    ' What the per-tick partner-code poll should do.
+    Friend Enum PartnerCodeAction
+        Verify   ' run the KDF/compare; a MATCH sets UnlockedAt, a miss holds the block
+        Ignore   ' no verify; delete any stale trigger
+    End Enum
+
+    ' The pure partner-code trigger classifier (the R2/R6 processing matrix):
+    '   * macValid REQUIRED to even attempt a verify (R6): a frozen/untrusted config
+    '     never verifies against a hash it can't trust - it ignores the channel
+    '     (mirrors ClassifyCoolOffSignal + the `add` fail-open fix).
+    '   * alreadyUnlocked (UnlockedAt already set) => Ignore: the block is ending,
+    '     nothing to re-verify (this is also what makes consume-after-persist
+    '     crash-safe: a crash between the UnlockedAt write and the trigger delete
+    '     re-classifies here as Ignore and just deletes the stale trigger).
+    '   * a present trigger with a non-blank candidate => Verify; otherwise Ignore
+    '     (no/blank candidate = a no-op that just deletes the stale trigger).
+    '   * deliberately does NOT read `committed` (contrast ClassifyCoolOffSignal): a
+    '     committed block (C4) keeps the partner code as its ONE intended exit.
+    '   * Verify != lift - only a MATCH inside the Verify branch sets UnlockedAt.
+    ' Pure + Shared so the full matrix is unit tested.
+    Friend Shared Function ClassifyPartnerCodeSignal(ByVal codePresent As Boolean, ByVal candidateNonEmpty As Boolean, ByVal alreadyUnlocked As Boolean, ByVal macValid As Boolean) As PartnerCodeAction
+        If Not macValid Then Return PartnerCodeAction.Ignore
+        If alreadyUnlocked Then Return PartnerCodeAction.Ignore
+        If codePresent AndAlso candidateNonEmpty Then Return PartnerCodeAction.Verify
+        Return PartnerCodeAction.Ignore
+    End Function
+
+    ' C3b: is the block partner-code-unlocked? PURE: a non-empty [Partner]
+    ' UnlockedAt (under the caller's macValid gate) = unlocked; empty/whitespace =
+    ' not. Fail-closed: only the SERVICE writes UnlockedAt, and only after verifying
+    ' a correct code (ProcessPartnerCodeSignal), and the field is MAC-covered - so a
+    ' non-empty UnlockedAt under a valid MAC can only mean a service-verified code.
+    ' Byte-for-byte the same as the guardian copy (parity-pinned).
+    Friend Shared Function PartnerUnlocked(ByVal unlockedAtText As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(unlockedAtText)
+    End Function
+
     ' The ONE exit decision, shared in semantics by the tick heartbeat (via
     ' ClassifyHeartbeat's Lift arm), OnStart and the guardian's stand-down (its
     ' parity copy) so the three can never drift: the block may end ONLY when the
     ' MAC is valid AND (it genuinely expired OR a pending cooling-off deadline
-    ' has been reached), both measured against the monotonic HighWater. The
-    ' guardian folding cooling-off in is LOAD-BEARING: without it, a guardian
-    ' tick in the stopMe() gap at the end of a cooling-off would read "Until not
-    ' passed + macValid => still active" and SCM-resurrect the cooled-off block.
-    ' Pure + Shared, parity-pinned with the guardian copy.
-    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+    ' has been reached OR a partner code has unlocked it), the time-based arms
+    ' measured against the monotonic HighWater. The guardian folding cooling-off
+    ' AND code-unlock in is LOAD-BEARING: without it, a guardian tick in the
+    ' stopMe() gap at the end of a cooling-off OR a code-unlock would read "Until
+    ' not passed + macValid => still active" and SCM-resurrect the just-exited
+    ' block. Pure + Shared, parity-pinned with the guardian copy.
+    '
+    ' C3b param order (until, coolOffUntil, unlockedAt, highWater, grace, macValid):
+    ' unlockedAt sits after coolOffUntil (the two early-exit reasons together),
+    ' before the highWater/grace time frame - the frozen-design order.
+    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         If Not macValid Then Return False
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
-        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText)
+        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText) OrElse PartnerUnlocked(unlockedAtText)
     End Function
 
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
@@ -1330,6 +1530,12 @@ Public Class Service1
         Dim procEnc As String = iniFile.GetKeyValue("Process", "List")
         Dim nowEnc As String = iniFile.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = iniFile.GetKeyValue("User", "CustomSites")
+        ' C3b: the [Partner] fields are stored PLAINTEXT (as-stored, like CustomSites -
+        ' NOT decrypted like the datetimes); absent => "" (a v4 config read under v5
+        ' code therefore builds a different canonical and freezes, R9). MAC-covered.
+        Dim partnerSalt As String = iniFile.GetKeyValue("Partner", "Salt")
+        Dim partnerHash As String = iniFile.GetKeyValue("Partner", "Hash")
+        Dim partnerUnlockedAt As String = iniFile.GetKeyValue("Partner", "UnlockedAt")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
@@ -1339,7 +1545,7 @@ Public Class Service1
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads
@@ -1657,6 +1863,14 @@ Public Class Service1
         End Try
         Try
             System.IO.File.Delete(Application.StartupPath + "\" + CoolOffCancelFileName)
+        Catch ex As Exception
+        End Try
+
+        ' C3b: drop any partner-code trigger too - an ended block must leave no stale
+        ' candidate behind (a used code dies with the block; the next arm mints a
+        ' fresh one - rotate-on-use). Best-effort.
+        Try
+            System.IO.File.Delete(Application.StartupPath + "\" + PartnerCodeFileName)
         Catch ex As Exception
         End Try
 

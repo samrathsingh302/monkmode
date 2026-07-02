@@ -42,6 +42,13 @@ Module Blocker
     ' service copies (Service1.CoolOff*FileName), like SnapshotName/BackupFileName.
     Public Const CoolOffRequestFileName As String = "monkmode_cooloff.request"
     Public Const CoolOffCancelFileName As String = "monkmode_cooloff.cancel"
+    ' C3b: the ONE content-bearing partner-code trigger the CLI drops in AppDir()
+    ' (unblock --code). Unlike the cooling-off triggers, its CONTENT is read - but
+    ' as a verified ATTEMPT the service KDF-checks against a MAC-covered verifier
+    ' (R2), never as a command it obeys. The CLI has ZERO lift authority: it can
+    ' only submit a candidate; the service alone verifies and lifts. Parity-pinned
+    ' with the service copy (Service1.PartnerCodeFileName).
+    Public Const PartnerCodeFileName As String = "monkmode_partner.code"
     Public Const Marker As String = "#### MonkMode Entries ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
@@ -342,7 +349,14 @@ Module Blocker
         Return String.Join(";", parts) & ";"
     End Function
 
-    Public Sub WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime)
+    ' C3b: WriteConfig now also mints the partner accountability code. It generates
+    ' a random code, stores ONLY its salted one-way hash (plaintext-in-ini,
+    ' MAC-covered) plus an empty UnlockedAt exit flag, and RETURNS the plaintext
+    ' ONCE for the caller to show. The plaintext is NEVER persisted (not the ini,
+    ' the C1b backup, the snapshot, or any log). Rotate-on-use: each arm mints a
+    ' FRESH code (a used code dies with its block at stopMe()), so a code the user
+    ' saw themselves entering can't be banked for the next block.
+    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime) As String
         Dim ini As New IniFile
         Dim appList As String = PackApps(apps)
         Dim siteList As String = PackList(domains)
@@ -370,6 +384,20 @@ Module Blocker
         ini.AddSection("CurrentTime")
         ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
 
+        ' C3b: mint the partner code. Generate a random code, store ONLY its salted
+        ' one-way hash (Base64) + its salt (Base64) + an empty UnlockedAt, all as
+        ' PLAINTEXT in [Partner] (they are not reversible secrets - the MAC is what
+        ' protects them, exactly like plaintext CustomSites). Set BEFORE StampFreshMac
+        ' so the fresh MAC covers them (and the C1b backup below captures them) - the
+        ' shown code is then MAC-valid from birth. The plaintext is returned once and
+        ' never persisted.
+        Dim partnerSalt() As Byte = ConfigIntegrity.NewPartnerSalt()
+        Dim partnerCodePlain As String = ConfigIntegrity.GeneratePartnerCode()
+        ini.AddSection("Partner")
+        ini.SetKeyValue("Partner", "Salt", Convert.ToBase64String(partnerSalt))
+        ini.SetKeyValue("Partner", "Hash", ConfigIntegrity.ComputePartnerHash(partnerSalt, partnerCodePlain))
+        ini.SetKeyValue("Partner", "UnlockedAt", "")
+
         ' B7: stamp a fresh tamper-evident MAC. Generate a per-block HMAC key,
         ' DPAPI-protect it at machine scope into [Integrity] Key, and MAC the
         ' canonical of the plaintext values just written into [Integrity] Mac.
@@ -385,7 +413,8 @@ Module Blocker
         ' MAC-valid (a DPAPI failure above left it unstamped -> no backup), so the
         ' backup is always a genuinely liftable config.
         RefreshBackup(ini)
-    End Sub
+        Return partnerCodePlain
+    End Function
 
     ' B7/B4: builds the canonical string the MAC is computed over, from a loaded
     ' ini. Uses the DECRYPTED plaintext for the encrypted fields ([Time] Until,
@@ -403,6 +432,12 @@ Module Blocker
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
+        ' C3b: the [Partner] fields are stored PLAINTEXT (as-stored, like CustomSites -
+        ' NOT decrypted like the datetimes); absent => "" (a v4 config read under v5
+        ' code therefore builds a different canonical and freezes, R9). MAC-covered.
+        Dim partnerSalt As String = ini.GetKeyValue("Partner", "Salt")
+        Dim partnerHash As String = ini.GetKeyValue("Partner", "Hash")
+        Dim partnerUnlockedAt As String = ini.GetKeyValue("Partner", "UnlockedAt")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -413,7 +448,7 @@ Module Blocker
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
     End Function
 
     ' B7: generate a new HMAC key, protect it into [Integrity] Key, and stamp
@@ -512,6 +547,21 @@ Module Blocker
     ' over a simultaneous request (fail-closed: stay blocked).
     Public Sub CancelCoolOff()
         File.WriteAllText(Path.Combine(AppDir(), CoolOffCancelFileName), "")
+    End Sub
+
+    ' C3b: drop the partner-code ATTEMPT trigger carrying the candidate code. Unlike
+    ' the cooling-off triggers (presence-only, content ignored), this trigger's
+    ' CONTENT is read - but the service treats it as an authentication ATTEMPT it
+    ' KDF-verifies against the MAC-covered verifier, never as a command it obeys
+    ' (R2). The CLI has ZERO lift authority: it can only submit; the service alone
+    ' verifies and lifts. The candidate is written PLAINTEXT because the service must
+    ' apply the one-way KDF itself (if the CLI pre-hashed with the stored function,
+    ' an attacker who can read [Partner] Hash would just drop it in and match) - safe
+    ' because the submitter already knows the code they typed, rotate-on-use burns a
+    ' used one, and the service never logs it and deletes the trigger after
+    ' adjudication (success or failure).
+    Public Sub RequestPartnerCode(ByVal code As String)
+        File.WriteAllText(Path.Combine(AppDir(), PartnerCodeFileName), code)
     End Sub
 
     ' B7: recompute [Integrity] Mac over the current canonical using the already

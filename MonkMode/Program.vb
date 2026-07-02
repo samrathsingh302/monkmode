@@ -7,6 +7,7 @@
 '      monkmode add    --sites c.com[,d.com]
 '      monkmode unblock                    (request cooling-off — lifts after ~1h active time)
 '      monkmode unblock --cancel           (cancel a pending cooling-off; stay blocked)
+'      monkmode unblock --code <CODE>      (submit the partner code — service verifies + lifts)
 '      monkmode unblock --force            (escape hatch — tears down an active block)
 '      monkmode help
 '
@@ -131,7 +132,9 @@ Module Program
             Catch
             End Try
         End If
-        Blocker.WriteConfig(domains, apps, untilDate)
+        ' C3b: WriteConfig mints a fresh partner code and returns the plaintext ONCE
+        ' (stored only as a salted, MAC-covered hash). Shown once below; never logged.
+        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate)
         ' B5a: snapshot the user's current browser DoH policy BEFORE the service
         ' starts and forces it off, so teardown restores the pre-block state (no
         ' data loss). Must precede InstallAndStart - the service sets the policy in
@@ -147,6 +150,16 @@ Module Program
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
         Console.WriteLine("Close and reopen your browser to see the block. It cannot be removed until the timer ends.")
+
+        ' C3b: show the partner accountability code ONCE - this is the only time it
+        ' is ever displayed (it is stored only as a salted one-way hash, never in
+        ' plaintext, never logged). Relay it to your accountability partner now; to
+        ' leave early, they authorise `monkmode unblock --code <CODE>` and the block
+        ' lifts within ~10s. A fresh code is minted for every new block.
+        Console.WriteLine("")
+        Console.WriteLine("Emergency unlock code (give it to your accountability partner NOW - it will NOT be shown again):")
+        Console.WriteLine("    " & partnerCode)
+        Console.WriteLine("To end the block early, they run:  monkmode unblock --code <CODE>")
         Return 0
     End Function
 
@@ -194,6 +207,13 @@ Module Program
     ' wait: the trigger files carry no timing (R2) and the deadline is
     ' service-computed and floor-clamped.
     '
+    ' C3b (R1): `--code <CODE>` is the FAST partner-relayed exit. It drops the ONE
+    ' content-bearing trigger with the candidate; the SERVICE alone KDF-verifies it
+    ' against the MAC-covered hash and, on a match, lifts via the same stopMe(). The
+    ' CLI has ZERO lift authority - it only submits (an attacker running the CLI
+    ' cannot forge a preimage, swap the MAC-covered verifier, or skip the
+    ' service-side lift). A wrong/blank/tampered code leaves the block standing.
+    '
     ' `--force` remains the UNCHANGED B6 escape hatch (D2: retained as
     ' brick-insurance until partner-code exists at C3/C4/H2 to take over that
     ' role - you cannot remove the only guaranteed exit before its replacement
@@ -214,6 +234,23 @@ Module Program
             If Not Blocker.BlockIsActive() Then
                 Console.Error.WriteLine("No active block to unblock.")
                 Return 1
+            End If
+            ' C3b: partner-code attempt. Drop the ONE content-bearing trigger with
+            ' the candidate; the SERVICE alone verifies it (KDF + constant-time
+            ' compare against the MAC-covered hash) on its next tick and, on a match,
+            ' lifts via the SAME stopMe() natural expiry and cooling-off use. The CLI
+            ' has ZERO lift authority here - it only submits a candidate. Deliberately
+            ' does NOT reveal correctness synchronously (the service adjudicates); a
+            ' wrong/blank/tampered code just leaves the block standing.
+            If HasFlag(args, "--code") Then
+                Dim code As String = GetOption(args, "--code")
+                If code = "" Then
+                    Console.Error.WriteLine("Provide the code:  monkmode unblock --code <CODE>")
+                    Return 1
+                End If
+                Blocker.RequestPartnerCode(code)
+                Console.WriteLine("Code submitted. If it's correct the block lifts within ~10s; if not, the block stays fully enforced.")
+                Return 0
             End If
             If HasFlag(args, "--cancel") Then
                 Blocker.CancelCoolOff()
@@ -264,16 +301,21 @@ Module Program
         ' C1b: remove the config shadow backup so a future install can't restore the
         ' old config from it (mirrors the hosts-snapshot removal + stopMe's delete).
         Step_("Removing the config backup", Sub() Blocker.DeleteBackup())
-        ' C2b: remove any cooling-off trigger files (mirrors stopMe's delete) so a
-        ' stale request can't auto-start a cooling-off on the NEXT armed block.
-        ' Cleanup only - the teardown above is unchanged (D2).
-        Step_("Removing cooling-off triggers", Sub()
+        ' C2b/C3b: remove any cooling-off + partner-code trigger files (mirrors
+        ' stopMe's deletes) so a stale request can't auto-start a cooling-off, and no
+        ' stale candidate lingers, on the NEXT armed block. Cleanup only - the
+        ' teardown above is unchanged (D2 keeps --force as-is through C3b).
+        Step_("Removing cooling-off and partner-code triggers", Sub()
                                                    Try
                                                        File.Delete(Path.Combine(Blocker.AppDir(), Blocker.CoolOffRequestFileName))
                                                    Catch
                                                    End Try
                                                    Try
                                                        File.Delete(Path.Combine(Blocker.AppDir(), Blocker.CoolOffCancelFileName))
+                                                   Catch
+                                                   End Try
+                                                   Try
+                                                       File.Delete(Path.Combine(Blocker.AppDir(), Blocker.PartnerCodeFileName))
                                                    Catch
                                                    End Try
                                                End Sub)
@@ -393,6 +435,7 @@ Module Program
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode unblock           (request cooling-off: the block lifts after ~1h of active machine time)")
         Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
+        Console.WriteLine("  monkmode unblock --code <CODE>  (submit the partner accountability code; the service verifies it and lifts within ~10s)")
         Console.WriteLine("  monkmode unblock --force   (escape hatch: tears down an active block + removes the service)")
         Console.WriteLine("  monkmode help")
         Console.WriteLine("")
