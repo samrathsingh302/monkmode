@@ -40,6 +40,22 @@ Imports System.IO
 
 Module AtomicHosts
 
+    ' Test seam (audit N2/N3 fail-closed branch coverage). When set, the atomic
+    ' rename below calls this instead of File.Move, so a unit test can force the
+    ' persistent-failure path DETERMINISTICALLY - proving (N2) that an unrenameable
+    ' target still fails closed (retries exhausted -> rethrow, temp cleaned up, the
+    ' existing target left intact, never blanked or torn) and (N3) that the service's
+    ' ReassertHostsFailClosed backstop still re-locks hosts read-only even when this
+    ' write throws AFTER the read-only attribute was already cleared. <ThreadStatic>
+    ' so the hook is confined to the single test thread that sets it: a parallel test
+    ' class calling WriteAtomic on another thread is unaffected (no shared-state race),
+    ' and it needs no initializer (a reference-type ThreadStatic defaults to Nothing on
+    ' every thread). PRODUCTION never assigns it - the field stays Nothing, so
+    ' WriteAtomic takes the real File.Move path, behaviourally unchanged. Friend, so
+    ' only the in-repo test assembly (InternalsVisibleTo) can even see it.
+    <ThreadStatic>
+    Friend RenameHookForTests As Action(Of String, String)
+
     ' Crash-safe replacement of a file's entire contents: write a unique sibling
     ' temp, then atomically rename it over the target. Used for every hosts write.
     ' (targetPath, not "path" - VB is case-insensitive, so a "path" parameter would
@@ -59,7 +75,13 @@ Module AtomicHosts
             Dim attempt As Integer = 0
             Do
                 Try
-                    File.Move(tmp, targetPath, True)
+                    ' RenameHookForTests is Nothing in production - this is the plain
+                    ' File.Move rename; the hook only diverts it under a unit test.
+                    If RenameHookForTests IsNot Nothing Then
+                        RenameHookForTests(tmp, targetPath)
+                    Else
+                        File.Move(tmp, targetPath, True)
+                    End If
                     Exit Do
                 Catch ex As Exception When (TypeOf ex Is System.IO.IOException OrElse TypeOf ex Is System.UnauthorizedAccessException) AndAlso attempt < 8
                     attempt += 1
