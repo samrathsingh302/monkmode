@@ -1377,53 +1377,88 @@ Public Class Service1
 
     End Sub
 
+    ' Audit #6 de-dup gate: FileSystemWatcher routinely raises two or more
+    ' Changed events for ONE logical write to add_to_hosts (data + metadata
+    ' updates), delivered on threadpool threads that can run CONCURRENTLY.
+    ' Shared so every fire contends on the same monitor.
+    Private Shared ReadOnly adderGate As New Object()
+
     Private Sub adder_Changed(ByVal sender As System.Object, ByVal e As System.IO.FileSystemEventArgs) Handles adder.Changed
-
-        ' FAIL-OPEN FIX (audit #2): this is a FileSystemWatcher callback. It
-        ' clears hosts' read-only attribute to append, so an unhandled throw
-        ' here (a locked/IO-erroring hosts, a transient read) both crashes the
-        ' LocalSystem service AND leaves hosts WRITABLE - a fail-OPEN window
-        ' against the fail-closed doctrine. Mirror the timer self-heal pattern:
-        ' Try/Catch the whole body so the watcher thread/service survives, and a
-        ' Finally that ALWAYS re-asserts read-only so hosts is never left
-        ' writable on any exit path. Best-effort append; a failed add must never
-        ' weaken the block.
+        ' Thin wrapper: feed the testable core the real trigger/hosts/snapshot
+        ' paths. Guarded so nothing - even the path construction - can throw
+        ' out of the watcher callback and crash the service (parity with the
+        ' OnUnhandledException wrapper).
         Try
-            If My.Computer.FileSystem.FileExists(sWinDir & "\system32\drivers\etc\add_to_hosts") Then
-                Dim toAdd As String
-                toAdd = System.IO.File.ReadAllText(sWinDir & "\system32\drivers\etc\add_to_hosts")
-                SetAttr(hostDirS, vbNormal)
-                System.IO.File.AppendAllText(hostDirS, toAdd)
-                ' Mirror the append into the repair snapshot (best effort) so a
-                ' later B2 self-heal restores the added sites too. Only when the
-                ' snapshot already exists: creating one here would make a
-                ' marker-less "expected block" that a repair would then write and
-                ' the expiry strip could never remove.
-                Try
-                    Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-                    If My.Computer.FileSystem.FileExists(snapshotPath) Then
-                        System.IO.File.AppendAllText(snapshotPath, toAdd)
-                    End If
-                Catch ex As Exception
-                End Try
-                Try
-                    System.IO.File.Delete(sWinDir & "\system32\drivers\etc\add_to_hosts")
-                Catch ex As Exception
-                End Try
-            End If
+            ProcessAddToHosts(sWinDir & "\system32\drivers\etc\add_to_hosts",
+                              hostDirS,
+                              Application.StartupPath + "\monkmode_hosts.block")
         Catch ex As Exception
-            ' Swallow so a throw can never escape the watcher callback and crash
-            ' the service. The Finally below re-locks hosts (fail-closed).
-        Finally
-            ' ALWAYS re-assert read-only - even if the append threw after the
-            ' attribute was cleared, hosts must not be left writable. Guarded +
-            ' best-effort so the re-lock itself can never throw out of Finally.
-            Try
-                If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbReadOnly)
-            Catch ex As Exception
-            End Try
         End Try
+    End Sub
 
+    ' The testable core of the add_to_hosts channel. Two audit fixes live here:
+    '
+    ' FAIL-OPEN FIX (audit #2): this runs from a FileSystemWatcher callback. It
+    ' clears hosts' read-only attribute to append, so an unhandled throw here
+    ' (a locked/IO-erroring hosts, a transient read) both crashes the
+    ' LocalSystem service AND leaves hosts WRITABLE - a fail-OPEN window
+    ' against the fail-closed doctrine. Mirror the timer self-heal pattern:
+    ' Try/Catch the whole body so the watcher thread/service survives, and a
+    ' Finally that ALWAYS re-asserts read-only so hosts is never left writable
+    ' on any exit path. Best-effort append; a failed add must never weaken the
+    ' block.
+    '
+    ' DOUBLE-FIRE DE-DUP (audit #6): without serialisation, a duplicate
+    ' Changed fire could read the trigger file after another fire read it but
+    ' BEFORE that fire deleted it, appending the same entries to hosts + the
+    ' snapshot twice (harmless to enforcement, but real churn in the user's
+    ' hosts). SyncLock serialises the fires, and the trigger delete happens
+    ' INSIDE the critical section, so a duplicate fire re-checks File.Exists
+    ' and no-ops: at most one append per trigger-file write. A failed delete
+    ' keeps today's behaviour (a later fire may re-append - the trigger still
+    ' says "append me", and losing an add would weaken the block).
+    '
+    ' Friend Shared with explicit path params so the unit tests drive it
+    ' against temp files, exactly like ReassertHostsFailClosed (fence: unit
+    ' tests never touch the real hosts).
+    Friend Shared Sub ProcessAddToHosts(ByVal triggerPath As String, ByVal hostsPath As String, ByVal snapshotPath As String)
+        SyncLock adderGate
+            Try
+                If System.IO.File.Exists(triggerPath) Then
+                    Dim toAdd As String = System.IO.File.ReadAllText(triggerPath)
+                    SetAttr(hostsPath, vbNormal)
+                    System.IO.File.AppendAllText(hostsPath, toAdd)
+                    ' Mirror the append into the repair snapshot (best effort) so a
+                    ' later B2 self-heal restores the added sites too. Only when the
+                    ' snapshot already exists: creating one here would make a
+                    ' marker-less "expected block" that a repair would then write and
+                    ' the expiry strip could never remove.
+                    Try
+                        If System.IO.File.Exists(snapshotPath) Then
+                            System.IO.File.AppendAllText(snapshotPath, toAdd)
+                        End If
+                    Catch ex As Exception
+                    End Try
+                    ' The de-dup pivot: consume the trigger before releasing the
+                    ' lock, so the next queued fire finds nothing to process.
+                    Try
+                        System.IO.File.Delete(triggerPath)
+                    Catch ex As Exception
+                    End Try
+                End If
+            Catch ex As Exception
+                ' Swallow so a throw can never escape the watcher callback and crash
+                ' the service. The Finally below re-locks hosts (fail-closed).
+            Finally
+                ' ALWAYS re-assert read-only - even if the append threw after the
+                ' attribute was cleared, hosts must not be left writable. Guarded +
+                ' best-effort so the re-lock itself can never throw out of Finally.
+                Try
+                    If System.IO.File.Exists(hostsPath) Then SetAttr(hostsPath, vbReadOnly)
+                Catch ex As Exception
+                End Try
+            End Try
+        End SyncLock
     End Sub
 
     'Private Sub SystemEvents_PowerModeChanged(ByVal sender As Object, ByVal e As PowerModeChangedEventArgs)

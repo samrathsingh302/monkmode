@@ -205,13 +205,21 @@ Module Program
         '    notifier. Retries until both stay down (recovery is already off).
         Step_("Stopping the watchdog pair and notifier", Sub() Blocker.KillWatchdogProcesses())
 
-        ' 3. With nothing alive to re-deny, remove the deny-DELETE ACE so the
-        '    service object can be opened for DELETE (the CLI runs as BA).
-        Step_("Removing the service deny-DELETE protection", Sub() ServiceTools.ServiceInstaller.RestoreDefaultServiceSd(Blocker.ServiceName))
-
-        ' 4. Delete the service registration itself (the `sc delete` we normally
-        '    refuse during a block).
-        Step_("Deleting the MonkMode service", Sub() ServiceTools.ServiceInstaller.DeleteServiceByName(Blocker.ServiceName))
+        ' 3+4. With nothing alive to re-deny, remove the deny-DELETE ACE so the
+        '    service object can be opened for DELETE (the CLI runs as BA), then
+        '    delete the service registration itself (the `sc delete` we
+        '    normally refuse during a block). Audit #9: while the deny ACE is
+        '    still on the SD the SCM is GUARANTEED to refuse the delete, so a
+        '    hard-failed SD restore is retried once and a still-failed restore
+        '    SKIPS the delete with an actionable message, instead of burying
+        '    the real cause under a misleading AccessDenied "skipped" from
+        '    step 4. Steps 5+ run either way (best-effort teardown continues).
+        RunSdRestoreThenDelete(
+            Function(attempt As Integer) Step_(
+                If(attempt = 1, "Removing the service deny-DELETE protection", "Retrying the deny-DELETE removal"),
+                Sub() ServiceTools.ServiceInstaller.RestoreDefaultServiceSd(Blocker.ServiceName)),
+            Function() Step_("Deleting the MonkMode service", Sub() ServiceTools.ServiceInstaller.DeleteServiceByName(Blocker.ServiceName)),
+            Sub(msg) Console.WriteLine(msg))
 
         ' 5. Unlock hosts and strip ONLY the MonkMode marker block (user content
         '    preserved byte-for-byte — the same data-loss-safe strip the service
@@ -235,16 +243,41 @@ Module Program
     ' ---------- helpers ----------
 
     ' Run one best-effort teardown step: print what it does, swallow + report any
-    ' failure so the escape hatch always continues to the next step.
-    Private Sub Step_(ByVal label As String, ByVal action As Action)
+    ' failure so the escape hatch always continues to the next step. Returns
+    ' whether the step succeeded so a dependent step can be gated on it (audit
+    ' #9); callers stay free to ignore the result.
+    Private Function Step_(ByVal label As String, ByVal action As Action) As Boolean
         Console.Write("  " & label & " ... ")
         Try
             action()
             Console.WriteLine("ok")
+            Return True
         Catch ex As Exception
             Console.WriteLine("skipped (" & ex.Message & ")")
+            Return False
         End Try
-    End Sub
+    End Function
+
+    ' Audit #9 teardown policy: the service delete (step 4) is refused by the
+    ' SCM for as long as the deny-DELETE ACE is still on the service SD, so a
+    ' hard-failed SD restore (step 3) makes the delete attempt pure noise - a
+    ' misleading AccessDenied "skipped". Policy: retry the restore once (covers
+    ' a transient SCM hiccup), attempt the delete ONLY after a restore attempt
+    ' succeeded, otherwise report an actionable skip. Friend + delegate params
+    ' so the unit tests drive the policy without touching the real SCM (hard
+    ' fence); production wires the delegates through Step_, so they never
+    ' throw. Returns whether the delete ran and succeeded.
+    Friend Function RunSdRestoreThenDelete(ByVal tryRestoreSd As Func(Of Integer, Boolean),
+                                           ByVal tryDeleteService As Func(Of Boolean),
+                                           ByVal reportSkip As Action(Of String)) As Boolean
+        Dim sdRestored As Boolean = tryRestoreSd(1)
+        If Not sdRestored Then sdRestored = tryRestoreSd(2)
+        If Not sdRestored Then
+            reportSkip("  Deleting the MonkMode service ... skipped (the deny-DELETE removal failed twice, so the SCM would refuse the delete; re-run 'monkmode unblock --force' to retry)")
+            Return False
+        End If
+        Return tryDeleteService()
+    End Function
 
     ' True if a bare flag (e.g. --force) is present anywhere in args.
     Private Function HasFlag(ByVal args As String(), ByVal name As String) As Boolean
