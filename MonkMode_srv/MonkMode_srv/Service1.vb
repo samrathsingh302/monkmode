@@ -175,16 +175,24 @@ Public Class Service1
                 ' mark; live ticks advance it, bounded by real elapsed.
                 lastMonoMs = Environment.TickCount64
                 Dim newHw As String = storedHw
-                Dim asOfHw As DateTime = DateTime.MinValue
-                Dim parsedHw As DateTime
-                If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then asOfHw = parsedHw
 
                 Dim macValidAtStart As Boolean = ConfigMacIsValidForIni(iniFile)
-                If EffectiveBlockHasExpired(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), asOfHw, 0, macValidAtStart) Then
-                    ' The ONLY OnStart path that may lift the block: a successfully
-                    ' parsed, genuinely past end time (measured against the trusted
-                    ' high-water mark) AND a valid B7 MAC. An unparseable Until or a
-                    ' tampered/invalid MAC keeps the block standing (fail closed).
+                ' C2b: read the cooling-off deadline too - OnStart's one lift path
+                ' now goes through the shared EffectiveExit (expiry OR cooling-off
+                ' elapsed, both MAC-gated, both measured against the STORED
+                ' HighWater - OnStart never advances the mark). A reboot mid-
+                ' cooling-off therefore resumes the countdown off the persisted
+                ' mark: downtime is never credited (B4 semantic) = an over-wait,
+                ' never an early lift. An unreadable/absent CoolOffUntil reads
+                ' not-elapsed; a tampered one fails the MAC (freeze).
+                Dim coolOffEncAtStart As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
+                Dim coolOffAtStart As String = If(coolOffEncAtStart = "", "", encryptionW.DecryptData(coolOffEncAtStart))
+                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, storedHw, 0, macValidAtStart) Then
+                    ' The ONLY OnStart path that may lift the block: a valid B7 MAC
+                    ' AND (a successfully parsed, genuinely past end time OR an
+                    ' elapsed cooling-off deadline), measured against the trusted
+                    ' high-water mark. An unparseable Until or a tampered/invalid
+                    ' MAC keeps the block standing (fail closed).
                     stopMe()
                 ElseIf ShouldRestampOnStart(macValidAtStart, newHw, storedHw) Then
                     ' CURRENTLY INERT (retained as a guard): since the B4 creep fix,
@@ -339,6 +347,99 @@ Public Class Service1
         End Try
     End Sub
 
+    ' C2b live wiring: the per-tick cooling-off request/cancel poll. Runs INSIDE
+    ' tickLock and only while TimeChanging="no" (the caller gates both), so a
+    ' request/cancel can never race the heartbeat's read-modify-write or
+    ' interleave with a clock-change. currentCoolOffUntil/highWaterText/macValid
+    ' are this tick's already-loaded state; returns the EFFECTIVE decrypted
+    ' CoolOffUntil after any transition so the SAME tick's heartbeat decides off
+    ' the post-signal state - that ordering is what makes "cancel wins" hold in
+    ' the cancel-vs-elapse race (a cancel processed here clears the deadline
+    ' before the heartbeat ever sees it; tickLock serialises the two).
+    '
+    ' Consume-after-persist (crash-safe): on Start the ini (with the new
+    ' deadline) is SAVED before the request trigger is deleted - a crash between
+    ' the two leaves the trigger, and the next tick classifies it Ignore
+    ' (already pending) and just deletes it: no lost request, no double-set. On
+    ' Cancel the cleared ini is saved before BOTH triggers are deleted (a torn
+    ' cancel leaves the deadline standing - cooling-off continues, the user
+    ' re-cancels; never an early lift). Both write paths re-validate the MAC on
+    ' the RELOADED object before touching it (the heartbeat's #4 TOCTOU rule:
+    ' never re-stamp bytes you didn't just verify) and re-stamp with the
+    ' EXISTING key - this modifies an existing block; only the CLI mints keys.
+    ' Every successful write refreshes the C1b shadow backup so a later
+    ' corrupt-then-restore carries the cooling-off state. Best-effort throughout;
+    ' a throw never crashes the tick (the tick continues off the returned state).
+    Private Function ProcessCoolOffSignals(ByVal currentCoolOffUntil As String, ByVal highWaterText As String, ByVal macValid As Boolean) As String
+        Try
+            Dim requestPath As String = Application.StartupPath + "\" + CoolOffRequestFileName
+            Dim cancelPath As String = Application.StartupPath + "\" + CoolOffCancelFileName
+            Dim requestPresent As Boolean = System.IO.File.Exists(requestPath)
+            Dim cancelPresent As Boolean = System.IO.File.Exists(cancelPath)
+            ' Fast path: no triggers this tick (the overwhelmingly common case).
+            If Not requestPresent AndAlso Not cancelPresent Then Return currentCoolOffUntil
+
+            ' committed:=False is the C4 seam - no commit flag exists yet, so a
+            ' request is never refused for commitment until C4 wires it.
+            Select Case ClassifyCoolOffSignal(requestPresent, cancelPresent, currentCoolOffUntil <> "", False, macValid)
+                Case CoolOffAction.Start
+                    ' The service is the SOLE deadline writer: trusted HighWater
+                    ' at the request + max(duration, floor). No configurable
+                    ' duration until C6, so duration = floor. An uncomputable
+                    ' deadline (unparseable HighWater) writes nothing and leaves
+                    ' the trigger for the next tick.
+                    Dim deadline As String = ComputeCoolOffDeadline(highWaterText, MinCoolOffFloorSeconds, MinCoolOffFloorSeconds)
+                    If deadline = "" Then Return currentCoolOffUntil
+                    Dim iniFile = New IniFile
+                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+                    If Not ConfigMacIsValidForIni(iniFile) Then Return currentCoolOffUntil
+                    iniFile.SetKeyValue("Time", "CoolOffUntil", encryptionW.EncryptData(deadline))
+                    RestampMacWithExistingKey(iniFile)
+                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+                    RefreshBackupFromValid(iniFile)
+                    Try
+                        System.IO.File.Delete(requestPath)
+                    Catch ex As Exception
+                    End Try
+                    Return deadline
+                Case CoolOffAction.Cancel
+                    Dim iniFile = New IniFile
+                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+                    If Not ConfigMacIsValidForIni(iniFile) Then Return currentCoolOffUntil
+                    iniFile.SetKeyValue("Time", "CoolOffUntil", "")
+                    RestampMacWithExistingKey(iniFile)
+                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+                    RefreshBackupFromValid(iniFile)
+                    Try
+                        System.IO.File.Delete(requestPath)
+                    Catch ex As Exception
+                    End Try
+                    Try
+                        System.IO.File.Delete(cancelPath)
+                    Catch ex As Exception
+                    End Try
+                    Return ""
+                Case Else
+                    ' Ignore: no ini write. Delete any stale trigger (a request
+                    ' while one is already pending, a consumed request whose
+                    ' delete crashed, triggers against a frozen config) so it
+                    ' doesn't re-classify forever.
+                    Try
+                        System.IO.File.Delete(requestPath)
+                    Catch ex As Exception
+                    End Try
+                    Try
+                        System.IO.File.Delete(cancelPath)
+                    Catch ex As Exception
+                    End Try
+                    Return currentCoolOffUntil
+            End Select
+        Catch ex As Exception
+            Return currentCoolOffUntil
+        End Try
+        Return currentCoolOffUntil
+    End Function
+
     ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
     ' immune to wall-clock changes) captured at the last HighWater advance. The
     ' per-tick HighWater credit is capped by the real elapsed since this anchor, so
@@ -366,6 +467,10 @@ Public Class Service1
         Dim notifyFound As Boolean = False
         Dim iniProcessList As String = ""
         Dim iniUntil As String = ""
+        ' C2b: the decrypted [Time] CoolOffUntil for THIS tick ("" = no cooling-
+        ' off pending, also the fail-closed default when the read fails - an
+        ' unreadable deadline can never lift the block, only hold it).
+        Dim iniCoolOffUntil As String = ""
         ' B7: MAC validity for this tick. Default FALSE = fail closed: if the
         ' config can't even be read, or the MAC doesn't verify, the block is
         ' treated as active (never expired) and every self-heal gate keeps
@@ -398,6 +503,10 @@ Public Class Service1
             End If
             iniUntil = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until"))
             iniTimeChanging = iniFile.GetKeyValue("Time", "TimeChanging")
+            ' C2b: read the cooling-off deadline alongside Until (encrypted like
+            ' the other [Time] datetimes; absent/empty = none pending).
+            Dim coolOffEnc As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
+            iniCoolOffUntil = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
             iniProcessList = iniFile.GetKeyValue("Process", "List")
             If StrComp("null", iniProcessList) <> 0 Then
                 iniProcessList = encryptionW.DecryptData(iniProcessList)
@@ -443,6 +552,16 @@ Public Class Service1
             ' every corrupt tick to +7d; restoring from the backup avoids that).
             RecoverPrimaryConfig()
         End Try
+
+        ' C2b: poll the cooling-off request/cancel triggers - inside tickLock,
+        ' and only while no clock change is in flight (the same TimeChanging
+        ' guard the heartbeat takes, so a signal can never interleave with a
+        ' clock-change state transition). Returns the POST-signal deadline so
+        ' this tick's heartbeat below decides off it - a cancel processed here
+        ' wins over an elapse the same tick (fail-closed: stay blocked).
+        If StrComp("no", iniTimeChanging) = 0 Then
+            iniCoolOffUntil = ProcessCoolOffSignals(iniCoolOffUntil, newHw, macValid)
+        End If
 
         ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
         ' we no longer hold the file open, so this is how the lock is maintained).
@@ -580,7 +699,11 @@ Public Class Service1
             ' are MAC-covered, so a legit config must be re-stamped or it'd go stale);
             ' otherwise HOLD - never re-stamp over an invalid MAC. B4 unchanged:
             ' expiry is still decided off newHwAsOf (the trusted high-water mark).
-            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds))
+            ' C2b: cooling-off elapsed (against the SAME trusted HighWater) is the
+            ' second Lift trigger - a completed cooling-off converges on the same
+            ' stopMe() as natural expiry. Folded inside ClassifyHeartbeat's
+            ' macValid gate, so a tampered config can never cool off its way out.
+            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw))
                 Case HeartbeatAction.Lift
                     stopMe()
                 Case HeartbeatAction.Restamp
@@ -691,8 +814,8 @@ Public Class Service1
 
     ' What the active-block heartbeat does on a given tick (TimeChanging="no").
     Friend Enum HeartbeatAction
-        Lift     ' valid MAC + genuinely past end time => stopMe()
-        Restamp  ' valid MAC, not yet expired => rewrite Now/HighWater + re-stamp the MAC
+        Lift     ' valid MAC + (genuinely past end time OR cooling-off elapsed) => stopMe()
+        Restamp  ' valid MAC, no exit due => rewrite Now/HighWater + re-stamp the MAC
         Hold     ' INVALID MAC => fail closed: neither lift nor re-stamp (freeze)
     End Enum
 
@@ -705,7 +828,7 @@ Public Class Service1
     '   * Lift ONLY when macValid AND the block has genuinely expired. This is
     '     EXACTLY EffectiveBlockHasExpired (macValid AndAlso blockExpired), so the
     '     lift condition is unchanged.
-    '   * Re-stamp ONLY when macValid (and not expired): the service's own
+    '   * Re-stamp ONLY when macValid (and no exit due): the service's own
     '     Now/HighWater writes are MAC-covered, so a LEGIT config must be
     '     re-stamped or its MAC would go stale and needlessly freeze it.
     '   * HOLD when the MAC is invalid: NEVER re-stamp over an unverified config
@@ -713,9 +836,16 @@ Public Class Service1
     ' A regression test pins ClassifyHeartbeat(macValid:=False, blockExpired:=True)
     ' = Hold (the old code would have re-stamped here). Pure + Shared so the
     ' guardian-parity-style unit tests can pin it.
-    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean) As HeartbeatAction
+    '
+    ' C2b: coolOffElapsed (CoolOffElapsedTime against the SAME trusted HighWater)
+    ' is the SECOND lift trigger - natural expiry and a completed cooling-off
+    ' converge on the one Lift => stopMe() teardown. It is folded INSIDE the
+    ' macValid gate, so a tampered config can never cool off its way out
+    ' (macValid=False => Hold regardless of coolOffElapsed) - the lift condition
+    ' is exactly EffectiveExit, pinned by a test.
+    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean) As HeartbeatAction
         If Not macValid Then Return HeartbeatAction.Hold
-        If blockExpired Then Return HeartbeatAction.Lift
+        If blockExpired OrElse coolOffElapsed Then Return HeartbeatAction.Lift
         Return HeartbeatAction.Restamp
     End Function
 
@@ -729,6 +859,116 @@ Public Class Service1
     ' Pure + Shared so it is pinned by a regression test.
     Friend Shared Function ShouldRestampOnStart(ByVal macValid As Boolean, ByVal newHw As String, ByVal storedHw As String) As Boolean
         Return macValid AndAlso newHw <> "" AndAlso newHw <> storedHw
+    End Function
+
+    ' ===== C2b: cooling-off (R1 - the service-adjudicated early exit) =====
+    '
+    ' `monkmode unblock` (bare) no longer tears anything down: the CLI only drops
+    ' an authority-free, PRESENCE-ONLY trigger file next to the exes, and the
+    ' SERVICE decides whether and when to lift - it writes a MAC-covered deadline
+    ' [Time] CoolOffUntil = HighWater_at_request + max(duration, floor), counts it
+    ' down against the B4 monotonic HighWater (never DateTime.Now), and lifts via
+    ' the SAME stopMe() natural expiry uses (one teardown actor, one primitive).
+    ' The trigger file's CONTENT is ignored (R2): the CLI is a legitimate MAC
+    ' stamper, so any CLI-written timing field could be forged to "now" under a
+    ' valid MAC - the request channel must carry ZERO timing authority. Triggers
+    ' are POLLED at the top of each tick inside tickLock (no second
+    ' FileSystemWatcher and its double-fire hazards; <=10s latency to BEGIN a
+    ' wait is immaterial). The block stays FULLY ENFORCED during the wait - every
+    ' self-heal gate still keys off Until, which is untouched.
+
+    ' The two presence-only trigger files, in Application.StartupPath (MonkMode's
+    ' own state zone next to the ini/snapshots - NOT the hosts adder's etc\ zone).
+    ' Parity-pinned with the CLI copies (Blocker.CoolOff*FileName), like
+    ' SnapshotName/BackupFileName - a drift would silently break the channel.
+    Friend Const CoolOffRequestFileName As String = "monkmode_cooloff.request"
+    Friend Const CoolOffCancelFileName As String = "monkmode_cooloff.cancel"
+
+    ' The compile-time FLOOR: the shortest cooling-off the service will ever
+    ' grant, in seconds - THE one new C2b security parameter, pinned by a unit
+    ' test exactly like HighWaterJumpCeilingSeconds. Load-bearing because the
+    ' (future C6) configured duration is a CLI-written MAC-covered field, so an
+    ' attacker running the CLI could set it to 0 under a valid MAC; the service
+    ' clamps to this floor, and the floor is compile-time - not attacker-
+    ' settable. A configured duration can only ever EXTEND the wait. D1: 1 hour
+    ' (recommended default; 15 min = light, 3 h = strict); C2b ships floor =
+    ' default (no configurable field yet).
+    Friend Const MinCoolOffFloorSeconds As Long = 3600
+
+    ' Has the pending cooling-off deadline been reached? coolOffUntilText is the
+    ' decrypted [Time] CoolOffUntil ("" = none pending); highWaterText is the
+    ' trusted B4 mark the deadline is measured against - NEVER DateTime.Now, so a
+    ' clock-forward can't reach the deadline early (HighWater refuses the jump)
+    ' and a reboot pauses the countdown (downtime is never credited). Fail-closed
+    ' on every axis: empty (none pending) and any unparseable input read as NOT
+    ' elapsed - a corrupted deadline or mark can only ever hold the block, never
+    ' lift it. The caller folds macValid, exactly as expiry does (mirrors
+    ' EffectiveBlockHasExpired's split). Pure + Shared so it is unit tested;
+    ' byte-for-byte the same semantics as the guardian copy (parity-pinned).
+    Friend Shared Function CoolOffElapsedTime(ByVal coolOffUntilText As String, ByVal highWaterText As String) As Boolean
+        If coolOffUntilText = "" Then Return False
+        Dim ca As New CultureInfo("en-CA")
+        Dim coolOffUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(coolOffUntilText, ca, DateTimeStyles.None, coolOffUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return coolOffUntil <= highWater
+    End Function
+
+    ' The deadline the service (the SOLE writer) persists on a Start: the trusted
+    ' HighWater at the request plus max(configured duration, floor). The deadline
+    ' therefore lives in the HighWater frame - reached only after that much
+    ' genuine ON-machine elapsed time - and can never be shorter than the
+    ' compile-time floor even if a (future C6) configured duration says 0.
+    ' Returns "" when the stored HighWater doesn't parse (fail-closed: no
+    ' deadline computable => no write; the trigger stays for the next tick).
+    ' Pure + Shared so it is unit tested.
+    Friend Shared Function ComputeCoolOffDeadline(ByVal highWaterText As String, ByVal configuredDurationSeconds As Long, ByVal floorSeconds As Long) As String
+        Dim ca As New CultureInfo("en-CA")
+        Dim highWater As DateTime
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return ""
+        Return highWater.AddSeconds(Math.Max(configuredDurationSeconds, floorSeconds)).ToString(ca)
+    End Function
+
+    ' What the per-tick trigger poll should do.
+    Friend Enum CoolOffAction
+        Start    ' write the service-computed CoolOffUntil, consume the request
+        Cancel   ' clear CoolOffUntil (back into the block), consume both triggers
+        Ignore   ' no ini write; delete any stale trigger
+    End Enum
+
+    ' The pure trigger classifier (the R2 processing matrix + the C4 seam):
+    '   * macValid REQUIRED to act: never modify/re-stamp an unverified config
+    '     (mirrors the `add` fail-open fix) - a frozen config ignores triggers.
+    '   * cancel WINS when both files are present: the safe outcome is "stay
+    '     blocked".
+    '   * Start only when nothing is pending: CoolOffUntil is IMMUTABLE once set
+    '     (except by cancel), so a replayed/re-dropped request can never reset or
+    '     extend a running deadline.
+    '   * committed (C4, future): a committed block ignores cooling-off requests
+    '     (code-only exit). C2b callers pass False until C4 wires the flag.
+    ' Pure + Shared so the full matrix is unit tested.
+    Friend Shared Function ClassifyCoolOffSignal(ByVal requestPresent As Boolean, ByVal cancelPresent As Boolean, ByVal coolOffPending As Boolean, ByVal committed As Boolean, ByVal macValid As Boolean) As CoolOffAction
+        If Not macValid Then Return CoolOffAction.Ignore
+        If cancelPresent Then Return CoolOffAction.Cancel
+        If requestPresent AndAlso Not committed AndAlso Not coolOffPending Then Return CoolOffAction.Start
+        Return CoolOffAction.Ignore
+    End Function
+
+    ' The ONE exit decision, shared in semantics by the tick heartbeat (via
+    ' ClassifyHeartbeat's Lift arm), OnStart and the guardian's stand-down (its
+    ' parity copy) so the three can never drift: the block may end ONLY when the
+    ' MAC is valid AND (it genuinely expired OR a pending cooling-off deadline
+    ' has been reached), both measured against the monotonic HighWater. The
+    ' guardian folding cooling-off in is LOAD-BEARING: without it, a guardian
+    ' tick in the stopMe() gap at the end of a cooling-off would read "Until not
+    ' passed + macValid => still active" and SCM-resurrect the cooled-off block.
+    ' Pure + Shared, parity-pinned with the guardian copy.
+    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+        If Not macValid Then Return False
+        Dim asOf As DateTime = DateTime.MinValue
+        Dim parsedHw As DateTime
+        If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
+        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText)
     End Function
 
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
@@ -1086,16 +1326,20 @@ Public Class Service1
     Friend Function CanonicalFromIni(ByVal iniFile As IniFile) As String
         Dim untilEnc As String = iniFile.GetKeyValue("Time", "Until")
         Dim highWaterEnc As String = iniFile.GetKeyValue("Time", "HighWater")
+        Dim coolOffEnc As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
         Dim procEnc As String = iniFile.GetKeyValue("Process", "List")
         Dim nowEnc As String = iniFile.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = iniFile.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
+        ' C2b: CoolOffUntil is an encrypted datetime like Until/HighWater; absent/
+        ' empty ("" - no cooling-off pending) passes through verbatim.
+        Dim coolOffPlain As String = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads
@@ -1401,6 +1645,18 @@ Public Class Service1
         ' snapshot delete above + the CLI escape hatch's DeleteBackup). Best-effort.
         Try
             System.IO.File.Delete(Application.StartupPath + "\" + ConfigBackup.BackupFileName)
+        Catch ex As Exception
+        End Try
+
+        ' C2b: drop any cooling-off trigger files too - an ended block must leave
+        ' no stale request behind, or the NEXT block would start a cooling-off the
+        ' moment it arms (fail-closed but wrong). Best-effort.
+        Try
+            System.IO.File.Delete(Application.StartupPath + "\" + CoolOffRequestFileName)
+        Catch ex As Exception
+        End Try
+        Try
+            System.IO.File.Delete(Application.StartupPath + "\" + CoolOffCancelFileName)
         Catch ex As Exception
         End Try
 

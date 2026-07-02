@@ -51,10 +51,11 @@ Friend Module ConfigIntegrity
     ' this implies: arm blocks AFTER upgrading the binaries, not ACROSS an upgrade
     ' (an in-flight block armed by the previous schema correctly freezes until it
     ' is re-armed). History: v1 (pre-B4) -> v2 (B4: added HighWater) -> v3
-    ' (Section C accountability core). The four copies MUST share this value or
+    ' (Section C accountability core) -> v4 (C2b: added CoolOffUntil, the
+    ' cooling-off deadline). The four copies MUST share this value or
     ' the parties would stamp/verify different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v3"
+    Friend Const CurrentSchemaVersion As String = "v4"
 
     ' The canonical string the MAC is computed over: the schema version tag plus
     ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
@@ -73,16 +74,26 @@ Friend Module ConfigIntegrity
     ' couples the value to the MAC. HighWater sits right after Until (the two are
     ' paired: Until is the target, HighWater the trusted clock measured against it).
     '
+    ' C2b (cooling-off): the canonical includes CoolOffUntil - the cooling-off
+    ' deadline (an en-CA LOCAL datetime like Until/HighWater; "" = no cooling-off
+    ' pending). It MUST be MAC-covered or a raw ini edit could forge the deadline
+    ' into the past for an instant lift. The SERVICE is its sole writer
+    ' (HighWater_at_request + max(duration, floor)); the CLI's request channel is
+    ' a presence-only trigger file with zero timing authority (R2). CoolOffUntil
+    ' sits directly after HighWater so the [Time] datetimes stay grouped: Until =
+    ' block target, HighWater = trusted clock, CoolOffUntil = early-exit target.
+    '
     ' The version is a caller-supplied PARAMETER (not a hardcoded literal) so it
     ' rides the same wrapper-supplied contract as every other field: each
     ' CanonicalFromIni wrapper passes CurrentSchemaVersion exactly as it passes the
     ' decrypted Until/HighWater/ProcessList/Now - the uniform shape every Section-C
     ' field will slot into. A bump is then one edit to CurrentSchemaVersion, pinned
     ' loudly by the 4-copy parity + format tests.
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String) As String
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String) As String
         Return schemaVersion & vbLf &
                "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
+               "CoolOffUntil=" & coolOffUntil & vbLf &
                "ProcessList=" & processList & vbLf &
                "CustomSites=" & customSites & vbLf &
                "Now=" & now & vbLf

@@ -52,6 +52,46 @@ Friend Module Guardian
         Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
     End Function
 
+    ' ---- C2b: cooling-off (the guardian's half of the exit decision) ----
+    '
+    ' Byte-for-byte the same semantics as Service1.CoolOffElapsedTime /
+    ' Service1.EffectiveExit (parity-pinned, like BlockHasExpired). LOAD-BEARING
+    ' for the guardian: its stand-down gate MUST fold cooling-off in, or a
+    ' guardian tick in the stopMe() gap at the end of a cooling-off would read
+    ' "Until not passed + macValid => still active" and SCM-resurrect the service
+    ' - the cooled-off block would come back and cooling-off could never
+    ' complete. Both read the STORED HighWater (the service is its sole writer;
+    ' the guardian never advances it), so the guardian never stands down on a
+    ' rolled clock either.
+
+    ' Has the pending cooling-off deadline been reached? "" (none pending) and
+    ' any unparseable input read as NOT elapsed (fail closed - a corrupted
+    ' deadline keeps the guardian guarding). The caller folds macValid via
+    ' EffectiveExit, exactly as expiry does.
+    Friend Function CoolOffElapsedTime(ByVal coolOffUntilText As String, ByVal highWaterText As String) As Boolean
+        If coolOffUntilText = "" Then Return False
+        Dim ca As New CultureInfo("en-CA")
+        Dim coolOffUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(coolOffUntilText, ca, DateTimeStyles.None, coolOffUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return coolOffUntil <= highWater
+    End Function
+
+    ' The ONE exit decision (the guardian's copy of Service1.EffectiveExit): the
+    ' block may end ONLY when the MAC is valid AND (it genuinely expired OR a
+    ' pending cooling-off deadline has been reached), both measured against the
+    ' monotonic HighWater. The guardian's stand-down gates on this, so it agrees
+    ' with the service's lift within one tick - and never resurrects a
+    ' cooled-off block (worst case, one bounce: a restarted service's OnStart
+    ' immediately re-lifts, and the guardian's next read stands it down).
+    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+        If Not macValid Then Return False
+        Dim asOf As DateTime = DateTime.MinValue
+        Dim parsedHw As DateTime
+        If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
+        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText)
+    End Function
+
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
     '
     ' Byte-for-byte the same gates as Service1's B4 block (the parity tests pin

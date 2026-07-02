@@ -5,6 +5,8 @@
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt]
 '      monkmode status
 '      monkmode add    --sites c.com[,d.com]
+'      monkmode unblock                    (request cooling-off — lifts after ~1h active time)
+'      monkmode unblock --cancel           (cancel a pending cooling-off; stay blocked)
 '      monkmode unblock --force            (escape hatch — tears down an active block)
 '      monkmode help
 '
@@ -183,22 +185,45 @@ Module Program
         Return 0
     End Function
 
-    ' B6 escape hatch — the guaranteed-removal / clean-exit path. Once B1/B2/B3/
-    ' B4/B7 are all fail-closed, a tampered or corrupted block never auto-lifts,
-    ' and the service now resists `sc delete`. This verb is the deliberate,
-    ' documented way out (brick-insurance — see vault\dev\monk-mode\specs\ARCHITECTURE.md B6 / the honest
+    ' C2b (R1): `unblock` is now a REQUEST, not a teardown. Bare `unblock` drops
+    ' the presence-only cooling-off request trigger; the SERVICE (the sole timing
+    ' authority) starts a floor-long cooling-off on its next tick - the block
+    ' stays fully enforced while a MAC-covered monotonic deadline counts down -
+    ' and then lifts via its own stopMe(). `--cancel` drops the cancel trigger
+    ' (clear the pending cooling-off; stay blocked). Nothing here can shorten the
+    ' wait: the trigger files carry no timing (R2) and the deadline is
+    ' service-computed and floor-clamped.
+    '
+    ' `--force` remains the UNCHANGED B6 escape hatch (D2: retained as
+    ' brick-insurance until partner-code exists at C3/C4/H2 to take over that
+    ' role - you cannot remove the only guaranteed exit before its replacement
+    ' exists, or a DPAPI-dead freeze traps the machine). Once B1/B2/B3/B4/B7 are
+    ' all fail-closed, a tampered or corrupted block never auto-lifts, and the
+    ' service resists `sc delete`; this verb is the deliberate, documented way
+    ' out (see vault\dev\monk-mode\specs\ARCHITECTURE.md B6 / the honest
     ' ceiling). It is UNCONDITIONAL by design but gated behind an explicit
-    ' --force, so it can never be a casual one-word bypass: you must consciously
-    ' ask to tear an active block down. Every step is best-effort and ordered so
-    ' nothing resurrects the service mid-teardown; failures are reported, not
-    ' fatal. Mirrors the live-verified cleanup.ps1 emergency teardown.
+    ' --force, so it can never be a casual one-word bypass. Every step is
+    ' best-effort and ordered so nothing resurrects the service mid-teardown;
+    ' failures are reported, not fatal. Mirrors the live-verified cleanup.ps1
+    ' emergency teardown.
     Private Function DoUnblock(ByVal args As String()) As Integer
         Dim forced As Boolean = HasFlag(args, "--force")
         If Not forced Then
-            Console.Error.WriteLine("'unblock' tears down an active block and removes the MonkMode service.")
-            Console.Error.WriteLine("This is the deliberate escape hatch — it is NOT undone automatically.")
-            Console.Error.WriteLine("If you really mean it, run:  monkmode unblock --force")
-            Return 1
+            ' The cooling-off surface (bare request / --cancel). Only meaningful
+            ' against an active block - the service only polls while it runs.
+            If Not Blocker.BlockIsActive() Then
+                Console.Error.WriteLine("No active block to unblock.")
+                Return 1
+            End If
+            If HasFlag(args, "--cancel") Then
+                Blocker.CancelCoolOff()
+                Console.WriteLine("Cooling-off cancel requested. Any pending cooling-off is cleared within ~10s; the block continues to its normal end.")
+                Return 0
+            End If
+            Blocker.RequestCoolOff()
+            Console.WriteLine("Cooling-off requested. The block stays FULLY enforced while the service counts down ~1 hour of active machine time; it then lifts itself.")
+            Console.WriteLine("Changed your mind? Run:  monkmode unblock --cancel")
+            Return 0
         End If
 
         Console.WriteLine("Forcing MonkMode down (escape hatch). This removes the active block.")
@@ -239,6 +264,19 @@ Module Program
         ' C1b: remove the config shadow backup so a future install can't restore the
         ' old config from it (mirrors the hosts-snapshot removal + stopMe's delete).
         Step_("Removing the config backup", Sub() Blocker.DeleteBackup())
+        ' C2b: remove any cooling-off trigger files (mirrors stopMe's delete) so a
+        ' stale request can't auto-start a cooling-off on the NEXT armed block.
+        ' Cleanup only - the teardown above is unchanged (D2).
+        Step_("Removing cooling-off triggers", Sub()
+                                                   Try
+                                                       File.Delete(Path.Combine(Blocker.AppDir(), Blocker.CoolOffRequestFileName))
+                                                   Catch
+                                                   End Try
+                                                   Try
+                                                       File.Delete(Path.Combine(Blocker.AppDir(), Blocker.CoolOffCancelFileName))
+                                                   Catch
+                                                   End Try
+                                               End Sub)
         Step_("Removing the Safe Mode registration", Sub() Blocker.RemoveSafeBootKeys())
         ' B5a: restore the user's prior browser DoH policy (or remove our lingering
         ' "off") from the snapshot, then consume it - no data loss, so a reinstall
@@ -353,12 +391,14 @@ Module Program
         Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
+        Console.WriteLine("  monkmode unblock           (request cooling-off: the block lifts after ~1h of active machine time)")
+        Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
         Console.WriteLine("  monkmode unblock --force   (escape hatch: tears down an active block + removes the service)")
         Console.WriteLine("  monkmode help")
         Console.WriteLine("")
         Console.WriteLine("Notes:")
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
-        Console.WriteLine("  - Once a block starts it cannot be shortened or removed until it expires.")
+        Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
     End Sub
 

@@ -52,6 +52,10 @@ public class CanonicalParityTests
     // B4: HighWater is an encrypted datetime like Until/Now (the wrappers decrypt
     // it). A distinct value so a wrapper that read the wrong field would diverge.
     private const string HighWaterPlain = "2026-06-25 11:30:00 a.m.";
+    // C2b: CoolOffUntil is an encrypted datetime like HighWater (the wrappers
+    // decrypt it). A distinct value so a wrapper that read the wrong field (or
+    // stopped decrypting it) would diverge.
+    private const string CoolOffUntilPlain = "2026-06-25 12:45:00 p.m.";
 
     // A fixed raw 32-byte test key (the production key is random + DPAPI-
     // protected; the pure MAC layer takes the raw key, so inject a known one and
@@ -71,6 +75,7 @@ public class CanonicalParityTests
     private static readonly string NowEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(NowPlain);
     private static readonly string ProcListEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(ProcListPlain);
     private static readonly string HighWaterEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(HighWaterPlain);
+    private static readonly string CoolOffUntilEnc = new MonkMode.Simple3Des(Passphrase).EncryptData(CoolOffUntilPlain);
 
     // ---- per-project ini builders (each project has its own IniFile type) ----
     //
@@ -82,6 +87,7 @@ public class CanonicalParityTests
         var ini = new MonkMode.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
         ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
+        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -93,6 +99,7 @@ public class CanonicalParityTests
         var ini = new monkmode.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
         ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
+        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -104,6 +111,7 @@ public class CanonicalParityTests
         var ini = new mm_guard.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
         ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
+        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -115,6 +123,7 @@ public class CanonicalParityTests
         var ini = new mm_notify.IniFile();
         ini.SetKeyValue("Time", "Until", UntilEnc);
         ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
+        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
         ini.SetKeyValue("CurrentTime", "Now", NowEnc);
         ini.SetKeyValue("Process", "List", ProcListEnc);
         ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
@@ -147,16 +156,18 @@ public class CanonicalParityTests
     [Fact]
     public void TheCanonical_DecryptsUntilNowProcessList_ButLeavesCustomSitesVerbatim()
     {
-        // Pin WHAT the wrappers must do: decrypt Until/HighWater/Now/ProcessList,
-        // pass CustomSites through verbatim. If a wrapper started decrypting
-        // CustomSites, stopped decrypting ProcessList, or stopped decrypting the
-        // B4 HighWater field, this exact string would change and the test fails
-        // loudly. (Mirrors BuildCanonical's pinned format test, but through the
-        // real reader, end to end.)
+        // Pin WHAT the wrappers must do: decrypt Until/HighWater/CoolOffUntil/
+        // Now/ProcessList, pass CustomSites through verbatim. If a wrapper
+        // started decrypting CustomSites, stopped decrypting ProcessList, or
+        // stopped decrypting the B4 HighWater / C2b CoolOffUntil fields, this
+        // exact string would change and the test fails loudly. (Mirrors
+        // BuildCanonical's pinned format test, but through the real reader, end
+        // to end.)
         Assert.Equal(
             Ver + "\n" +
             "Until=" + UntilPlain + "\n" +
             "HighWater=" + HighWaterPlain + "\n" +
+            "CoolOffUntil=" + CoolOffUntilPlain + "\n" +
             "ProcessList=" + ProcListPlain + "\n" +
             "CustomSites=" + CustomSitesPlain + "\n" +
             "Now=" + NowPlain + "\n",
@@ -196,9 +207,9 @@ public class CanonicalParityTests
         var encryptedSites = new MonkMode.Simple3Des(Passphrase).EncryptData("decrypted-sites;");
 
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain);  // CustomSites VERBATIM (correct)
+            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain);  // CustomSites VERBATIM (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain);  // CustomSites DECRYPTED (the bug)
+            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain);  // CustomSites DECRYPTED (the bug)
 
         Assert.NotEqual(correct, buggy);
 
@@ -215,9 +226,9 @@ public class CanonicalParityTests
         // would put the ciphertext into the canonical instead of the plaintext,
         // diverging from every other party. Pin that this breaks MAC agreement.
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList DECRYPTED (correct)
+            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain);  // ProcessList DECRYPTED (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList CIPHERTEXT (the bug)
+            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain);  // ProcessList CIPHERTEXT (the bug)
 
         Assert.NotEqual(correct, buggy);
         var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
@@ -235,6 +246,7 @@ public class CanonicalParityTests
         {
             set("Time", "Until", UntilEnc);
             set("Time", "HighWater", HighWaterEnc);
+            set("Time", "CoolOffUntil", CoolOffUntilEnc);
             set("CurrentTime", "Now", NowEnc);
             set("Process", "List", "null");
             set("User", "CustomSites", CustomSitesPlain);

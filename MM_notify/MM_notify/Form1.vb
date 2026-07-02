@@ -168,16 +168,20 @@ Public Class Form1
     Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
         Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
         Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
+        Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
+        ' C2b: CoolOffUntil is an encrypted datetime like Until/HighWater; absent/
+        ' empty ("" - no cooling-off pending) passes through verbatim.
+        Dim coolOffPlain As String = If(coolOffEnc = "", "", enc.DecryptData(coolOffEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
     End Function
 
     ' B7: recompute [Integrity] Mac over the current canonical with the already

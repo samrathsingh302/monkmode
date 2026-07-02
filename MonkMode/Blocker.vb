@@ -34,6 +34,14 @@ Module Blocker
     ' B5a: the browser-DoH-policy snapshot (the user's prior policy values captured
     ' at block start) so teardown can restore them with no data loss.
     Public Const DohSnapshotName As String = "monkmode_doh.snapshot"
+    ' C2b: the two presence-only cooling-off trigger files the CLI drops in
+    ' AppDir(). Their CONTENT IS IGNORED by the service (R2): the CLI holds the
+    ' MAC-stamping pattern, so any CLI-written timing would be forgeable under a
+    ' valid MAC - the request channel carries ZERO timing authority; the service
+    ' alone computes and writes the MAC-covered deadline. Parity-pinned with the
+    ' service copies (Service1.CoolOff*FileName), like SnapshotName/BackupFileName.
+    Public Const CoolOffRequestFileName As String = "monkmode_cooloff.request"
+    Public Const CoolOffCancelFileName As String = "monkmode_cooloff.cancel"
     Public Const Marker As String = "#### MonkMode Entries ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
@@ -391,17 +399,21 @@ Module Blocker
     Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
         Dim untilEnc As String = ini.GetKeyValue("Time", "Until")
         Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
+        Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
         Dim procEnc As String = ini.GetKeyValue("Process", "List")
         Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
         Dim sites As String = ini.GetKeyValue("User", "CustomSites")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
+        ' C2b: CoolOffUntil is an encrypted datetime like Until/HighWater; absent/
+        ' empty ("" - no cooling-off pending) passes through verbatim.
+        Dim coolOffPlain As String = If(coolOffEnc = "", "", enc.DecryptData(coolOffEnc))
         ' "null" is stored verbatim (not encrypted); only decrypt a real payload.
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain)
     End Function
 
     ' B7: generate a new HMAC key, protect it into [Integrity] Key, and stamp
@@ -482,6 +494,24 @@ Module Blocker
             RefreshBackup(ini)
         Catch
         End Try
+    End Sub
+
+    ' ---- C2b: cooling-off request channel (authority-free trigger files) ----
+
+    ' Drop the cooling-off REQUEST trigger. Presence-only: the service polls for
+    ' the file on its next tick (<=10s), computes its OWN floor-clamped deadline
+    ' off the monotonic HighWater and consumes the file - nothing the CLI writes
+    ' here (content, timestamps) carries any timing authority (R2). Same
+    ' file-drop channel shape as add_to_hosts, but in MonkMode's own AppDir zone.
+    Public Sub RequestCoolOff()
+        File.WriteAllText(Path.Combine(AppDir(), CoolOffRequestFileName), "")
+    End Sub
+
+    ' Drop the cooling-off CANCEL trigger: the service clears any pending
+    ' CoolOffUntil (back into the block) and consumes both triggers. Cancel WINS
+    ' over a simultaneous request (fail-closed: stay blocked).
+    Public Sub CancelCoolOff()
+        File.WriteAllText(Path.Combine(AppDir(), CoolOffCancelFileName), "")
     End Sub
 
     ' B7: recompute [Integrity] Mac over the current canonical using the already
