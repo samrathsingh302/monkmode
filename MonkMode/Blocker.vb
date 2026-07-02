@@ -217,6 +217,22 @@ Module Blocker
         End Try
     End Function
 
+    ' C4: is the active block committed (self-serve cooling-off disabled = code-only
+    ' exit)? Best-effort, for the CLI's `unblock` WARNING ONLY - it has ZERO
+    ' enforcement authority (the service alone adjudicates cooling-off). Gated on a
+    ' valid MAC so a tampered/frozen config never yields a misleading "committed"
+    ' message; returns False on any read/parse failure.
+    Public Function BlockIsCommitted() As Boolean
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            If Not ConfigMacIsValidForIni(ini) Then Return False
+            Return String.Equals(If(ini.GetKeyValue("Commit", "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
     ' ---- hosts helpers ----
 
     Private Function NormalizeDomain(ByVal d As String) As String
@@ -356,7 +372,7 @@ Module Blocker
     ' the C1b backup, the snapshot, or any log). Rotate-on-use: each arm mints a
     ' FRESH code (a used code dies with its block at stopMe()), so a code the user
     ' saw themselves entering can't be banked for the next block.
-    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime) As String
+    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime, Optional ByVal committed As Boolean = False) As String
         Dim ini As New IniFile
         Dim appList As String = PackApps(apps)
         Dim siteList As String = PackList(domains)
@@ -398,6 +414,14 @@ Module Blocker
         ini.SetKeyValue("Partner", "Hash", ConfigIntegrity.ComputePartnerHash(partnerSalt, partnerCodePlain))
         ini.SetKeyValue("Partner", "UnlockedAt", "")
 
+        ' C4: the commit policy flag, MAC-covered from birth (set BEFORE StampFreshMac,
+        ' like the [Partner] fields). A committed block disables self-serve cooling-off
+        ' (code-only exit); the partner code + expiry still lift it. Stored NON-empty in
+        ' both states ("yes"/"no") so it round-trips cleanly through IniFile (no bare-key
+        ' Nothing ambiguity). Clearing/flipping it by raw edit fails the MAC -> freeze.
+        ini.AddSection("Commit")
+        ini.SetKeyValue("Commit", "Committed", If(committed, "yes", "no"))
+
         ' B7: stamp a fresh tamper-evident MAC. Generate a per-block HMAC key,
         ' DPAPI-protect it at machine scope into [Integrity] Key, and MAC the
         ' canonical of the plaintext values just written into [Integrity] Mac.
@@ -438,6 +462,8 @@ Module Blocker
         Dim partnerSalt As String = ini.GetKeyValue("Partner", "Salt")
         Dim partnerHash As String = ini.GetKeyValue("Partner", "Hash")
         Dim partnerUnlockedAt As String = ini.GetKeyValue("Partner", "UnlockedAt")
+        ' C4: the [Commit] Committed flag ("yes"/"no", plaintext-as-stored, MAC-covered).
+        Dim committed As String = ini.GetKeyValue("Commit", "Committed")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -448,7 +474,7 @@ Module Blocker
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed)
     End Function
 
     ' B7: generate a new HMAC key, protect it into [Integrity] Key, and stamp

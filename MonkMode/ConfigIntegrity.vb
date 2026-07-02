@@ -53,10 +53,11 @@ Friend Module ConfigIntegrity
     ' is re-armed). History: v1 (pre-B4) -> v2 (B4: added HighWater) -> v3
     ' (Section C accountability core) -> v4 (C2b: added CoolOffUntil, the
     ' cooling-off deadline) -> v5 (C3b: added the [Partner] Salt/Hash/UnlockedAt
-    ' accountability-code fields). The four copies MUST share this value or
-    ' the parties would stamp/verify different tags and every block would freeze;
+    ' accountability-code fields) -> v6 (C4: added the [Commit] Committed flag).
+    ' The four copies MUST share this value or the parties would stamp/verify
+    ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v5"
+    Friend Const CurrentSchemaVersion As String = "v6"
 
     ' The canonical string the MAC is computed over: the schema version tag plus
     ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
@@ -103,13 +104,21 @@ Friend Module ConfigIntegrity
     ' decrypted Until/HighWater/ProcessList/Now - the uniform shape every Section-C
     ' field will slot into. A bump is then one edit to CurrentSchemaVersion, pinned
     ' loudly by the 4-copy parity + format tests.
-    ' C3b: partnerSalt/partnerHash/partnerUnlockedAt are appended at the END of the
-    ' PARAMETER list (after coolOffUntil) but their LINES trail after Now= in the
-    ' OUTPUT - mind that the parameter order (until, processList, customSites, now,
-    ' highWater, coolOffUntil, partnerSalt, partnerHash, partnerUnlockedAt) is NOT
-    ' the line order; every wrapper threads them positionally, so the four copies
-    ' must stay byte-identical (the parity tests fail loudly on drift).
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String) As String
+    ' C4 (commit blocks): the canonical also includes Committed - the MAC-covered
+    ' policy flag ("yes"=committed, "no"/absent=not) that disables self-serve
+    ' cooling-off (the block becomes CODE-ONLY exit) while the partner code + expiry
+    ' still lift it. It MUST be MAC-covered or a raw edit could clear it and re-enable
+    ' the easy cooling-off exit; instead, flipping it fails the MAC -> macValid=False
+    ' -> the whole block FREEZES (cooling-off Ignored anyway), so an attacker can
+    ' never un-commit. Set once at arm by the CLI, never mutated during the block.
+    '
+    ' C3b/C4: partnerSalt/partnerHash/partnerUnlockedAt/committed are appended at the
+    ' END of the PARAMETER list (after coolOffUntil) and their LINES trail after Now=
+    ' in the OUTPUT - mind that the parameter order (until, processList, customSites,
+    ' now, highWater, coolOffUntil, partnerSalt, partnerHash, partnerUnlockedAt,
+    ' committed) is NOT the line order; every wrapper threads them positionally, so
+    ' the four copies must stay byte-identical (the parity tests fail loudly on drift).
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String) As String
         Return schemaVersion & vbLf &
                "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
@@ -119,7 +128,8 @@ Friend Module ConfigIntegrity
                "Now=" & now & vbLf &
                "PartnerSalt=" & partnerSalt & vbLf &
                "PartnerHash=" & partnerHash & vbLf &
-               "PartnerUnlockedAt=" & partnerUnlockedAt & vbLf
+               "PartnerUnlockedAt=" & partnerUnlockedAt & vbLf &
+               "Committed=" & committed & vbLf
     End Function
 
     ' HMAC-SHA256 of the canonical (Unicode bytes), Base64-encoded. The key is

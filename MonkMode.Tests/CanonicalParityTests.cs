@@ -31,6 +31,10 @@ using System.Globalization;
 
 namespace MonkMode.Tests;
 
+// CliWriteConfig_ProducesAnIni writes the shared test-bin monkmode_settings.ini via
+// Blocker.WriteConfig; the "CliIniWriters" collection serialises it with the other
+// ini-writing test classes so they never race the shared file.
+[Collection("CliIniWriters")]
 public class CanonicalParityTests
 {
     private const string Passphrase = "mm_textbox";
@@ -62,6 +66,9 @@ public class CanonicalParityTests
     private const string PartnerSaltPlain = "c2FsdC1iYXNlNjQ=";
     private const string PartnerHashPlain = "aGFzaC1iYXNlNjQ=";
     private const string PartnerUnlockedAtPlain = "2026-06-25 1:15:00 p.m.";
+    // C4: the [Commit] Committed flag, plaintext-as-stored (MAC-covered). A distinct
+    // value so a wrapper reading the wrong field would diverge.
+    private const string CommittedPlain = "yes";
 
     // A fixed raw 32-byte test key (the production key is random + DPAPI-
     // protected; the pure MAC layer takes the raw key, so inject a known one and
@@ -100,6 +107,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
         ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
         ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
+        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
         return ini;
     }
 
@@ -115,6 +123,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
         ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
         ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
+        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
         return ini;
     }
 
@@ -130,6 +139,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
         ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
         ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
+        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
         return ini;
     }
 
@@ -145,6 +155,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
         ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
         ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
+        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
         return ini;
     }
 
@@ -191,7 +202,8 @@ public class CanonicalParityTests
             "Now=" + NowPlain + "\n" +
             "PartnerSalt=" + PartnerSaltPlain + "\n" +
             "PartnerHash=" + PartnerHashPlain + "\n" +
-            "PartnerUnlockedAt=" + PartnerUnlockedAtPlain + "\n",
+            "PartnerUnlockedAt=" + PartnerUnlockedAtPlain + "\n" +
+            "Committed=" + CommittedPlain + "\n",
             CliCanonical());
     }
 
@@ -228,9 +240,9 @@ public class CanonicalParityTests
         var encryptedSites = new MonkMode.Simple3Des(Passphrase).EncryptData("decrypted-sites;");
 
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain);  // CustomSites VERBATIM (correct)
+            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain);  // CustomSites VERBATIM (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain);  // CustomSites DECRYPTED (the bug)
+            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain);  // CustomSites DECRYPTED (the bug)
 
         Assert.NotEqual(correct, buggy);
 
@@ -247,9 +259,9 @@ public class CanonicalParityTests
         // would put the ciphertext into the canonical instead of the plaintext,
         // diverging from every other party. Pin that this breaks MAC agreement.
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain);  // ProcessList DECRYPTED (correct)
+            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain);  // ProcessList DECRYPTED (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain);  // ProcessList CIPHERTEXT (the bug)
+            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain);  // ProcessList CIPHERTEXT (the bug)
 
         Assert.NotEqual(correct, buggy);
         var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
@@ -274,6 +286,7 @@ public class CanonicalParityTests
             set("Partner", "Salt", PartnerSaltPlain);
             set("Partner", "Hash", PartnerHashPlain);
             set("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
+            set("Commit", "Committed", CommittedPlain);
         }
 
         var cliIni = new MonkMode.IniFile();

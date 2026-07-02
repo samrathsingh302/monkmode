@@ -14,6 +14,11 @@ using System.Globalization;
 
 namespace MonkMode.Tests;
 
+// Serialised with the other CLI WriteConfig tests: they all write the shared
+// test-bin monkmode_settings.ini (+ .bak) via Blocker.IniPath(), so running them
+// in parallel (xunit's default across classes) would race the file. Same collection
+// name => xunit runs them sequentially.
+[Collection("CliIniWriters")]
 public class ExpiryRoundTripTests
 {
     private static readonly CultureInfo EnCa = new("en-CA");

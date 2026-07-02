@@ -178,6 +178,8 @@ Public Class Form1
         Dim partnerSalt As String = ini.GetKeyValue("Partner", "Salt")
         Dim partnerHash As String = ini.GetKeyValue("Partner", "Hash")
         Dim partnerUnlockedAt As String = ini.GetKeyValue("Partner", "UnlockedAt")
+        ' C4: the [Commit] Committed flag ("yes"/"no", plaintext-as-stored, MAC-covered).
+        Dim committed As String = ini.GetKeyValue("Commit", "Committed")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -187,7 +189,7 @@ Public Class Form1
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed)
     End Function
 
     ' B7: recompute [Integrity] Mac over the current canonical with the already

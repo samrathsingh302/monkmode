@@ -508,12 +508,12 @@ public class CoolOffEndToEndTests
         var honestDeadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
 
         var honest = MonkMode.ConfigIntegrity.BuildCanonical(
-            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, honestDeadline, "", "", "");
+            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, honestDeadline, "", "", "", "");
         var storedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(honest, key);
 
         var forgedDeadline = T0.AddHours(-1).ToString(EnCa); // "the wait is over"
         var forged = MonkMode.ConfigIntegrity.BuildCanonical(
-            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, forgedDeadline, "", "", "");
+            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, forgedDeadline, "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(forged, storedMac, key);
         Assert.False(macValid);
 

@@ -377,7 +377,7 @@ Public Class Service1
     ' Every successful write refreshes the C1b shadow backup so a later
     ' corrupt-then-restore carries the cooling-off state. Best-effort throughout;
     ' a throw never crashes the tick (the tick continues off the returned state).
-    Private Function ProcessCoolOffSignals(ByVal currentCoolOffUntil As String, ByVal highWaterText As String, ByVal macValid As Boolean) As String
+    Private Function ProcessCoolOffSignals(ByVal currentCoolOffUntil As String, ByVal highWaterText As String, ByVal macValid As Boolean, ByVal committed As Boolean) As String
         Try
             Dim requestPath As String = Application.StartupPath + "\" + CoolOffRequestFileName
             Dim cancelPath As String = Application.StartupPath + "\" + CoolOffCancelFileName
@@ -386,9 +386,12 @@ Public Class Service1
             ' Fast path: no triggers this tick (the overwhelmingly common case).
             If Not requestPresent AndAlso Not cancelPresent Then Return currentCoolOffUntil
 
-            ' committed:=False is the C4 seam - no commit flag exists yet, so a
-            ' request is never refused for commitment until C4 wires it.
-            Select Case ClassifyCoolOffSignal(requestPresent, cancelPresent, currentCoolOffUntil <> "", False, macValid)
+            ' C4: `committed` is now the real MAC-covered flag (was the False C4 seam).
+            ' A committed block refuses a cooling-off Start (code-only exit); the
+            ' partner code still lifts it (ProcessPartnerCodeSignal, which does NOT
+            ' read committed). Cancel is still honoured (harmless on a committed block,
+            ' which never has a pending deadline to clear).
+            Select Case ClassifyCoolOffSignal(requestPresent, cancelPresent, currentCoolOffUntil <> "", committed, macValid)
                 Case CoolOffAction.Start
                     ' The service is the SOLE deadline writer: trusted HighWater
                     ' at the request + max(duration, floor). No configurable
@@ -578,6 +581,11 @@ Public Class Service1
         ' unlocked, the fail-closed default - a tick that couldn't read it holds
         ' the block). Plaintext-as-stored (MAC-covered), not decrypted.
         Dim iniPartnerUnlockedAt As String = ""
+        ' C4: whether THIS block is committed (self-serve cooling-off disabled = code-
+        ' only exit). Only consulted under macValid (a frozen config Ignores cooling-off
+        ' regardless), and under macValid the MAC-covered flag is authentic. Default
+        ' not-committed on a failed read - harmless, since a failed read => not macValid.
+        Dim iniCommitted As Boolean = False
         ' B7: MAC validity for this tick. Default FALSE = fail closed: if the
         ' config can't even be read, or the MAC doesn't verify, the block is
         ' treated as active (never expired) and every self-heal gate keeps
@@ -617,6 +625,8 @@ Public Class Service1
             ' C3b: read the [Partner] UnlockedAt exit flag (plaintext, as-stored -
             ' MAC-covered, not decrypted). Absent/"" = not code-unlocked.
             iniPartnerUnlockedAt = iniFile.GetKeyValue("Partner", "UnlockedAt")
+            ' C4: read the [Commit] Committed policy flag ("yes"=committed). MAC-covered.
+            iniCommitted = IsCommitted(iniFile.GetKeyValue("Commit", "Committed"))
             iniProcessList = iniFile.GetKeyValue("Process", "List")
             If StrComp("null", iniProcessList) <> 0 Then
                 iniProcessList = encryptionW.DecryptData(iniProcessList)
@@ -670,7 +680,7 @@ Public Class Service1
         ' this tick's heartbeat below decides off it - a cancel processed here
         ' wins over an elapse the same tick (fail-closed: stay blocked).
         If StrComp("no", iniTimeChanging) = 0 Then
-            iniCoolOffUntil = ProcessCoolOffSignals(iniCoolOffUntil, newHw, macValid)
+            iniCoolOffUntil = ProcessCoolOffSignals(iniCoolOffUntil, newHw, macValid, iniCommitted)
             ' C3b: poll the partner-code trigger AFTER cooling-off (still inside
             ' tickLock + the TimeChanging="no" guard). Running it after ProcessCoolOff-
             ' Signals is what makes a valid code beat a same-tick --cancel: UnlockedAt
@@ -1095,6 +1105,17 @@ Public Class Service1
         If cancelPresent Then Return CoolOffAction.Cancel
         If requestPresent AndAlso Not committed AndAlso Not coolOffPending Then Return CoolOffAction.Start
         Return CoolOffAction.Ignore
+    End Function
+
+    ' C4: interpret the [Commit] Committed flag. "yes" (case-insensitive, trimmed) =
+    ' committed; "no"/absent/Nothing/anything else = not committed. The flag is
+    ' MAC-covered, so under a valid MAC this value is authentic (the CLI wrote it at
+    ' arm and it never changes during the block); flipping it by raw edit fails the
+    ' MAC -> macValid=False -> the block FREEZES (cooling-off Ignored regardless of
+    ' this value), so this default of "not committed on anything but 'yes'" can never
+    ' silently un-commit a genuinely committed block. Pure + Shared so it is unit tested.
+    Friend Shared Function IsCommitted(ByVal committedText As String) As Boolean
+        Return String.Equals(If(committedText, "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
     End Function
 
     ' ===== C3b: partner code (R1 - the FAST service-adjudicated early exit) =====
@@ -1536,6 +1557,8 @@ Public Class Service1
         Dim partnerSalt As String = iniFile.GetKeyValue("Partner", "Salt")
         Dim partnerHash As String = iniFile.GetKeyValue("Partner", "Hash")
         Dim partnerUnlockedAt As String = iniFile.GetKeyValue("Partner", "UnlockedAt")
+        ' C4: the [Commit] Committed flag ("yes"/"no", plaintext-as-stored, MAC-covered).
+        Dim committed As String = iniFile.GetKeyValue("Commit", "Committed")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
@@ -1545,7 +1568,7 @@ Public Class Service1
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads

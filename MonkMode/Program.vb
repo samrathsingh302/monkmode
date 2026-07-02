@@ -2,7 +2,7 @@
 '
 '    Usage:
 '      monkmode block  --sites a.com,b.com [--apps chrome.exe,foo.exe]
-'                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt]
+'                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit]
 '      monkmode status
 '      monkmode add    --sites c.com[,d.com]
 '      monkmode unblock                    (request cooling-off — lifts after ~1h active time)
@@ -132,9 +132,12 @@ Module Program
             Catch
             End Try
         End If
+        ' C4: `--commit` arms a COMMITTED block (self-serve cooling-off disabled = the
+        ' partner code + expiry are the only exits). The flag is MAC-covered from birth.
+        Dim committed As Boolean = HasFlag(args, "--commit")
         ' C3b: WriteConfig mints a fresh partner code and returns the plaintext ONCE
         ' (stored only as a salted, MAC-covered hash). Shown once below; never logged.
-        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate)
+        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate, committed)
         ' B5a: snapshot the user's current browser DoH policy BEFORE the service
         ' starts and forces it off, so teardown restores the pre-block state (no
         ' data loss). Must precede InstallAndStart - the service sets the policy in
@@ -150,6 +153,13 @@ Module Program
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
         Console.WriteLine("Close and reopen your browser to see the block. It cannot be removed until the timer ends.")
+
+        ' C4: committed-block notice - a committed block surrenders the self-serve
+        ' cooling-off wait, so the accountability code below is the ONLY early exit.
+        If committed Then
+            Console.WriteLine("")
+            Console.WriteLine("This block is COMMITTED: self-serve cooling-off is DISABLED. The ONLY early exit is the accountability code below (or waiting for the timer to end).")
+        End If
 
         ' C3b: show the partner accountability code ONCE - this is the only time it
         ' is ever displayed (it is stored only as a salted one-way hash, never in
@@ -256,6 +266,13 @@ Module Program
                 Blocker.CancelCoolOff()
                 Console.WriteLine("Cooling-off cancel requested. Any pending cooling-off is cleared within ~10s; the block continues to its normal end.")
                 Return 0
+            End If
+            ' C4: a committed block has NO self-serve cooling-off - refuse the request
+            ' with an actionable message instead of dropping a trigger the service would
+            ' just Ignore. The partner code (verified service-side) is the intended exit.
+            If Blocker.BlockIsCommitted() Then
+                Console.Error.WriteLine("This block is COMMITTED: self-serve cooling-off is disabled. The only early exit is the accountability code:  monkmode unblock --code <CODE>")
+                Return 1
             End If
             Blocker.RequestCoolOff()
             Console.WriteLine("Cooling-off requested. The block stays FULLY enforced while the service counts down ~1 hour of active machine time; it then lifts itself.")
@@ -430,7 +447,7 @@ Module Program
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
-        Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt]")
+        Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode unblock           (request cooling-off: the block lifts after ~1h of active machine time)")
@@ -442,6 +459,7 @@ Module Program
         Console.WriteLine("Notes:")
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
         Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
+        Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
     End Sub
 

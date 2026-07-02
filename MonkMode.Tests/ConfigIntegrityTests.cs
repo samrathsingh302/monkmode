@@ -57,11 +57,12 @@ public class ConfigIntegrityTests
     // value into the service/guardian/notifier copies below is faithful.
     private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
 
-    // coolOffUntil "" = no cooling-off pending; the three trailing "" are the C3b
-    // [Partner] Salt/Hash/UnlockedAt (no partner code set - the common shape here;
-    // the partner fields have their own dedicated tests in PartnerCodeTests).
+    // coolOffUntil "" = no cooling-off pending; the trailing "" are the C3b [Partner]
+    // Salt/Hash/UnlockedAt and the C4 Committed flag (no partner code / not committed -
+    // the common shape here; those fields have dedicated tests in PartnerCodeTests /
+    // CommitBlockTests).
     private static string Canonical(string until) =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 12:00:00 p.m.", "", "", "", "");
+        MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 12:00:00 p.m.", "", "", "", "", "");
 
     [Fact]
     public void RoundTrip_ValidMac_Verifies()
@@ -121,33 +122,38 @@ public class ConfigIntegrityTests
         // the cooling-off deadline into the past must fail; C3b: the [Partner]
         // Salt/Hash/UnlockedAt are covered - swapping the verifier or forging the
         // UnlockedAt exit flag must fail verification too, R6.)
-        var original = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "");
+        var original = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no");
         var mac = MonkMode.ConfigIntegrity.ComputeConfigMac(original, Key);
 
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "b.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "b.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no"), mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "evil.com;", "N", "HW", "CO", "PS", "PH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "evil.com;", "N", "HW", "CO", "PS", "PH", "", "no"), mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N2", "HW", "CO", "PS", "PH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N2", "HW", "CO", "PS", "PH", "", "no"), mac, Key));
         // B4: a forged HighWater (the clock-forward-by-config attack) must not validate.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "9999-01-01", "CO", "PS", "PH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "9999-01-01", "CO", "PS", "PH", "", "no"), mac, Key));
         // C2b: a forged CoolOffUntil (the skip-the-wait-by-config attack) must not validate.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "1970-01-01", "PS", "PH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "1970-01-01", "PS", "PH", "", "no"), mac, Key));
         // C3b/R6: a swapped-in partner Hash (the attacker's own verifier) must not
         // validate - that is what makes "tampered hash = no code valid = freeze".
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "ATTACKER-HASH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "ATTACKER-HASH", "", "no"), mac, Key));
         // C3b: a forged salt must not validate either.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "ATTACKER-SALT", "PH", ""), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "ATTACKER-SALT", "PH", "", "no"), mac, Key));
         // C3b: a forged UnlockedAt (the raw-edit "I'm unlocked" exit-flag attack)
         // must not validate - so a non-empty UnlockedAt is only trusted under a
         // valid MAC, i.e. only if the service wrote it after verifying a code.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "2020-01-01 12:00:00 p.m."), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "2020-01-01 12:00:00 p.m.", "no"), mac, Key));
+        // C4/R6: flipping the Committed flag (un-committing to re-enable cooling-off)
+        // must not validate - so a committed block can never be silently un-committed
+        // (the raw edit freezes it instead).
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "yes"), mac, Key));
     }
 
     [Fact]
@@ -158,9 +164,9 @@ public class ConfigIntegrityTests
         // the field names would silently break cross-party MAC agreement, so the
         // string is pinned literally and the test fails loudly on any drift.
         var c = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, "2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.", "2026-06-25 12:30:00 p.m.", "c2FsdA==", "aGFzaA==", "2026-06-25 1:00:00 p.m.");
+            Ver, "2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.", "2026-06-25 12:30:00 p.m.", "c2FsdA==", "aGFzaA==", "2026-06-25 1:00:00 p.m.", "yes");
         Assert.Equal(
-            "v5\n" +
+            "v6\n" +
             "Until=2026-06-25 5:04:33 p.m.\n" +
             "HighWater=2026-06-25 11:00:00 a.m.\n" +
             "CoolOffUntil=2026-06-25 12:30:00 p.m.\n" +
@@ -169,7 +175,8 @@ public class ConfigIntegrityTests
             "Now=2026-06-25 12:00:00 p.m.\n" +
             "PartnerSalt=c2FsdA==\n" +
             "PartnerHash=aGFzaA==\n" +
-            "PartnerUnlockedAt=2026-06-25 1:00:00 p.m.\n",
+            "PartnerUnlockedAt=2026-06-25 1:00:00 p.m.\n" +
+            "Committed=yes\n",
             c);
     }
 
@@ -180,8 +187,8 @@ public class ConfigIntegrityTests
         // CoolOffUntil = no cooling-off pending), so they must appear in the
         // canonical unchanged - the input just has to be reproducible across
         // parties, not interpreted.
-        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "null", "", "N", "HW", "", "", "", "");
-        Assert.Equal("v5\nUntil=U\nHighWater=HW\nCoolOffUntil=\nProcessList=null\nCustomSites=\nNow=N\nPartnerSalt=\nPartnerHash=\nPartnerUnlockedAt=\n", c);
+        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "null", "", "N", "HW", "", "", "", "", "");
+        Assert.Equal("v6\nUntil=U\nHighWater=HW\nCoolOffUntil=\nProcessList=null\nCustomSites=\nNow=N\nPartnerSalt=\nPartnerHash=\nPartnerUnlockedAt=\nCommitted=\n", c);
     }
 
     [Fact]
@@ -237,10 +244,10 @@ public class ConfigIntegrityTests
     [MemberData(nameof(Untils))]
     public void AllFourCopies_ProduceIdenticalCanonical(string until)
     {
-        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU");
-        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU");
-        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU");
-        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU");
+        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM");
+        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM");
+        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM");
+        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM");
         Assert.Equal(cli, srv);
         Assert.Equal(cli, guard);
         Assert.Equal(cli, notify);
@@ -250,7 +257,7 @@ public class ConfigIntegrityTests
     [MemberData(nameof(Untils))]
     public void AllFourCopies_ProduceIdenticalMac(string until)
     {
-        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU");
+        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM");
         var cli = MonkMode.ConfigIntegrity.ComputeConfigMac(c, Key);
         var srv = monkmode.ConfigIntegrity.ComputeConfigMac(c, Key);
         var guard = mm_guard.ConfigIntegrity.ComputeConfigMac(c, Key);
@@ -315,8 +322,8 @@ public class ConfigIntegrityTests
         var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
 
         // What the upgraded readers now build from the same values (an absent
-        // CoolOffUntil and absent [Partner] fields all read as "").
-        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw, "", "", "", "");
+        // CoolOffUntil, [Partner] fields and Committed all read as "").
+        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw, "", "", "", "", "");
         Assert.StartsWith(Ver + "\n", currentCanonical);   // the version tag really changed
         Assert.NotEqual(oldCanonical, currentCanonical);
 
@@ -333,39 +340,45 @@ public class ConfigIntegrityTests
     }
 
     [Fact]
-    public void ForwardMigration_V4SchemaMacUnderV5Code_FailsClosed_FreezesBlock()
+    public void ForwardMigration_V5SchemaMacUnderV6Code_FailsClosed_FreezesBlock()
     {
-        // The C3b instance of the R9 freeze: a block armed under v4 (C2b cooling-off,
-        // no [Partner] fields) runs under the upgraded v5 binaries. The v5 readers
-        // build "v5\n...PartnerSalt=..\nPartnerHash=..\nPartnerUnlockedAt=..\n" from
-        // the same decrypted values, so the byte-exact old v4 stamp cannot validate
-        // it - macValid goes False and the block FREEZES (never silent-accept, never
-        // auto-lift). Mirrors ForwardMigration_OldSchemaMacUnderCurrentCode for the
-        // v4->v5 bump; op rule "arm after upgrading, not across an upgrade" carries over.
+        // The C4 instance of the R9 freeze: a block armed under v5 (C3b partner code,
+        // NO [Commit] flag) runs under the upgraded v6 binaries. The v6 readers build
+        // "v6\n...Committed=..\n" from the same stored values, so the byte-exact old v5
+        // stamp cannot validate it - macValid goes False and the block FREEZES (never
+        // silent-accept, never auto-lift). Mirrors ForwardMigration_OldSchemaMacUnder-
+        // CurrentCode for the v5->v6 bump; op rule "arm after upgrading, not across an
+        // upgrade" carries over.
         const string until = "2026-12-31 11:59:59 p.m.";
         const string proc = "chrome.exe;";
         const string sites = "reddit.com;";
         const string now = "2026-06-25 12:00:00 p.m.";
         const string hw = "2026-06-25 11:00:00 a.m.";
         const string co = "2026-06-25 12:30:00 p.m.";
+        const string psalt = "PSALT";
+        const string phash = "PHASH";
 
-        // The OLD (v4) canonical a pre-C3b CLI stamped - built as a literal (version
-        // tag first, WITH CoolOffUntil, NO [Partner] lines) so this test is
+        // The OLD (v5) canonical a pre-C4 CLI stamped - built as a literal (version tag
+        // first, WITH the [Partner] lines, NO Committed line) so this test is
         // independent of the current BuildCanonical.
         var oldCanonical =
-            "v4\n" +
+            "v5\n" +
             "Until=" + until + "\n" +
             "HighWater=" + hw + "\n" +
             "CoolOffUntil=" + co + "\n" +
             "ProcessList=" + proc + "\n" +
             "CustomSites=" + sites + "\n" +
-            "Now=" + now + "\n";
+            "Now=" + now + "\n" +
+            "PartnerSalt=" + psalt + "\n" +
+            "PartnerHash=" + phash + "\n" +
+            "PartnerUnlockedAt=\n";
         var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
 
-        // What the upgraded v5 readers build from the same stored values (absent
-        // [Partner] fields all read as "").
-        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw, co, "", "", "");
-        Assert.Equal("v5", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
+        // What the upgraded v6 readers build from the same stored values (an absent
+        // Committed reads as ""). Same partner values, so ONLY the version tag + the
+        // new Committed line differ - isolating the schema bump as the cause.
+        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw, co, psalt, phash, "", "");
+        Assert.Equal("v6", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
         Assert.NotEqual(oldCanonical, currentCanonical);
 
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
