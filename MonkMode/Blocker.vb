@@ -155,8 +155,11 @@ Module Blocker
             Dim ini As New IniFile
             ini.Load(IniPath())
             ' Invalid MAC (tampered/unstamped/frozen) => active. Also avoids
-            ' decrypting possibly-garbage Until/HighWater (the service's DecryptData
-            ' End()s on bad Base64; the CLI just shouldn't feed it junk).
+            ' decrypting possibly-garbage Until/HighWater: DecryptData returns ""
+            ' on bad Base64 (all four copies now, incl. the service's inline one -
+            ' the old service End()-on-junk availability bypass is fixed), but a
+            ' valid-Base64/invalid-ciphertext value still throws, so the CLI just
+            ' shouldn't feed it junk.
             If Not ConfigMacIsValidForIni(ini) Then Return True
             Dim untilStr As String = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
             Dim hwStr As String = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))

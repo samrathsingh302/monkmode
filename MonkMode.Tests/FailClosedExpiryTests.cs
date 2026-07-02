@@ -10,8 +10,9 @@
 // For a tamper-resistant blocker a bad value must keep the block STANDING.
 //
 // Everything here is in-memory - no files, registry or service. The crypto
-// layer is bypassed on purpose (the helpers take the decrypted plaintext):
-// the service's DecryptData calls End on invalid Base64 (the known P3).
+// layer is bypassed on purpose (the helpers take the decrypted plaintext);
+// all four DecryptData copies now return "" on bad Base64 (the service's inline
+// copy no longer calls End on the process - that availability bypass is fixed).
 
 using System.Globalization;
 
