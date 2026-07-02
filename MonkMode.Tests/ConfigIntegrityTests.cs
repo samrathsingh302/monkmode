@@ -51,8 +51,14 @@ public class ConfigIntegrityTests
         0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0xFF,
     };
 
+    // The schema version every BuildCanonical call passes as its first arg (C1
+    // made the version a caller-supplied parameter). All four copies share it -
+    // AllFourCopies_ShareTheSameSchemaVersion pins that - so passing the CLI copy's
+    // value into the service/guardian/notifier copies below is faithful.
+    private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
+
     private static string Canonical(string until) =>
-        MonkMode.ConfigIntegrity.BuildCanonical(until, "chrome.exe;", "reddit.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 12:00:00 p.m.");
+        MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 12:00:00 p.m.");
 
     [Fact]
     public void RoundTrip_ValidMac_Verifies()
@@ -109,18 +115,18 @@ public class ConfigIntegrityTests
         // CustomSites, Now or HighWater and the original MAC must reject the new
         // canonical. (B4: HighWater is now covered too - forging it past Until
         // must fail verification, which is the whole point of MAC-ing it.)
-        var original = MonkMode.ConfigIntegrity.BuildCanonical("U", "a.exe;", "x.com;", "N", "HW");
+        var original = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW");
         var mac = MonkMode.ConfigIntegrity.ComputeConfigMac(original, Key);
 
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical("U", "b.exe;", "x.com;", "N", "HW"), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "b.exe;", "x.com;", "N", "HW"), mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical("U", "a.exe;", "evil.com;", "N", "HW"), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "evil.com;", "N", "HW"), mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical("U", "a.exe;", "x.com;", "N2", "HW"), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N2", "HW"), mac, Key));
         // B4: a forged HighWater (the clock-forward-by-config attack) must not validate.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical("U", "a.exe;", "x.com;", "N", "9999-01-01"), mac, Key));
+            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "9999-01-01"), mac, Key));
     }
 
     [Fact]
@@ -131,9 +137,9 @@ public class ConfigIntegrityTests
         // the field names would silently break cross-party MAC agreement, so the
         // string is pinned literally and the test fails loudly on any drift.
         var c = MonkMode.ConfigIntegrity.BuildCanonical(
-            "2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.");
+            Ver, "2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.");
         Assert.Equal(
-            "v2\n" +
+            "v3\n" +
             "Until=2026-06-25 5:04:33 p.m.\n" +
             "HighWater=2026-06-25 11:00:00 a.m.\n" +
             "ProcessList=chrome.exe;brave.exe;\n" +
@@ -148,8 +154,8 @@ public class ConfigIntegrityTests
         // "null"/"" are stored verbatim (an apps-only or sites-only block), so
         // they must appear in the canonical unchanged - the input just has to be
         // reproducible across parties, not interpreted.
-        var c = MonkMode.ConfigIntegrity.BuildCanonical("U", "null", "", "N", "HW");
-        Assert.Equal("v2\nUntil=U\nHighWater=HW\nProcessList=null\nCustomSites=\nNow=N\n", c);
+        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "null", "", "N", "HW");
+        Assert.Equal("v3\nUntil=U\nHighWater=HW\nProcessList=null\nCustomSites=\nNow=N\n", c);
     }
 
     [Fact]
@@ -205,10 +211,10 @@ public class ConfigIntegrityTests
     [MemberData(nameof(Untils))]
     public void AllFourCopies_ProduceIdenticalCanonical(string until)
     {
-        var cli = MonkMode.ConfigIntegrity.BuildCanonical(until, "chrome.exe;", "reddit.com;", "N", "HW");
-        var srv = monkmode.ConfigIntegrity.BuildCanonical(until, "chrome.exe;", "reddit.com;", "N", "HW");
-        var guard = mm_guard.ConfigIntegrity.BuildCanonical(until, "chrome.exe;", "reddit.com;", "N", "HW");
-        var notify = mm_notify.ConfigIntegrity.BuildCanonical(until, "chrome.exe;", "reddit.com;", "N", "HW");
+        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW");
+        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW");
+        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW");
+        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW");
         Assert.Equal(cli, srv);
         Assert.Equal(cli, guard);
         Assert.Equal(cli, notify);
@@ -218,7 +224,7 @@ public class ConfigIntegrityTests
     [MemberData(nameof(Untils))]
     public void AllFourCopies_ProduceIdenticalMac(string until)
     {
-        var c = MonkMode.ConfigIntegrity.BuildCanonical(until, "chrome.exe;", "reddit.com;", "N", "HW");
+        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW");
         var cli = MonkMode.ConfigIntegrity.ComputeConfigMac(c, Key);
         var srv = monkmode.ConfigIntegrity.ComputeConfigMac(c, Key);
         var guard = mm_guard.ConfigIntegrity.ComputeConfigMac(c, Key);
@@ -238,6 +244,65 @@ public class ConfigIntegrityTests
         Assert.True(monkmode.ConfigIntegrity.ConfigMacIsValid(c, mac, Key));
         Assert.True(mm_guard.ConfigIntegrity.ConfigMacIsValid(c, mac, Key));
         Assert.True(mm_notify.ConfigIntegrity.ConfigMacIsValid(c, mac, Key));
+    }
+
+    [Fact]
+    public void AllFourCopies_ShareTheSameSchemaVersion()
+    {
+        // C1 made the version a per-copy constant each wrapper passes into
+        // BuildCanonical. If a future bump updated one copy and not the others,
+        // the CLI would stamp under one tag while a reader verified under another
+        // - every MAC check would fail and every block would FREEZE. Pin that the
+        // four byte-identical copies still agree on the value (mirrors the
+        // canonical/MAC 4-copy parity above, for the version constant itself).
+        Assert.Equal(MonkMode.ConfigIntegrity.CurrentSchemaVersion, monkmode.ConfigIntegrity.CurrentSchemaVersion);
+        Assert.Equal(MonkMode.ConfigIntegrity.CurrentSchemaVersion, mm_guard.ConfigIntegrity.CurrentSchemaVersion);
+        Assert.Equal(MonkMode.ConfigIntegrity.CurrentSchemaVersion, mm_notify.ConfigIntegrity.CurrentSchemaVersion);
+    }
+
+    [Fact]
+    public void ForwardMigration_OldSchemaMacUnderCurrentCode_FailsClosed_FreezesBlock()
+    {
+        // R9 forward-migration freeze: a block armed by a PREVIOUS schema (the v2
+        // that shipped before Section C) was stamped over a "v2\n..." canonical.
+        // The upgraded binaries build the CURRENT canonical from the SAME decrypted
+        // values, so the old stamp cannot validate it - macValid goes False, and
+        // because EffectiveBlockHasExpired is (macValid AndAlso expired) the block
+        // stays standing (freezes) instead of silently auto-lifting. The version is
+        // the FIRST MAC-covered line, which is what makes this hold across a bump.
+        // Operational rule this enforces: arm blocks AFTER upgrading, not across one.
+        const string until = "2026-12-31 11:59:59 p.m.";
+        const string proc = "chrome.exe;";
+        const string sites = "reddit.com;";
+        const string now = "2026-06-25 12:00:00 p.m.";
+        const string hw = "2026-06-25 11:00:00 a.m.";
+
+        // The OLD (v2) canonical a pre-upgrade CLI stamped, and its MAC. Built as a
+        // literal so this test is independent of the current BuildCanonical format.
+        var oldCanonical =
+            "v2\n" +
+            "Until=" + until + "\n" +
+            "HighWater=" + hw + "\n" +
+            "ProcessList=" + proc + "\n" +
+            "CustomSites=" + sites + "\n" +
+            "Now=" + now + "\n";
+        var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
+
+        // What the upgraded readers now build from the same values.
+        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw);
+        Assert.StartsWith(Ver + "\n", currentCanonical);   // the version tag really changed
+        Assert.NotEqual(oldCanonical, currentCanonical);
+
+        // The old stamp does NOT validate the current canonical => macValid False.
+        var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
+        Assert.False(macValid);
+
+        // End-to-end: even with a genuinely PAST Until, macValid False keeps the
+        // block standing on both the service and guardian gates (the freeze).
+        var pastUntil = new DateTime(2020, 1, 1, 12, 0, 0).ToString(new CultureInfo("en-CA"));
+        var asOf = new DateTime(2030, 1, 1, 12, 0, 0);
+        Assert.False(monkmode.Service1.EffectiveBlockHasExpired(pastUntil, asOf, 5, macValid));
+        Assert.False(mm_guard.Guardian.EffectiveBlockHasExpired(pastUntil, asOf, 5, macValid));
     }
 }
 

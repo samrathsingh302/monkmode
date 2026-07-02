@@ -39,25 +39,48 @@ Imports System.Text
 
 Friend Module ConfigIntegrity
 
-    ' The canonical string the MAC is computed over: a version tag plus one
-    ' Key=Value line per protected field, vbLf-separated, in a FIXED order.
-    ' Every party (CLI writer, service/guardian/notifier readers) builds this
-    ' from the DECRYPTED plaintext values, so the input is byte-identical
-    ' regardless of the ciphertext or who wrote it. "null"/"" pass through
-    ' as-is - the point is a stable, reproducible input, not interpretation.
-    ' [Integrity] Key and [Integrity] Mac are deliberately NOT part of this.
+    ' The current config schema version - the FIRST line of the canonical below,
+    ' so it is MAC-covered. Bumping it makes every config stamped under an OLDER
+    ' schema fail verification on the new binaries; because the readers fail
+    ' CLOSED on an invalid MAC, a pre-upgrade block then FREEZES rather than being
+    ' silently accepted or auto-lifted (R9 forward-migration freeze). It is a
+    ' COMPILE-TIME constant every party bakes in from its byte-identical copy,
+    ' never read from the ini: a config-DECLARED version would let a doctored old
+    ' config re-declare its own version and re-validate, so the version an evader
+    ' is measured against must be the CODE's, not the file's. Operational rule
+    ' this implies: arm blocks AFTER upgrading the binaries, not ACROSS an upgrade
+    ' (an in-flight block armed by the previous schema correctly freezes until it
+    ' is re-armed). History: v1 (pre-B4) -> v2 (B4: added HighWater) -> v3
+    ' (Section C accountability core). The four copies MUST share this value or
+    ' the parties would stamp/verify different tags and every block would freeze;
+    ' AllFourCopies_ShareTheSameSchemaVersion pins that.
+    Friend Const CurrentSchemaVersion As String = "v3"
+
+    ' The canonical string the MAC is computed over: the schema version tag plus
+    ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
+    ' Every party (CLI writer, service/guardian/notifier readers) builds this from
+    ' the DECRYPTED plaintext values and supplies CurrentSchemaVersion for the tag,
+    ' so the input is byte-identical regardless of the ciphertext or who wrote it.
+    ' "null"/"" pass through as-is - the point is a stable, reproducible input, not
+    ' interpretation. [Integrity] Key and [Integrity] Mac are deliberately NOT part
+    ' of this (you can't MAC the MAC).
     '
-    ' B4 (clock-rollback hardening): the canonical is now "v2" and includes
-    ' HighWater - the monotonic high-water mark (an en-CA LOCAL datetime, same
-    ' format as Until) that the service advances at most one tick at a time and
-    ' never on a clock jump. It MUST be MAC-covered so an attacker who recovered
-    ' the 3DES key can't forge a HighWater past Until to fake an expiry; covering
-    ' it here is what couples the value to the MAC. HighWater sits right after
-    ' Until (the two are paired: Until is the target, HighWater the trusted
-    ' clock measured against it). Bumping the tag v1 -> v2 makes any old-format
-    ' canonical mismatch loudly rather than silently cross-validating.
-    Friend Function BuildCanonical(ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String) As String
-        Return "v2" & vbLf &
+    ' B4 (clock-rollback hardening): the canonical includes HighWater - the
+    ' monotonic high-water mark (an en-CA LOCAL datetime, same format as Until)
+    ' that the service advances at most one tick at a time and never on a clock
+    ' jump. It MUST be MAC-covered so an attacker who recovered the 3DES key can't
+    ' forge a HighWater past Until to fake an expiry; covering it here is what
+    ' couples the value to the MAC. HighWater sits right after Until (the two are
+    ' paired: Until is the target, HighWater the trusted clock measured against it).
+    '
+    ' The version is a caller-supplied PARAMETER (not a hardcoded literal) so it
+    ' rides the same wrapper-supplied contract as every other field: each
+    ' CanonicalFromIni wrapper passes CurrentSchemaVersion exactly as it passes the
+    ' decrypted Until/HighWater/ProcessList/Now - the uniform shape every Section-C
+    ' field will slot into. A bump is then one edit to CurrentSchemaVersion, pinned
+    ' loudly by the 4-copy parity + format tests.
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String) As String
+        Return schemaVersion & vbLf &
                "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
                "ProcessList=" & processList & vbLf &

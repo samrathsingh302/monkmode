@@ -35,6 +35,10 @@ public class CanonicalParityTests
 {
     private const string Passphrase = "mm_textbox";
 
+    // The schema version the wrappers pass into BuildCanonical (C1 made it a
+    // caller-supplied parameter). Shared by the four byte-identical copies.
+    private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
+
     // A representative block, exactly the shape the CLI writes: an encrypted
     // [Time] Until, an encrypted [CurrentTime] Now, an encrypted [Process] List,
     // and a PLAINTEXT [User] CustomSites (the CLI stores CustomSites in the
@@ -150,7 +154,7 @@ public class CanonicalParityTests
         // loudly. (Mirrors BuildCanonical's pinned format test, but through the
         // real reader, end to end.)
         Assert.Equal(
-            "v2\n" +
+            Ver + "\n" +
             "Until=" + UntilPlain + "\n" +
             "HighWater=" + HighWaterPlain + "\n" +
             "ProcessList=" + ProcListPlain + "\n" +
@@ -192,9 +196,9 @@ public class CanonicalParityTests
         var encryptedSites = new MonkMode.Simple3Des(Passphrase).EncryptData("decrypted-sites;");
 
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain);  // CustomSites VERBATIM (correct)
+            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain);  // CustomSites VERBATIM (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain);  // CustomSites DECRYPTED (the bug)
+            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain);  // CustomSites DECRYPTED (the bug)
 
         Assert.NotEqual(correct, buggy);
 
@@ -211,9 +215,9 @@ public class CanonicalParityTests
         // would put the ciphertext into the canonical instead of the plaintext,
         // diverging from every other party. Pin that this breaks MAC agreement.
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList DECRYPTED (correct)
+            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList DECRYPTED (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList CIPHERTEXT (the bug)
+            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain);  // ProcessList CIPHERTEXT (the bug)
 
         Assert.NotEqual(correct, buggy);
         var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
