@@ -1,7 +1,7 @@
 '    MonkMode - guardian entry point (B1 watchdog, layer 2)
 '
 '    mm_guard.exe is the SYSTEM-session guardian half of the mutual
-'    service <-> guardian restart pair (vault\dev\specs\Cold-Turkey-Serious\ARCHITECTURE.md B1, decision (A) locked
+'    service <-> guardian restart pair (vault\dev\monk-mode\specs\ARCHITECTURE.md B1, decision (A) locked
 '    13/06/2026). The service's timer spawns it (gate: Service1.ShouldRestartPeer)
 '    and re-spawns it if it is killed; reciprocally, every tick this loop:
 '

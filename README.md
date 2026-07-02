@@ -31,7 +31,7 @@ Four cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
 |---|---|---|---|
 | `MonkMode/` | `monkmode.exe` | User (elevated) | CLI. Parses commands, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
 | `MonkMode_srv/` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcement core. Locks the hosts file, restores it if tampered with, kills blocked processes, keeps the guardian alive, lifts the block only when the timer genuinely expires. `CanStop=False`. |
-| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, compensates for clock changes, shows a tray toast when the block ends. |
+| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service, shows a tray toast when the block ends. |
 | `MM_guard/` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Watchdog guardian. Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
 A block is hosts-file DNS sinkholing (`127.0.0.1` entries below a
@@ -62,16 +62,28 @@ service on a 10-second loop.
   service runs in Safe Mode — so rebooting into Safe Mode no longer leaves
   enforcement off. It re-asserts those keys every 10 s if they're deleted and
   removes them when the block ends; only its own keys are ever touched.
-- **Clock-change compensation.** The notifier detects system clock changes and
-  rewrites the end time so rolling the clock forward doesn't end the block.
+- **Clock-tamper resistance (monotonic).** Expiry is decided against a
+  MAC-covered high-water mark that only ever advances at the real tick rate
+  (bounded by a monotonic OS timer), never by a wall-clock jump — so rolling the
+  clock forward past the end time cannot lift the block. A backward roll only
+  makes the block run *longer* (fail-closed). The notifier just flags a clock
+  change to the service; it no longer rewrites the end time.
+- **Browser Secure-DNS (DoH) resistance.** While a block is active the service
+  forces the enterprise "DNS-over-HTTPS off" policy for Edge/Chrome/Brave/Firefox
+  and re-asserts it every 10 s, so the #1 casual bypass — flipping on a browser's
+  Secure DNS to tunnel around the hosts file — is closed. The user's prior policy
+  is snapshotted and restored at expiry, with no data loss.
+- **Fail-closed on crash.** An unhandled exception in any long-running enforcement
+  process re-asserts its enforcement (re-locks hosts, restores the block) before
+  the process dies, so a crash can never leave the block open.
 - **Honest threat model.** `ARCHITECTURE.md` (kept in the project vault at
-  `vault/dev/specs/Cold-Turkey-Serious/`) catalogues the full bypass surface
+  `vault/dev/monk-mode/specs/`) catalogues the full bypass surface
   (B1–B11), ranked by effort. While the user keeps admin
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to
-  document the rest honestly rather than claim "unbreakable". Closing the
-  remaining gaps (firewall-layer enforcement, signed config, clock hardening)
-  is the Phase 3 backlog.
+  document the rest honestly rather than claim "unbreakable". The remaining
+  network-layer gap (portable / hard-coded-IP / non-browser DoH, VPN/proxy/Tor)
+  is documented as a residual rather than claimed closed.
 
 ## Engineering notes
 
@@ -87,20 +99,23 @@ point, not a product:
   inherited popup window and the weak user-session watchdog twin (later
   reinstated properly as the SYSTEM-session guardian).
 - **Verified live, not just compiled:** an elevated end-to-end smoke test
-  (block → enforce → tamper-repair → watchdog kill drills → auto-expire →
-  clean teardown), grown from 15 to **47 checks** as each hardening layer
-  landed, passes 47/47 — including force-killing the service, the guardian and
-  the notifier in turn, and disabling SCM recovery to prove the guardian alone
-  restores the service. Its first incarnation exposed three real bugs the
+  (block → enforce → tamper-repair → watchdog kill drills → clock drill →
+  auto-expire → clean teardown), grown as each hardening layer landed, passes
+  **71/0** — including force-killing the service, the guardian and the notifier
+  in turn, disabling SCM recovery to prove the guardian alone restores the
+  service, a forward-clock drill, and the browser-DoH self-heal. Its first
+  incarnation exposed three real bugs the
   compiler couldn't: `0.0.0.0` sinkholes that
   Windows' resolver silently ignores (now `127.0.0.1`), a persistent write
   handle on the hosts file that stopped the DNS client re-reading it (any
   `ipconfig /flushdns` un-blocked everything), and a notifier that exited
   instantly due to a WinForms entry-point subtlety.
-- **Tested where it counts:** an xunit suite covers the dangerous string logic
-  (hosts-file marker stripping and repair, culture-safe datetime round-trips
-  under de-DE/fr-FR/en-US/en-GB locales, crypto round-trips and cross-project
-  ciphertext equivalence). The tests are deliberately written in **C#**: VB's
+- **Tested where it counts:** an xunit suite (**345 tests**) covers the dangerous
+  string logic (hosts-file marker stripping and repair, culture-safe datetime
+  round-trips under de-DE/fr-FR/en-US/en-GB locales, crypto round-trips and
+  cross-project ciphertext equivalence, the config-integrity MAC and its
+  four-project canonical parity, the monotonic clock gates, and the browser-DoH
+  policy decisions). The tests are deliberately written in **C#**: VB's
   case-insensitive namespaces merge the `MonkMode` and `monkmode` namespaces
   and make the duplicated types ambiguous. Pure unit tests — nothing touches
   the real hosts file, registry or SCM, so they run in CI.
