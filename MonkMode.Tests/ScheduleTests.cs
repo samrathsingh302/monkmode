@@ -52,6 +52,7 @@
 // stays inert through (b2) - these tests exercise the machinery with an injected Spec.
 
 using System.Globalization;
+using System.IO;
 
 namespace MonkMode.Tests;
 
@@ -1409,5 +1410,338 @@ public class NotifierScheduleGateParityTests
         Assert.Equal(monkmode.Service1.EffectiveKillList("null", Apps("chrome.exe"), true), scheduleOnly);
         Assert.Contains("chrome.exe", scheduleOnly);
         Assert.NotEqual("null", scheduleOnly);   // the guard must NOT early-return on a schedule-only union
+    }
+}
+
+// ===== C5b sub-slice (c1): the schedule-only hosts snapshot LIFECYCLE =====
+//
+// The gap c1 closes (design C5c §4A, blockers P2#1 + P2#2): a MANUAL block gets a MAC-
+// INDEPENDENT on-disk snapshot (monkmode_hosts.block, written by the CLI at arm), which is
+// what makes its two tamper backstops work - the timer self-heal reads it VERBATIM (so it re-
+// asserts hosts even under macValid=False + a forged [Schedule] ActiveUntil, P2#1) and
+// ReassertHostsFailClosed's File.Exists gate lets a crash re-block (P2#2). A SCHEDULE-ONLY
+// block (no manual `--for`) had NEITHER. c1 makes the SERVICE the snapshot creator/deleter for
+// a schedule-OWNED window, so a schedule-only block rides the same machinery.
+//
+// The pure decision (ClassifyScheduleSnapshot) is fully unit-tested; ProcessScheduleSnapshot is
+// the thin file-I/O wrapper (temp files only - fence: unit tests never touch the real hosts/
+// snapshot), exactly like ProcessAddToHosts / ReassertHostsFailClosed. The OWNERSHIP rule is the
+// one real edge: manualHold (Not EffectiveBlockHasExpired) => Leave, so a manual block's snapshot
+// is never overwritten/deleted, and - because EVERY macValid=False reads as a manual hold - a
+// frozen/tampered config's snapshot is preserved (the delete can never fire under tamper).
+
+public class ClassifyScheduleSnapshotTests
+{
+    // A manual hold OWNS the snapshot: Leave in every combination (this is also the fail-closed
+    // catch-all - macValid=False => EffectiveBlockHasExpired=False => manualHold=True => the
+    // snapshot is preserved for the self-heal + crash backstop, never deleted under tamper).
+    [Theory]
+    [InlineData(true, true, true)]     // window open, sites, snapshot present
+    [InlineData(true, false, true)]    // window open, no sites
+    [InlineData(false, false, true)]   // window closed, snapshot present
+    [InlineData(false, false, false)]  // window closed, no snapshot
+    public void ManualHold_AlwaysLeaves(bool scheduleActive, bool hasSites, bool snapshotExists)
+    {
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.Leave,
+            monkmode.Service1.ClassifyScheduleSnapshot(scheduleActive, manualHold: true, hasSites, snapshotExists));
+    }
+
+    [Fact]
+    public void ScheduleOwnedWindowOpenWithSites_WritesBlock()
+    {
+        // No manual hold + an open window that contributes sites => create/refresh the snapshot,
+        // whether or not one already exists (the write is idempotent on the content).
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.WriteBlock,
+            monkmode.Service1.ClassifyScheduleSnapshot(true, manualHold: false, hasScheduleSites: true, snapshotExists: false));
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.WriteBlock,
+            monkmode.Service1.ClassifyScheduleSnapshot(true, manualHold: false, hasScheduleSites: true, snapshotExists: true));
+    }
+
+    [Fact]
+    public void ScheduleOwnedWindowClosed_SnapshotExists_Deletes()
+    {
+        // Window closed / between windows (no manual hold) with a schedule-owned snapshot on
+        // disk => delete it, so it can't self-heal back in and the crash backstop won't re-block.
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.DeleteBlock,
+            monkmode.Service1.ClassifyScheduleSnapshot(false, manualHold: false, hasScheduleSites: false, snapshotExists: true));
+    }
+
+    [Fact]
+    public void ScheduleOwnedWindowOpen_NoSites_ButSnapshotExists_Deletes()
+    {
+        // An apps-only schedule window (no sites) shouldn't maintain a hosts snapshot; a leftover
+        // schedule-owned one is dropped (nothing to enforce in hosts).
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.DeleteBlock,
+            monkmode.Service1.ClassifyScheduleSnapshot(true, manualHold: false, hasScheduleSites: false, snapshotExists: true));
+    }
+
+    [Fact]
+    public void ScheduleOwnedIdle_NoSnapshot_Leaves()
+    {
+        // Nothing open, no manual hold, nothing on disk => nothing to do (no spurious file).
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.Leave,
+            monkmode.Service1.ClassifyScheduleSnapshot(false, manualHold: false, hasScheduleSites: false, snapshotExists: false));
+        Assert.Equal(monkmode.Service1.ScheduleSnapshotAction.Leave,
+            monkmode.Service1.ClassifyScheduleSnapshot(true, manualHold: false, hasScheduleSites: false, snapshotExists: false));
+    }
+}
+
+public class ProcessScheduleSnapshotTests
+{
+    private const string Marker = "#### MonkMode Entries ####";
+
+    private static string TempPath(string tag) =>
+        Path.Combine(AppContext.BaseDirectory, $"c1snap_{tag}_{Guid.NewGuid():N}.tmp");
+
+    private static System.Collections.Generic.List<string> Sites(params string[] s) =>
+        new System.Collections.Generic.List<string>(s);
+
+    private static void Cleanup(string path)
+    {
+        try { if (File.Exists(path)) { File.SetAttributes(path, FileAttributes.Normal); File.Delete(path); } }
+        catch { /* best-effort test cleanup */ }
+    }
+
+    // Window OPEN, schedule-only (no manual hold, no pre-existing snapshot): the service CREATES
+    // monkmode_hosts.block, and it is byte-identical to EffectiveHostsBlock / a manual block armed
+    // with the same sites (Blocker.BuildMonkModeBlock) - so the self-heal finds it intact and the
+    // expiry strip removes it cleanly.
+    [Fact]
+    public void WindowOpen_ScheduleOnly_CreatesSnapshot_EqualsEffectiveHostsBlock()
+    {
+        var snap = TempPath("open");
+        try
+        {
+            Assert.False(File.Exists(snap));
+            monkmode.Service1.ProcessScheduleSnapshot(snap, scheduleActive: true, manualHold: false, Sites("reddit.com", "x.com"));
+
+            Assert.True(File.Exists(snap));
+            var written = File.ReadAllText(snap);
+            Assert.Equal(monkmode.Service1.EffectiveHostsBlock("", Sites("reddit.com", "x.com"), true), written);
+            Assert.Equal(MonkMode.Blocker.BuildMonkModeBlock(new[] { "reddit.com", "x.com" }), written);
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // While the window stays open the snapshot must NOT churn: a second tick reads the on-disk
+    // block, re-derives the SAME bytes (EffectiveHostsBlock is idempotent) and skips the write.
+    // Proven deterministically by pinning LastWriteTimeUtc to a fixed past time and asserting it
+    // is unchanged after the second call (a real write would bump it).
+    [Fact]
+    public void WindowOpen_SecondTick_IsIdempotent_DoesNotReWrite()
+    {
+        var snap = TempPath("idem");
+        try
+        {
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites("reddit.com"));
+            var first = File.ReadAllText(snap);
+            var pinned = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(snap, pinned);
+
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites("reddit.com"));
+
+            Assert.Equal(first, File.ReadAllText(snap));                 // content stable
+            Assert.Equal(pinned, File.GetLastWriteTimeUtc(snap));        // ...and NOT re-written
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // Window CLOSE (schedule-owned: no manual hold): the snapshot is DELETED, so nothing self-heals
+    // back in and the crash backstop won't re-block an idle schedule. Same for the between-windows
+    // state of a recurring schedule (scheduleActive=False, no manual hold).
+    [Fact]
+    public void WindowClose_ScheduleOwned_DeletesSnapshot()
+    {
+        var snap = TempPath("close");
+        try
+        {
+            File.WriteAllText(snap, MonkMode.Blocker.BuildMonkModeBlock(new[] { "reddit.com" }));
+            Assert.True(File.Exists(snap));
+
+            monkmode.Service1.ProcessScheduleSnapshot(snap, scheduleActive: false, manualHold: false, null);
+
+            Assert.False(File.Exists(snap));
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // A manual HOLD's snapshot is NEVER deleted (the ownership fence) - even with no window open.
+    // This is also the macValid=False fail-closed path (a frozen config reads as a manual hold).
+    [Fact]
+    public void ManualHold_NoWindow_NeverDeletesSnapshot()
+    {
+        var snap = TempPath("manualkeep");
+        try
+        {
+            var manual = MonkMode.Blocker.BuildMonkModeBlock(new[] { "reddit.com" });
+            File.WriteAllText(snap, manual);
+
+            monkmode.Service1.ProcessScheduleSnapshot(snap, scheduleActive: false, manualHold: true, null);
+
+            Assert.True(File.Exists(snap));
+            Assert.Equal(manual, File.ReadAllText(snap));   // left byte-for-byte
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // A manual HOLD's snapshot is NEVER overwritten with the schedule union either (the overlap
+    // case SD-c1 forbids from the CLI; the b3-ii LIVE-hosts union still over-blocks, but the
+    // snapshot FILE stays the manual-only block, so there is nothing to "restore" at close).
+    [Fact]
+    public void ManualHold_WindowOpen_DoesNotOverwriteManualSnapshotWithUnion()
+    {
+        var snap = TempPath("overlapkeep");
+        try
+        {
+            var manual = MonkMode.Blocker.BuildMonkModeBlock(new[] { "reddit.com" });
+            File.WriteAllText(snap, manual);
+
+            monkmode.Service1.ProcessScheduleSnapshot(snap, scheduleActive: true, manualHold: true, Sites("x.com"));
+
+            Assert.Equal(manual, File.ReadAllText(snap));   // union NOT persisted to the manual snapshot
+            Assert.DoesNotContain("x.com", File.ReadAllText(snap));
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // A schedule window with NO sites (apps-only) and no pre-existing snapshot creates nothing.
+    [Fact]
+    public void WindowOpen_NoScheduleSites_DoesNotCreateSnapshot()
+    {
+        var snap = TempPath("nosites");
+        try
+        {
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites());
+            Assert.False(File.Exists(snap));
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, null);
+            Assert.False(File.Exists(snap));
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // Sites that all normalise away must not create an empty/marker-less snapshot (the
+    // IsNullOrWhiteSpace guard): EffectiveHostsBlock returns "" for an empty existing snapshot.
+    [Fact]
+    public void WindowOpen_SitesAllNormaliseAway_NoSnapshotCreated()
+    {
+        var snap = TempPath("normaway");
+        try
+        {
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites("", "   "));
+            Assert.False(File.Exists(snap));
+        }
+        finally { Cleanup(snap); }
+    }
+
+    // Best-effort: a DeleteBlock decision with nothing on disk is a silent no-op, never a throw
+    // and never a fabricated file.
+    [Fact]
+    public void NoSnapshot_NothingToDelete_NoThrow_NoFile()
+    {
+        var snap = TempPath("noop");
+        try
+        {
+            var ex = Record.Exception(() => monkmode.Service1.ProcessScheduleSnapshot(snap, false, false, null));
+            Assert.Null(ex);
+            Assert.False(File.Exists(snap));
+        }
+        finally { Cleanup(snap); }
+    }
+}
+
+// The two P2 backstops, proven end-to-end against the snapshot c1 now creates. These compose
+// ProcessScheduleSnapshot with the EXACT pure paths the live tick / crash handler run, so the
+// created snapshot demonstrably re-asserts a schedule-only block under tamper and after a crash.
+public class ScheduleSnapshotTamperFreezeTests
+{
+    private const string Marker = "#### MonkMode Entries ####";
+
+    private static string TempPath(string tag) =>
+        Path.Combine(AppContext.BaseDirectory, $"c1freeze_{tag}_{Guid.NewGuid():N}.tmp");
+
+    private static System.Collections.Generic.List<string> Sites(params string[] s) =>
+        new System.Collections.Generic.List<string>(s);
+
+    private static bool IsReadOnly(string path) => File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly);
+
+    private static void Cleanup(string path)
+    {
+        try { if (File.Exists(path)) { File.SetAttributes(path, FileAttributes.Normal); File.Delete(path); } }
+        catch { /* best-effort test cleanup */ }
+    }
+
+    // P2#1: mid-window the config MAC is invalidated and [Schedule] ActiveUntil forged past/blank,
+    // so scheduleActiveNow reads FALSE. Because the block is still HELD (BlockHeld True under
+    // macValid=False), the self-heal runs and computes its repair target as
+    // EffectiveHostsBlock(onDiskSnapshot, null, scheduleActive:FALSE) = the snapshot VERBATIM.
+    // Since c1 wrote that snapshot on window-open, the schedule sites are re-asserted into a
+    // blanked hosts EXACTLY as a manual block's would be. (Before c1: no snapshot => "" => no
+    // re-assert - the P2#1 hole.)
+    [Fact]
+    public void P2_1_ForgedActiveUntilMidWindow_SelfHealReassertsScheduleSitesFromSnapshot()
+    {
+        var snap = TempPath("p1snap");
+        var hosts = TempPath("p1hosts");
+        try
+        {
+            // Window open: c1 creates the schedule-only snapshot.
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites("reddit.com"));
+            var snapshotBlock = File.ReadAllText(snap);
+
+            // The tamper: scheduleActiveNow=False (forged ActiveUntil). The self-heal's target is
+            // the snapshot verbatim (the inert EffectiveHostsBlock path).
+            var expectedBlock = monkmode.Service1.EffectiveHostsBlock(snapshotBlock, null, scheduleActive: false);
+            Assert.Equal(snapshotBlock, expectedBlock);
+
+            // Attacker blanked hosts; the self-heal repairs it back to the schedule block.
+            var repaired = monkmode.Service1.RepairHostsBlock("", expectedBlock);
+            Assert.NotNull(repaired);
+            Assert.Contains("127.0.0.1 reddit.com", repaired);
+            Assert.Contains("127.0.0.1 www.reddit.com", repaired);
+        }
+        finally { Cleanup(snap); Cleanup(hosts); }
+    }
+
+    // P2#2: a crash mid-window. Because c1 left the snapshot on disk, ReassertHostsFailClosed's
+    // File.Exists gate is satisfied and it rebuilds the schedule block into a blanked hosts +
+    // re-locks it read-only. (Before c1: no snapshot => the crash re-asserts nothing.)
+    [Fact]
+    public void P2_2_CrashBackstop_FindsTheCreatedSnapshot_AndReasserts()
+    {
+        var snap = TempPath("p2snap");
+        var hosts = TempPath("p2hosts");
+        try
+        {
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites("reddit.com"));
+            var snapshotBlock = File.ReadAllText(snap);
+            File.WriteAllText(hosts, "");   // a crash blanked hosts mid-window
+
+            monkmode.Service1.ReassertHostsFailClosed(hosts, snap);
+
+            Assert.Equal(snapshotBlock, File.ReadAllText(hosts));   // schedule block re-asserted
+            Assert.True(IsReadOnly(hosts));                          // ...and left fail-closed
+        }
+        finally { Cleanup(snap); Cleanup(hosts); }
+    }
+
+    // No data loss: the snapshot c1 creates is a clean marker block that RepairHostsBlock adds to
+    // the user's own hosts and StripMonkModeBlock removes WHOLE at the effective end, handing back
+    // the user content byte-for-byte (only the "#### MonkMode Entries ####" block is ever touched).
+    [Fact]
+    public void CreatedSnapshot_StripsCleanly_UserContentPreserved()
+    {
+        var snap = TempPath("noloss");
+        try
+        {
+            monkmode.Service1.ProcessScheduleSnapshot(snap, true, false, Sites("reddit.com"));
+            var block = File.ReadAllText(snap);
+            Assert.StartsWith(Marker, block);
+
+            var user = "# my hosts\r\n127.0.0.1 my-dev-box";
+            var written = monkmode.Service1.RepairHostsBlock(user, block);
+            Assert.Equal(user + "\r\n" + block, written);
+            Assert.Equal(user, monkmode.Service1.StripMonkModeBlock(written!));
+        }
+        finally { Cleanup(snap); }
     }
 }

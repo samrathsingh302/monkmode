@@ -885,6 +885,32 @@ Public Class Service1
         Catch ex As Exception
         End Try
 
+        ' C5b (c1): the schedule-only hosts snapshot LIFECYCLE (design §4A). Give a schedule-
+        ' only block the SAME MAC-independent on-disk monkmode_hosts.block a manual block gets
+        ' from the CLI, so (P2#1) the self-heal below re-asserts the schedule sites FROM the
+        ' snapshot under macValid=False+forged ActiveUntil (its EffectiveHostsBlock inert path
+        ' returns the snapshot VERBATIM), and (P2#2) ReassertHostsFailClosed's File.Exists gate
+        ' lets a crash re-block. The service creates the snapshot on window-OPEN + deletes it on
+        ' CLOSE for a schedule-OWNED block; a manual hold's snapshot is NEVER touched
+        ' (manualHold => Leave), which is also the fail-closed catch-all (every macValid=False
+        ' reads as a manual hold => the snapshot is preserved, never deleted, under tamper).
+        ' Gated on a schedule being in play (a Spec, or an open/stored window) so a NO-schedule
+        ' block is byte-identical (the CLI/stopMe stay the sole snapshot actors). manualHold uses
+        ' newHwAsOf (the trusted high-water mark), so a clock-forward can't flip it. Placed BEFORE
+        ' the self-heal so the snapshot is persisted first each tick - the self-heal synthesises
+        ' the same target this tick either way, but persisting first is what arms the MAC-
+        ' independent fallback the self-heal reads on a LATER tamper tick + the crash backstop.
+        ' Best-effort.
+        Try
+            If iniScheduleSpec <> "" OrElse iniScheduleActiveUntil <> "" Then
+                Dim manualHold As Boolean = Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid)
+                ProcessScheduleSnapshot(Application.StartupPath + "\monkmode_hosts.block",
+                                        scheduleActiveNow, manualHold,
+                                        If(scheduleActiveNow, activeSchedule.Sites, Nothing))
+            End If
+        Catch ex As Exception
+        End Try
+
         ' B2 self-heal: between ticks an admin can clear the attribute and
         ' edit/blank/delete hosts; while the block is HELD (BlockHeld: the manual
         ' block hasn't effectively expired - unparseable Until OR an invalid B7 MAC
@@ -1682,6 +1708,99 @@ Public Class Service1
         Next
         Return sb.ToString()
     End Function
+
+    ' ---- C5b (c1): the schedule-only hosts snapshot LIFECYCLE (design C5c §4A) ----
+    '
+    ' The gap this closes: a MANUAL block gets a MAC-INDEPENDENT on-disk snapshot
+    ' (monkmode_hosts.block, written by the CLI at arm - Blocker.vb WriteHostsBlock),
+    ' which is what makes its two tamper backstops work: the timer self-heal reads that
+    ' snapshot VERBATIM (Service1 timer_Elapsed / EffectiveHostsBlock's inert path) so it
+    ' re-asserts hosts even when the config MAC is invalid or [Schedule] ActiveUntil is
+    ' forged, and ReassertHostsFailClosed's File.Exists(snapshot) gate lets the crash
+    ' backstop re-block. A SCHEDULE-ONLY block (no manual `--for` -> the CLI writes no
+    ' snapshot) has NEITHER, so under macValid=False+forged ActiveUntil the self-heal
+    ' synthesises "" (P2#1) and a crash re-asserts nothing (P2#2). c1 makes the SERVICE
+    ' the snapshot creator/deleter for a schedule-OWNED window, so a schedule-only block
+    ' rides the exact same MAC-independent-disk machinery a manual block does.
+    '
+    ' The one real edge is OWNERSHIP: the service must only ever create/delete a snapshot
+    ' the SCHEDULE owns, never touch a MANUAL block's snapshot. The discriminator is a
+    ' manual HOLD (design §4A / §9.2): manualHold = Not EffectiveBlockHasExpired(Until,...),
+    ' so (a) a manual block still holding (Until future, OR macValid=False = frozen, OR an
+    ' unparseable Until) => Leave (never overwrite/delete its snapshot); (b) a schedule-only
+    ' block carries the c2 past-`Until` sentinel => EffectiveBlockHasExpired=True => no manual
+    ' hold => the schedule owns it. This is fail-closed: EVERY macValid=False case reads as a
+    ' manual hold, so a frozen/tampered config keeps its snapshot for the self-heal + crash
+    ' backstop and the delete can never fire under tamper. (SD-c1 keeps manual and schedule
+    ' mutually exclusive at the CLI in C5b, so the overlap "restore-manual-only" case never
+    ' arises from the CLI; Leave keeps the manual snapshot intact if one ever did - the b3-ii
+    ' live-hosts union still over-blocks the window, unchanged.)
+    Friend Enum ScheduleSnapshotAction
+        WriteBlock   ' schedule-owned window open: ensure the snapshot = the synthesised block
+        DeleteBlock  ' schedule-owned, window closed / between windows: drop the snapshot
+        Leave        ' manual-owned (or nothing to do): never touch the snapshot
+    End Enum
+
+    ' The pure snapshot-lifecycle decision (design §4A). scheduleActive = is a window open
+    ' this tick; manualHold = is a manual block holding (owns the snapshot); hasScheduleSites =
+    ' the open schedule contributes >=1 site to synthesise; snapshotExists = the file is on
+    ' disk. Fail-closed: manualHold (which is True for every macValid=False case) always
+    ' Leaves, so a frozen/tampered config's snapshot is never deleted. Pure + Shared (the full
+    ' matrix is unit-tested; ProcessScheduleSnapshot is the thin file-I/O wrapper around it,
+    ' exactly as ClassifyScheduleSnapshot relates to ProcessScheduleSnapshot mirrors
+    ' ClassifyCoolOffSignal/ProcessCoolOffSignals).
+    Friend Shared Function ClassifyScheduleSnapshot(ByVal scheduleActive As Boolean, ByVal manualHold As Boolean, ByVal hasScheduleSites As Boolean, ByVal snapshotExists As Boolean) As ScheduleSnapshotAction
+        ' A manual hold OWNS the snapshot (the CLI wrote it): never overwrite it with the
+        ' schedule union, never delete it. Also the fail-closed catch-all (macValid=False =>
+        ' EffectiveBlockHasExpired=False => manualHold=True), so a frozen/tampered config keeps
+        ' its snapshot for the self-heal + crash backstop.
+        If manualHold Then Return ScheduleSnapshotAction.Leave
+        ' No manual hold => the schedule owns the snapshot domain.
+        If scheduleActive AndAlso hasScheduleSites Then Return ScheduleSnapshotAction.WriteBlock
+        ' Window closed / between windows / Spec cleared: drop the schedule-owned snapshot so it
+        ' can't self-heal back in and the crash backstop won't re-block an idle schedule.
+        If snapshotExists Then Return ScheduleSnapshotAction.DeleteBlock
+        Return ScheduleSnapshotAction.Leave
+    End Function
+
+    ' The testable file-I/O core of the schedule snapshot lifecycle (design §4A). Given the
+    ' snapshot path + this tick's settled state, create/refresh the snapshot to the schedule's
+    ' synthesised block while a schedule-owned window is open (so P2#1's self-heal + P2#2's
+    ' crash backstop both have a MAC-independent on-disk block), delete it when the schedule-
+    ' owned window closes, and never touch a manual-owned snapshot. Idempotent: the WRITE only
+    ' fires when the on-disk bytes actually differ (absent file or drift), so an open window
+    ' does not churn the snapshot every tick - and the block it writes (EffectiveHostsBlock)
+    ' equals what the self-heal synthesises, so once written it is found intact. Best-effort;
+    ' NEVER throws (a snapshot-I/O hiccup must never disturb the enforcement tick). Friend
+    ' Shared with an explicit snapshotPath so unit tests drive it against temp files, exactly
+    ' like ProcessAddToHosts / ReassertHostsFailClosed (fence: unit tests never touch the real
+    ' hosts/snapshot). The live tick passes Application.StartupPath\monkmode_hosts.block - the
+    ' SAME path the CLI writes, the self-heal reads, and stopMe deletes.
+    Friend Shared Sub ProcessScheduleSnapshot(ByVal snapshotPath As String, ByVal scheduleActive As Boolean, ByVal manualHold As Boolean, ByVal scheduleSites As List(Of String))
+        Try
+            Dim snapshotExists As Boolean = System.IO.File.Exists(snapshotPath)
+            Dim hasScheduleSites As Boolean = scheduleActive AndAlso scheduleSites IsNot Nothing AndAlso scheduleSites.Count > 0
+            Select Case ClassifyScheduleSnapshot(scheduleActive, manualHold, hasScheduleSites, snapshotExists)
+                Case ScheduleSnapshotAction.WriteBlock
+                    ' Union with any existing snapshot (idempotent once the schedule entries are
+                    ' present; "" for a genuine schedule-only block => the synthesised block IS
+                    ' the file, byte-identical to a manual arm's BuildMonkModeBlock for the same
+                    ' sites). Only write on a real change, so an open window doesn't re-write the
+                    ' file every 10s tick. block can be "" only if every site normalises away
+                    ' (EffectiveHostsBlock then returns existing) - guarded so we never create an
+                    ' empty/marker-less snapshot.
+                    Dim existing As String = If(snapshotExists, System.IO.File.ReadAllText(snapshotPath), "")
+                    Dim block As String = EffectiveHostsBlock(existing, scheduleSites, True)
+                    If Not String.IsNullOrWhiteSpace(block) AndAlso block <> existing Then
+                        System.IO.File.WriteAllText(snapshotPath, block)
+                    End If
+                Case ScheduleSnapshotAction.DeleteBlock
+                    If snapshotExists Then System.IO.File.Delete(snapshotPath)
+                    ' ScheduleSnapshotAction.Leave => no-op (a manual-owned snapshot, or nothing on disk).
+            End Select
+        Catch ex As Exception
+        End Try
+    End Sub
 
     ' ---- the wall-clock window evaluator (pure; the schedule's WHEN half) ----
     '
