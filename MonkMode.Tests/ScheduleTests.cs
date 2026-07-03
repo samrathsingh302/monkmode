@@ -974,3 +974,112 @@ public class ScheduleTickDecisionEndToEndTests
         Assert.True(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, "", hw, 5, macValid: true));
     }
 }
+
+// ===== C5b sub-slice (b3-i): the enforce-while widening + the app-kill union =====
+//
+// (b3-i) wires the schedule hold into ENFORCEMENT (design §6.3), the non-hosts portion of
+// the meaty half: at the 5 self-heal I/O gates (hosts self-heal, guardian-spawn, SafeBoot
+// re-assert, DoH-off, deny-DELETE ACE) the bare `Not EffectiveBlockHasExpired` becomes the
+// shared `BlockHeld` (so an open window keeps all 5 enforcing past manual expiry, SD1); and
+// the per-tick app-kill loop iterates the UNION of the manual [Process] List and (only while
+// a window is open) the schedule's apps (SD2). Both are GATED on ScheduleActive, so a
+// no-schedule block (ActiveUntil="" - every block until the CLI writes a Spec in slice (c))
+// is BYTE-IDENTICAL to today. The hosts self-heal UNION TARGET (snapshot union synthesised
+// schedule site entries - the service's first stateful hosts writes for a block it armed
+// itself) is the isolated sub-slice (b3-ii), which gets its own focused verifier + CV smoke.
+//
+// The 5-site BlockHeld swap does live registry/SCM/hosts I/O (not unit-testable here); its
+// SAFETY is the pure invariant below - BlockHeld with an empty ActiveUntil is EXACTLY
+// `Not EffectiveBlockHasExpired`, so the swap changes nothing for a no-schedule block - plus
+// the (b3-ii)/CV smoke. EffectiveKillList (the app-kill union) is fully pure + tested here.
+
+// The (b3-i) enforce-while swap is safe because BlockHeld with no open window degenerates to
+// the exact gate it replaced. Pin that equivalence so a future refactor can't drift it.
+public class BlockHeldNoScheduleEquivalenceTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static readonly DateTime AsOf = new(2026, 6, 25, 12, 0, 0);
+    private static string Hw => AsOf.ToString(EnCa);
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EmptyActiveUntil_BlockHeld_ExactlyMatches_NotEffectiveBlockHasExpired(bool macValid)
+    {
+        // At every self-heal site, replacing `Not EffectiveBlockHasExpired(...)` with
+        // `BlockHeld(..., "", newHw)` must be a BYTE-IDENTICAL no-op for a block with no open
+        // scheduled window (ActiveUntil="" - every block today until slice (c) writes a Spec).
+        // Only an OPEN window adds enforcement (BlockHeldTests covers that divergence).
+        foreach (var until in new[]
+        {
+            AsOf.AddHours(-1).ToString(EnCa),   // expired
+            AsOf.AddHours(5).ToString(EnCa),    // active
+            AsOf.ToString(EnCa),                // exactly at asOf
+            "garbage",                          // unparseable -> fail-closed held
+            "",                                 // blank -> fail-closed held
+        })
+        {
+            Assert.Equal(
+                !monkmode.Service1.EffectiveBlockHasExpired(until, AsOf, 5, macValid),
+                monkmode.Service1.BlockHeld(until, AsOf, 5, macValid, "", Hw));
+        }
+    }
+}
+
+// EffectiveKillList: the pure app-kill UNION (design §6.3). Manual [Process] List, plus - ONLY
+// while a scheduled window is open - the schedule's apps; returned as the same delimited,
+// .Contains-searchable string the kill loop uses, byte-identical to the manual list otherwise.
+public class EffectiveKillListTests
+{
+    private static System.Collections.Generic.List<string> Apps(params string[] a) =>
+        new System.Collections.Generic.List<string>(a);
+
+    [Fact]
+    public void NotScheduleActive_ReturnsManualListVerbatim_ByteIdentical_EvenWithApps()
+    {
+        // With no open window the kill set is EXACTLY the manual list - even if schedule apps
+        // are (defensively) passed, they are ignored. This is the no-schedule byte-identity.
+        Assert.Equal("chrome.exe,firefox.exe",
+            monkmode.Service1.EffectiveKillList("chrome.exe,firefox.exe", Apps("brave.exe"), scheduleActive: false));
+    }
+
+    [Fact]
+    public void ScheduleActive_NoScheduleApps_ReturnsManualListVerbatim()
+    {
+        // A window is open but the Spec lists no apps: still byte-identical (null and empty
+        // are both no-ops), so an apps-less schedule never disturbs the manual kill set.
+        Assert.Equal("chrome.exe", monkmode.Service1.EffectiveKillList("chrome.exe", null, scheduleActive: true));
+        Assert.Equal("chrome.exe", monkmode.Service1.EffectiveKillList("chrome.exe", Apps(), scheduleActive: true));
+    }
+
+    [Fact]
+    public void ScheduleActive_UnionsManualAndScheduleApps_AllMatchedUnderContains()
+    {
+        // While a window is open the kill set is the UNION; every manual AND schedule app must
+        // be matched by the loop's `.Contains(name + ".exe")` test.
+        var kl = monkmode.Service1.EffectiveKillList("chrome.exe", Apps("brave.exe", "discord.exe"), scheduleActive: true);
+        Assert.Contains("chrome.exe", kl);    // manual app still matched
+        Assert.Contains("brave.exe", kl);     // schedule apps added
+        Assert.Contains("discord.exe", kl);
+    }
+
+    [Fact]
+    public void ScheduleOnlyBlock_NullManualSentinel_ScheduleAppsAreTheKillSet()
+    {
+        // A schedule-only block has no manual [Process] List (the "null" sentinel); while its
+        // window is open the schedule's apps ARE the kill set.
+        var kl = monkmode.Service1.EffectiveKillList("null", Apps("chrome.exe"), scheduleActive: true);
+        Assert.Contains("chrome.exe", kl);
+    }
+
+    [Fact]
+    public void UnionIsManualThenScheduleApps_PipeJoined()
+    {
+        // Exact serialisation: the manual list, then each schedule app, "|"-joined (distinct,
+        // non-substring names so the assertion is purely about the join format). The "|" matches
+        // the Spec's own app separator and can't appear in an exe name, so appending never fuses
+        // two names into one token (the loop's pre-existing substring .Contains is unchanged).
+        Assert.Equal("chrome.exe|discord.exe",
+            monkmode.Service1.EffectiveKillList("chrome.exe", Apps("discord.exe"), scheduleActive: true));
+    }
+}

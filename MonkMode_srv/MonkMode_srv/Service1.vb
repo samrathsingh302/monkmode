@@ -873,16 +873,23 @@ Public Class Service1
         End Try
 
         ' B2 self-heal: between ticks an admin can clear the attribute and
-        ' edit/blank/delete hosts; while the block is still active (note
-        ' EffectiveBlockHasExpired fails CLOSED: unparseable Until OR an invalid
-        ' B7 MAC = active) restore our entries from the snapshot the CLI
-        ' persisted next to the exe.
+        ' edit/blank/delete hosts; while the block is HELD (BlockHeld: the manual
+        ' block hasn't effectively expired - unparseable Until OR an invalid B7 MAC
+        ' fail CLOSED to held - OR a scheduled window is open, SD1) restore our
+        ' entries from the snapshot the CLI persisted next to the exe.
         ' B4: asOf is newHwAsOf (the trusted high-water mark), NOT DateTime.Now,
         ' so a clock-forward can't flip this to "expired" and stop the repair.
-        ' Try/Catch so a transient lock can never crash the service.
+        ' C5b (b3-i): the ENFORCE-WHILE gate now folds in the schedule hold via BlockHeld,
+        ' so an open window keeps the manual block's snapshot sites repaired past manual
+        ' expiry (the union held until the longest end, SD2). The union TARGET - adding the
+        ' schedule's OWN site entries (snapshot union scheduleSiteEntries, incl. a
+        ' schedule-only block that has no snapshot) - is sub-slice (b3-ii): this slice only
+        ' widens WHEN the repair fires, not WHAT it repairs, so a no-schedule block
+        ' (iniScheduleActiveUntil="") is byte-identical (BlockHeld reduces to
+        ' Not EffectiveBlockHasExpired). Try/Catch so a transient lock never crashes the service.
         Try
             Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
+            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
                 Dim hostsText As String = ""
                 If My.Computer.FileSystem.FileExists(hostDirS) Then
                     hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
@@ -918,9 +925,12 @@ Public Class Service1
             Dim guardianExe As String = Application.StartupPath + "\mm_guard.exe"
             ' B4: blockActive uses newHwAsOf (trusted high-water mark), not
             ' DateTime.Now, so a clock-forward can't read as "expired" and let
-            ' the guardian be dropped early.
+            ' the guardian be dropped early. C5b (b3-i): via BlockHeld an open scheduled
+            ' window (ScheduleActive) also keeps the guardian peer up (SD1), so a
+            ' schedule-only block is watched too; a no-schedule block (ActiveUntil="")
+            ' is byte-identical (BlockHeld reduces to Not EffectiveBlockHasExpired).
             If ShouldRestartPeer(System.Diagnostics.Process.GetProcessesByName("mm_guard").Length,
-                                 Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid),
+                                 BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw),
                                  My.Computer.FileSystem.FileExists(guardianExe)) Then
                 System.Diagnostics.Process.Start(guardianExe)
             End If
@@ -928,53 +938,77 @@ Public Class Service1
         End Try
 
         ' B3 SafeBoot self-heal: re-assert the Safe Mode registration every tick
-        ' while the block is active (an admin can delete the keys between ticks).
-        ' Fail CLOSED via Not EffectiveBlockHasExpired - an unparseable Until OR
-        ' an invalid B7 MAC keeps the keys asserted; stopMe() removes them at a
-        ' genuine expiry. B4: asOf is newHwAsOf (trusted high-water mark), not
-        ' DateTime.Now, so a clock-forward can't drop the keys early.
+        ' while the block is HELD (an admin can delete the keys between ticks).
+        ' Fail CLOSED via BlockHeld - an unparseable Until OR an invalid B7 MAC keeps
+        ' the keys asserted; C5b (b3-i): an open scheduled window (ScheduleActive) also
+        ' holds them (SD1), so a schedule-only block keeps Safe Mode registered while
+        ' its window is open. stopMe() removes them at a genuine expiry. B4: asOf is
+        ' newHwAsOf (trusted high-water mark), not DateTime.Now, so a clock-forward
+        ' can't drop the keys early. No-schedule block (ActiveUntil="") is byte-identical.
         Try
-            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
+            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
                 AssertSafeBootRegistration()
             End If
         Catch ex As Exception
         End Try
 
         ' B5a DoH-off self-heal: re-assert the browser Secure-DNS policy every tick
-        ' while the block is active (an admin can flip a browser's DoH back on or
+        ' while the block is HELD (an admin can flip a browser's DoH back on or
         ' delete our policy value between ticks). Same VERBATIM fail-closed gate as
-        ' the B3 SafeBoot re-assert above - an unparseable Until OR an invalid B7 MAC
-        ' keeps the policy asserted; stopMe() restores the user's prior at a genuine
-        ' expiry. B4: asOf is newHwAsOf (trusted high-water mark), not DateTime.Now,
-        ' so a clock-forward can't drop the policy early. Own Try so a registry hiccup
-        ' here never disturbs the SafeBoot re-assert or crashes the tick.
+        ' the B3 SafeBoot re-assert above - BlockHeld: an unparseable Until OR an
+        ' invalid B7 MAC keeps the policy asserted, and C5b (b3-i) an open scheduled
+        ' window (ScheduleActive) also holds it (SD1). stopMe() restores the user's
+        ' prior at a genuine expiry. B4: asOf is newHwAsOf (trusted high-water mark),
+        ' not DateTime.Now, so a clock-forward can't drop the policy early. Own Try so a
+        ' registry hiccup here never disturbs the SafeBoot re-assert or crashes the tick.
         Try
-            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
+            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
                 AssertDohPolicy()
             End If
         Catch ex As Exception
         End Try
 
         ' B6 deny-DELETE self-heal: re-assert the service-object deny-DELETE ACE
-        ' every tick while the block is active (an admin with WRITE_DAC can clear
+        ' every tick while the block is HELD (an admin with WRITE_DAC can clear
         ' it between ticks, as a casual `sc sdset`/Process-Explorer re-ACL). Fail
-        ' CLOSED via Not EffectiveBlockHasExpired - an unparseable Until OR an
-        ' invalid B7 MAC keeps the deny on; stopMe() removes it at genuine expiry.
-        ' B4: asOf is newHwAsOf (trusted high-water mark), not DateTime.Now, so a
-        ' clock-forward can't drop the deny early. Read-only probe inside makes an
-        ' intact DACL a no-op (no churn). Best-effort - never crash the tick.
+        ' CLOSED via BlockHeld - an unparseable Until OR an invalid B7 MAC keeps the
+        ' deny on, and C5b (b3-i) an open scheduled window (ScheduleActive) also holds it
+        ' (SD1); stopMe() removes it at genuine expiry. B4: asOf is newHwAsOf (trusted
+        ' high-water mark), not DateTime.Now, so a clock-forward can't drop the deny
+        ' early. Read-only probe inside makes an intact DACL a no-op (no churn).
+        ' Best-effort - never crash the tick. No-schedule block byte-identical.
         Try
-            If Not EffectiveBlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid) Then
+            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
                 AssertDenyDeleteAce()
             End If
         Catch ex As Exception
         End Try
 
+        ' C5b (b3-i): the effective app-kill set is the manual [Process] List, PLUS - only
+        ' while a scheduled window is OPEN (ScheduleActive over the MAC-covered [Schedule]
+        ' ActiveUntil) - the schedule's own apps (design §6.3 app-kill union, SD2). Gated on
+        ' ScheduleActive so a no-schedule block (iniScheduleActiveUntil="" - every block today
+        ' until the CLI writes a Spec in slice (c)) is BYTE-IDENTICAL: EffectiveKillList returns
+        ' iniProcessList verbatim, so the loop below kills exactly what it does today. The Spec
+        ' is parsed only while active (the inert path does no extra work). Computed once per tick.
+        ' NOT gated on macValid (unlike BlockHeld's `macValid AndAlso ScheduleActive` arm): this
+        ' loop has no `Not EffectiveBlockHasExpired` base gate, so gating the schedule arm on
+        ' macValid would DROP schedule-app kills under a tampered/frozen config (fail-OPEN).
+        ' Ungated, a frozen config keeps killing the schedule's apps, and a forged ActiveUntil can
+        ' only ever ADD kills, never lift (fail-closed - the tool ethos). SCOPE: this is only the
+        ' SERVICE session-0 kill loop; the notifier's user-session loop (MM_notify\Form1.vb
+        ' appKillTimer_Tick, SessionId<>0) still keys off iniProcessList alone, so blocking a
+        ' schedule's USER-session apps (browsers/games) needs the same union THERE - a follow-up
+        ' slice (b3-iii, see handoff), exactly as the manual block's app-kill is split today.
+        Dim scheduleActiveNow As Boolean = ScheduleActive(iniScheduleActiveUntil, newHw)
+        Dim killList As String = EffectiveKillList(iniProcessList,
+                                                   If(scheduleActiveNow, ParseSchedule(iniScheduleSpec).Apps, Nothing),
+                                                   scheduleActiveNow)
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
             If Proc.SessionId = 0 Then
                 Try
-                    If iniProcessList.Contains(Proc.ProcessName + ".exe") Then
+                    If killList.Contains(Proc.ProcessName + ".exe") Then
                         Proc.Kill()
                     End If
                 Catch ex As Exception
@@ -1522,6 +1556,26 @@ Public Class Service1
     ' changes no enforcement behaviour. Pure + Shared.
     Friend Shared Function BlockHeld(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
         Return (Not EffectiveBlockHasExpired(untilText, asOf, graceSeconds, macValid)) OrElse (macValid AndAlso ScheduleActive(scheduleActiveUntilText, highWaterText))
+    End Function
+
+    ' The effective app-kill set for this tick (design §6.3, the app-kill UNION / SD2). It is
+    ' the manual [Process] List, plus - ONLY while a scheduled window is open (scheduleActive) -
+    ' the schedule's own apps. Returned as the SAME delimited, .Contains-searchable string the
+    ' per-tick kill loop already uses, so a no-schedule tick (scheduleActive=False - every block
+    ' today until the CLI writes a Spec in slice (c)) OR a schedule with no apps is BYTE-IDENTICAL
+    ' to manualProcessList: the union ADDS enforcement only while a window holds, never removes
+    ' any. The "|" separator matches the Spec's own app separator and can't appear in an exe
+    ' name, so appending never creates a spurious cross-entry substring match under .Contains.
+    ' Caller only parses the Spec (and so only passes a non-empty scheduleApps) when
+    ' scheduleActive, so a no-schedule tick does no extra work. Pure + Shared (unit-tested).
+    Friend Shared Function EffectiveKillList(ByVal manualProcessList As String, ByVal scheduleApps As List(Of String), ByVal scheduleActive As Boolean) As String
+        If Not scheduleActive OrElse scheduleApps Is Nothing OrElse scheduleApps.Count = 0 Then Return manualProcessList
+        Dim sb As New System.Text.StringBuilder(manualProcessList)
+        For Each app As String In scheduleApps
+            sb.Append("|"c)
+            sb.Append(app)
+        Next
+        Return sb.ToString()
     End Function
 
     ' ---- the wall-clock window evaluator (pure; the schedule's WHEN half) ----
