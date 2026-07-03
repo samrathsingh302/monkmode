@@ -202,6 +202,12 @@ Module Program
         Dim partnerUnlockedAt As String = ini.GetKeyValue("Partner", "UnlockedAt")
         ' C4: the [Commit] Committed flag ("yes"/"no", plaintext-as-stored, MAC-covered).
         Dim committed As String = ini.GetKeyValue("Commit", "Committed")
+        ' C5b: [Schedule] Spec is the recurring-window rule stored PLAINTEXT (as-stored,
+        ' like CustomSites/[Partner] - NOT decrypted); [Schedule] ActiveUntil is an
+        ' ENCRYPTED datetime like CoolOffUntil ("" = no window open). Absent => "" (a v6
+        ' config read under v7 code builds a different canonical and freezes, R9).
+        Dim scheduleSpec As String = ini.GetKeyValue("Schedule", "Spec")
+        Dim scheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -210,8 +216,10 @@ Module Program
         Dim coolOffPlain As String = If(coolOffEnc = "", "", enc.DecryptData(coolOffEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, enc.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", enc.DecryptData(nowEnc))
+        ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
+        Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", enc.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain)
     End Function
 
     ' B7 live MAC gate (DPAPI seam - smoke-tested). DPAPI-unprotect [Integrity]

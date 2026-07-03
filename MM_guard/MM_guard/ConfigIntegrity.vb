@@ -53,11 +53,12 @@ Friend Module ConfigIntegrity
     ' is re-armed). History: v1 (pre-B4) -> v2 (B4: added HighWater) -> v3
     ' (Section C accountability core) -> v4 (C2b: added CoolOffUntil, the
     ' cooling-off deadline) -> v5 (C3b: added the [Partner] Salt/Hash/UnlockedAt
-    ' accountability-code fields) -> v6 (C4: added the [Commit] Committed flag).
+    ' accountability-code fields) -> v6 (C4: added the [Commit] Committed flag) ->
+    ' v7 (C5b: added the [Schedule] Spec + ActiveUntil scheduled-window fields).
     ' The four copies MUST share this value or the parties would stamp/verify
     ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v6"
+    Friend Const CurrentSchemaVersion As String = "v7"
 
     ' The canonical string the MAC is computed over: the schema version tag plus
     ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
@@ -112,13 +113,27 @@ Friend Module ConfigIntegrity
     ' -> the whole block FREEZES (cooling-off Ignored anyway), so an attacker can
     ' never un-commit. Set once at arm by the CLI, never mutated during the block.
     '
-    ' C3b/C4: partnerSalt/partnerHash/partnerUnlockedAt/committed are appended at the
-    ' END of the PARAMETER list (after coolOffUntil) and their LINES trail after Now=
-    ' in the OUTPUT - mind that the parameter order (until, processList, customSites,
-    ' now, highWater, coolOffUntil, partnerSalt, partnerHash, partnerUnlockedAt,
-    ' committed) is NOT the line order; every wrapper threads them positionally, so
-    ' the four copies must stay byte-identical (the parity tests fail loudly on drift).
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String) As String
+    ' C3b/C4/C5b: partnerSalt/partnerHash/partnerUnlockedAt/committed/scheduleSpec/
+    ' scheduleActiveUntil are appended at the END of the PARAMETER list (after
+    ' coolOffUntil) and their LINES trail after Now= (the [Partner]/[Commit] group,
+    ' then the [Schedule] group last) - mind that the parameter order (until,
+    ' processList, customSites, now, highWater, coolOffUntil, partnerSalt, partnerHash,
+    ' partnerUnlockedAt, committed, scheduleSpec, scheduleActiveUntil) is NOT the line
+    ' order; every wrapper threads them positionally, so the four copies must stay
+    ' byte-identical (the parity tests fail loudly on drift).
+    '
+    ' C5b (schedules): the canonical also includes the two [Schedule] fields -
+    ' ScheduleSpec (the plaintext, MAC-covered recurring-window rule + its site/app
+    ' lists, stored as-stored like CustomSites/[Partner] - a blocklist is not a secret;
+    ' the MAC is its protection) and ScheduleActiveUntil (an en-CA LOCAL datetime,
+    ' DECRYPTED like CoolOffUntil; "" = no scheduled window currently open). Both MUST
+    ' be MAC-covered: a tampered Spec (adding/removing windows) or a forged
+    ' ScheduleActiveUntil (a past value to end an open window early) then fails the MAC
+    ' -> macValid=False -> the whole block FREEZES (B7, automatic once they are in the
+    ' canonical), and the SERVICE is the sole writer of ScheduleActiveUntil (the
+    ' window->duration conversion, HighWater-anchored) exactly as it is of CoolOffUntil.
+    ' They form a trailing [Schedule] group after Committed=.
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String) As String
         Return schemaVersion & vbLf &
                "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
@@ -129,7 +144,9 @@ Friend Module ConfigIntegrity
                "PartnerSalt=" & partnerSalt & vbLf &
                "PartnerHash=" & partnerHash & vbLf &
                "PartnerUnlockedAt=" & partnerUnlockedAt & vbLf &
-               "Committed=" & committed & vbLf
+               "Committed=" & committed & vbLf &
+               "ScheduleSpec=" & scheduleSpec & vbLf &
+               "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf
     End Function
 
     ' HMAC-SHA256 of the canonical (Unicode bytes), Base64-encoded. The key is

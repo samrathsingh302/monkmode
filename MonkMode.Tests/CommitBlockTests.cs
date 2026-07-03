@@ -51,7 +51,7 @@ public class CommitBlockEndToEndTests
 
     // A committed armed config's canonical (Committed="yes", UnlockedAt="") + its MAC.
     private static string CommittedCanonical(string unlockedAt, string committed) =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, committed);
+        MonkMode.ConfigIntegrity.BuildCanonical(Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, committed, "", "");
 
     [Fact]
     public void CommittedBlock_RefusesCoolingOff_ButTheCodeStillExits_TheC4Seam()

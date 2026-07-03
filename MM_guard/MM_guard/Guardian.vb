@@ -104,6 +104,38 @@ Friend Module Guardian
         Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText) OrElse PartnerUnlocked(unlockedAtText)
     End Function
 
+    ' ---- C5b: schedules (the guardian's half of the hold decision) ----
+    '
+    ' Byte-for-byte the same semantics as Service1.ScheduleElapsed / ScheduleActive
+    ' (parity-pinned, like CoolOffElapsedTime). LOAD-BEARING for the guardian in C5b
+    ' sub-slice (b): its stand-down gate must fold ScheduleActive in, or at a window's
+    ' start it could stand down (Until passed + no cooling-off/code => "exited") and
+    ' NOT restart a killed service mid-window, and at a window's close it could
+    ' resurrect one. The guardian only READS ScheduleActiveUntil (the service is its
+    ' sole writer, like HighWater/CoolOffUntil) - no write race. NOTE (sub-slice a):
+    ' these gates exist + are parity-pinned here; the guardian's EffectiveExit fold +
+    ' the [Schedule] ActiveUntil read are sub-slice (b) - this slice changes no
+    ' guardian behaviour.
+
+    ' Has the open scheduled window reached its monotonic close? "" (no window) and any
+    ' unparseable input read as NOT elapsed (fail closed - a corrupted deadline keeps
+    ' the guardian guarding). The caller folds macValid, exactly as expiry does.
+    Friend Function ScheduleElapsed(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        If scheduleActiveUntilText = "" Then Return False
+        Dim ca As New CultureInfo("en-CA")
+        Dim activeUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(scheduleActiveUntilText, ca, DateTimeStyles.None, activeUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return activeUntil <= highWater
+    End Function
+
+    ' Is a scheduled window currently open (set AND not yet elapsed)? SD1: an open
+    ' window is a HARD HOLD. Empty => not active; a non-empty-but-unparseable deadline
+    ' => active (fail-closed: hold). Byte-for-byte the same as the service copy.
+    Friend Function ScheduleActive(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        Return scheduleActiveUntilText <> "" AndAlso Not ScheduleElapsed(scheduleActiveUntilText, highWaterText)
+    End Function
+
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
     '
     ' Byte-for-byte the same gates as Service1's B4 block (the parity tests pin

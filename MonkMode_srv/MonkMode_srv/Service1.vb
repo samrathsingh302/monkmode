@@ -29,6 +29,7 @@ Imports monkmode.IniFile
 Imports System.Text
 Imports System.Threading
 Imports System.Globalization
+Imports System.Collections.Generic
 
 Public Class Service1
     Inherits System.ServiceProcess.ServiceBase
@@ -1192,6 +1193,286 @@ Public Class Service1
         Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText) OrElse PartnerUnlocked(unlockedAtText)
     End Function
 
+    ' ===== C5b: schedules (recurring wall-clock windows -> monotonic holds) =====
+    '
+    ' A schedule is a recurring WALL-CLOCK rule (e.g. Mon-Fri 09:00-17:00), stored as
+    ' one MAC-covered plaintext [Schedule] Spec. The design rests on one asymmetry:
+    ' WALL-CLOCK decides WHEN a window opens; the monotonic B4 HighWater decides HOW
+    ' LONG an opened window enforces. At the first tick a window is open the service
+    ' converts it ONCE into a HighWater-anchored deadline [Schedule] ActiveUntil =
+    ' HighWater_now + (close - now) - so a mid-window clock-forward can't end it early
+    ' (HighWater refuses the jump), exactly like CoolOffUntil. These gates are the
+    ' PURE, fail-closed, unit-tested core. NOTE (C5b sub-slice a): the fields are in
+    ' the canonical and these gates exist + are tested, but NOTHING here is wired into
+    ' the enforcement path yet - the per-tick ProcessScheduleWindows step, the lift/
+    ' hold fold into EffectiveExit/ClassifyHeartbeat and the union enforcement behind
+    ' BlockHeld are the C5b sub-slice (b) enforcement-core seam. This slice changes NO
+    ' enforcement behaviour (the fields read as "" on every existing block).
+
+    ' Has the open scheduled window reached its monotonic close? The sibling of
+    ' CoolOffElapsedTime: scheduleActiveUntilText is the decrypted [Schedule] ActiveUntil
+    ' ("" = no window open); highWaterText is the trusted B4 mark it is measured against
+    ' - NEVER DateTime.Now, so a clock-forward can't reach the close early and a reboot
+    ' pauses the countdown. Fail-closed on every axis: empty (no window) and any
+    ' unparseable input read as NOT elapsed - a corrupted deadline or mark can only ever
+    ' HOLD the window, never end it. Pure + Shared; byte-for-byte the same semantics as
+    ' the guardian copy (parity-pinned, like CoolOffElapsedTime).
+    Friend Shared Function ScheduleElapsed(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        If scheduleActiveUntilText = "" Then Return False
+        Dim ca As New CultureInfo("en-CA")
+        Dim activeUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(scheduleActiveUntilText, ca, DateTimeStyles.None, activeUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return activeUntil <= highWater
+    End Function
+
+    ' Is a scheduled window currently open (set AND not yet elapsed)? SD1: an open
+    ' window is a HARD HOLD - while this is True nothing lifts the effective block (not
+    ' expiry, not cooling-off, not a code) until the window's own monotonic close.
+    ' Empty => no window (not active); a non-empty-but-unparseable deadline => active
+    ' (fail-closed: hold, never lift on a garbled deadline). The caller folds macValid
+    ' exactly as expiry does. Byte-for-byte the same as the guardian copy (parity-pinned).
+    Friend Shared Function ScheduleActive(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        Return scheduleActiveUntilText <> "" AndAlso Not ScheduleElapsed(scheduleActiveUntilText, highWaterText)
+    End Function
+
+    ' The monotonic end the service (the SOLE writer) persists when a window opens: the
+    ' trusted HighWater at open plus the remaining seconds to enforce. The deadline
+    ' therefore lives in the HighWater frame - reached only after that much genuine
+    ' ON-machine elapsed time - so it can never be clock-skipped. Returns "" when the
+    ' stored HighWater doesn't parse (fail-closed: no deadline computable => no write;
+    ' retry next tick). The schedule sibling of ComputeCoolOffDeadline. Pure + Shared.
+    ' remainingSeconds is produced by EvaluateWindows (always > 0 for an open window); a
+    ' non-positive value would yield a deadline <= HighWater (immediately elapsed), but
+    ' EvaluateWindows never emits one for an open window.
+    Friend Shared Function ComputeScheduleEnd(ByVal highWaterText As String, ByVal remainingSeconds As Long) As String
+        Dim ca As New CultureInfo("en-CA")
+        Dim highWater As DateTime
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return ""
+        Return highWater.AddSeconds(remainingSeconds).ToString(ca)
+    End Function
+
+    ' The shared "is the effective block held this tick?" helper (design §6.3). The
+    ' block is held when the manual block has NOT effectively expired OR a scheduled
+    ' window is open. Defined ONCE so the ~5 self-heal sites (hosts, app-kill, DoH,
+    ' SafeBoot, heartbeat guard) can't drift (the way they all share
+    ' EffectiveBlockHasExpired today). When macValid=False the first disjunct is already
+    ' True (freeze enforces), so the schedule arm only ADDS enforcement when the manual
+    ' block has genuinely expired but a window is open. NOTE (C5b sub-slice a): defined
+    ' + unit-tested here, WIRED into the self-heal sites in sub-slice (b) - this slice
+    ' changes no enforcement behaviour. Pure + Shared.
+    Friend Shared Function BlockHeld(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        Return (Not EffectiveBlockHasExpired(untilText, asOf, graceSeconds, macValid)) OrElse (macValid AndAlso ScheduleActive(scheduleActiveUntilText, highWaterText))
+    End Function
+
+    ' ---- the wall-clock window evaluator (pure; the schedule's WHEN half) ----
+    '
+    ' Reference types so the C# unit tests (InternalsVisibleTo) can inspect them as
+    ' monkmode.Service1.ParsedSchedule / ScheduleWindow / ScheduleOpen.
+
+    ' One recurring window: a day-of-week mask (bit 0 = Mon .. bit 6 = Sun), an open
+    ' minute-of-day and a close minute-of-day, open < close (same-day only, SD3).
+    Friend Class ScheduleWindow
+        Public DayMask As Integer
+        Public OpenMinutes As Integer
+        Public CloseMinutes As Integer
+    End Class
+
+    ' A parsed [Schedule] Spec: the recurring windows plus the schedule-wide site/app
+    ' block lists.
+    Friend Class ParsedSchedule
+        Public Windows As New List(Of ScheduleWindow)
+        Public Sites As New List(Of String)
+        Public Apps As New List(Of String)
+    End Class
+
+    ' One window the evaluator says should be open this tick, carrying the seconds to
+    ' enforce (close-now for a normal/jump-into/boot-inside open; the full window
+    ' duration for a live jump-over, SD4). The tick converts each to a HighWater
+    ' deadline via ComputeScheduleEnd and takes the LATER (extend-never-shorten).
+    Friend Class ScheduleOpen
+        Public OpenMinutes As Integer
+        Public CloseMinutes As Integer
+        Public RemainingSeconds As Long
+    End Class
+
+    ' The grammar-version tag the Spec always leads with, so C6 can extend the grammar
+    ' (v1 -> v2) without a canonical bump. Pinned by a unit test.
+    Friend Const ScheduleSpecGrammarVersion As String = "v1"
+
+    ' Parse a [Schedule] Spec (C5a design §3 grammar) into windows + site/app lists.
+    ' FAIL-CLOSED: a malformed WINDOW is skipped (keep the good ones); a wholly
+    ' unparseable/empty Spec or an unknown grammar tag yields NO windows (the schedule
+    ' is inert - a self-authored garbage rule must never INVENT a phantom permanent
+    ' block, and it never disturbs the manual block or the MAC). A TAMPERED Spec, by
+    ' contrast, fails the MAC upstream -> freeze (B7). Pure; no filesystem/DPAPI.
+    '   Spec := "v1" ";" windowList ";" "sites=" siteList ";" "apps=" appList
+    '   window := dayMask ":" HHMM "-" HHMM   (dayMask = chars '1'..'7' = Mon..Sun)
+    Friend Shared Function ParseSchedule(ByVal specText As String) As ParsedSchedule
+        Dim result As New ParsedSchedule()
+        If String.IsNullOrWhiteSpace(specText) Then Return result
+        Dim parts() As String = specText.Split(";"c)
+        ' Need at least the version tag + the window list; an unknown tag is inert.
+        If parts.Length < 2 Then Return result
+        If parts(0).Trim() <> ScheduleSpecGrammarVersion Then Return result
+        ' Windows (comma-separated); skip any malformed one, keep the rest.
+        For Each winTok As String In parts(1).Split(","c)
+            Dim w As ScheduleWindow = TryParseWindow(winTok)
+            If w IsNot Nothing Then result.Windows.Add(w)
+        Next
+        ' Sites / apps: locate by prefix among the remaining parts (order-tolerant,
+        ' either may be absent). "|" separates entries (never valid in a domain/exe).
+        For i As Integer = 2 To parts.Length - 1
+            Dim p As String = parts(i)
+            If p.StartsWith("sites=", StringComparison.Ordinal) Then
+                AppendListTokens(result.Sites, p.Substring(6))
+            ElseIf p.StartsWith("apps=", StringComparison.Ordinal) Then
+                AppendListTokens(result.Apps, p.Substring(5))
+            End If
+        Next
+        Return result
+    End Function
+
+    ' Split a "a|b|c" list body on "|", trimming and dropping empties, into dest.
+    Private Shared Sub AppendListTokens(ByVal dest As List(Of String), ByVal body As String)
+        For Each tok As String In body.Split("|"c)
+            Dim t As String = tok.Trim()
+            If t <> "" Then dest.Add(t)
+        Next
+    End Sub
+
+    ' Parse one "dayMask:HHMM-HHMM" window; Nothing if malformed (fail-closed skip).
+    ' Enforces SD3: same-day only (open < close); rejects any out-of-range time or day.
+    Private Shared Function TryParseWindow(ByVal token As String) As ScheduleWindow
+        If token Is Nothing Then Return Nothing
+        Dim tok As String = token.Trim()
+        If tok = "" Then Return Nothing
+        Dim halves() As String = tok.Split(":"c)
+        If halves.Length <> 2 Then Return Nothing          ' HHMM carries no colon in the compact grammar
+        Dim mask As Integer = TryParseDayMask(halves(0))
+        If mask = 0 Then Return Nothing                    ' empty/invalid day set
+        Dim times() As String = halves(1).Split("-"c)
+        If times.Length <> 2 Then Return Nothing
+        Dim openMin As Integer = TryParseHhmm(times(0))
+        Dim closeMin As Integer = TryParseHhmm(times(1))
+        If openMin < 0 OrElse closeMin < 0 Then Return Nothing
+        If openMin >= closeMin Then Return Nothing         ' SD3: reject overnight / zero-length
+        Dim w As New ScheduleWindow()
+        w.DayMask = mask
+        w.OpenMinutes = openMin
+        w.CloseMinutes = closeMin
+        Return w
+    End Function
+
+    ' "12345" -> bitmask (bit 0 = Mon .. bit 6 = Sun). 0 if empty or any char is not
+    ' '1'..'7' (fail-closed: an invalid day set makes the whole window malformed).
+    Private Shared Function TryParseDayMask(ByVal s As String) As Integer
+        If s Is Nothing OrElse s.Length = 0 Then Return 0
+        Dim mask As Integer = 0
+        For Each ch As Char In s
+            If ch < "1"c OrElse ch > "7"c Then Return 0
+            mask = mask Or (1 << (AscW(ch) - AscW("1"c)))   ' '1'->bit0(Mon) .. '7'->bit6(Sun)
+        Next
+        Return mask
+    End Function
+
+    ' "0900" -> 540 (minute-of-day). -1 if not exactly 4 digits or out of range
+    ' (HH 0..23, MM 0..59). Fail-closed: a bad time makes the window malformed.
+    Private Shared Function TryParseHhmm(ByVal s As String) As Integer
+        If s Is Nothing OrElse s.Length <> 4 Then Return -1
+        For Each ch As Char In s
+            If ch < "0"c OrElse ch > "9"c Then Return -1
+        Next
+        Dim hh As Integer = Integer.Parse(s.Substring(0, 2), CultureInfo.InvariantCulture)
+        Dim mm As Integer = Integer.Parse(s.Substring(2, 2), CultureInfo.InvariantCulture)
+        If hh > 23 OrElse mm > 59 Then Return -1
+        Return hh * 60 + mm
+    End Function
+
+    ' Does 'dt' fall on a day the window applies to? (bit 0 = Mon .. bit 6 = Sun.)
+    Private Shared Function ScheduleDayMatches(ByVal dt As DateTime, ByVal dayMask As Integer) As Boolean
+        Dim bit As Integer = ((CInt(dt.DayOfWeek) + 6) Mod 7)   ' .NET Sun=0..Sat=6 -> Mon=0..Sun=6
+        Return (dayMask And (1 << bit)) <> 0
+    End Function
+
+    ' The wall-clock evaluator (design §4.2). For each window decide OPEN? and the
+    ' seconds to enforce, over the §4.2 matrix:
+    '   * INSIDE now (normal / forward-jump-INTO / boot-inside): now in [open, close)
+    '     on a matching day -> OPEN, remaining = close - now.
+    '   * LIVE jump-OVER (running session only): the wall advanced past a whole window
+    '     (crossed its open, now >= its close) AND the advance is a JUMP - the wall
+    '     delta vastly exceeds the real monotonic elapsed (wallDelta - monoElapsed >
+    '     HighWaterJumpCeilingSeconds) -> OPEN for the FULL window duration (SD4).
+    '   * BOOT past a closed window (isBoot, now >= close): MISSED (crux #4b) - a boot
+    '     never treats a past-and-closed window as a jump (TickCount64 reset means no
+    '     trustworthy monoElapsed), so it only opens a window it lands INSIDE (#4a).
+    '   * BEFORE the window: not open.
+    ' lastNowText = the previous tick's [CurrentTime] Now; nowText = this tick's now;
+    ' monoElapsedSeconds = the real B4 creep-anchor elapsed (wall-clock-immune); isBoot
+    ' = OnStart. Fail-closed: an unparseable now opens nothing new this tick (the
+    ' existing ScheduleActiveUntil, if any, still holds via ScheduleActive). Pure.
+    Friend Shared Function EvaluateWindows(ByVal windows As List(Of ScheduleWindow), ByVal lastNowText As String, ByVal nowText As String, ByVal monoElapsedSeconds As Long, ByVal isBoot As Boolean) As List(Of ScheduleOpen)
+        Dim opens As New List(Of ScheduleOpen)
+        If windows Is Nothing OrElse windows.Count = 0 Then Return opens
+        Dim ca As New CultureInfo("en-CA")
+        Dim nowDt As DateTime
+        If Not DateTime.TryParse(nowText, ca, DateTimeStyles.None, nowDt) Then Return opens   ' no 'now' -> open nothing new
+        Dim lastNowDt As DateTime
+        Dim haveLastNow As Boolean = DateTime.TryParse(lastNowText, ca, DateTimeStyles.None, lastNowDt)
+        Dim nowSec As Double = nowDt.TimeOfDay.TotalSeconds
+        ' A live forward JUMP: the wall advanced far more than the real elapsed. Only a
+        ' running session (Not isBoot) with a parseable previous 'now' can detect one.
+        Dim wallIsJump As Boolean = False
+        If (Not isBoot) AndAlso haveLastNow Then
+            Dim wallDelta As Long = CLng(DateDiff(DateInterval.Second, lastNowDt, nowDt))
+            wallIsJump = (wallDelta - monoElapsedSeconds) > HighWaterJumpCeilingSeconds
+        End If
+        For Each w As ScheduleWindow In windows
+            Dim openSec As Double = w.OpenMinutes * 60.0
+            Dim closeSec As Double = w.CloseMinutes * 60.0
+            If ScheduleDayMatches(nowDt, w.DayMask) AndAlso nowSec >= openSec AndAlso nowSec < closeSec Then
+                ' INSIDE now (covers normal ticks, forward-jump-INTO, boot-inside).
+                opens.Add(NewScheduleOpen(w, CLng(Math.Ceiling(closeSec - nowSec))))
+            ElseIf wallIsJump AndAlso ScheduleJumpedOver(w, lastNowDt, nowDt) Then
+                ' LIVE jump-OVER a whole window: enforce its FULL duration (SD4).
+                opens.Add(NewScheduleOpen(w, (w.CloseMinutes - w.OpenMinutes) * 60L))
+            End If
+        Next
+        Return opens
+    End Function
+
+    Private Shared Function NewScheduleOpen(ByVal w As ScheduleWindow, ByVal remainingSeconds As Long) As ScheduleOpen
+        Dim o As New ScheduleOpen()
+        o.OpenMinutes = w.OpenMinutes
+        o.CloseMinutes = w.CloseMinutes
+        o.RemainingSeconds = remainingSeconds
+        Return o
+    End Function
+
+    ' Did the wall traversal (lastNow, now] leap over a whole instance of window w -
+    ' i.e. is there a matching day whose open-instant is in (lastNow, now] and whose
+    ' same-day close is at/before now? Bounded backward scan from now.Date (day-of-week
+    ' repeats weekly, so a matching day is always within ~7 days of now; the 366 cap
+    ' just bounds a pathological multi-year jump). Only called when wallIsJump is
+    ' already established, so this is existence-only; the enforced duration is always
+    ' the full window length regardless of which day was skipped.
+    Private Shared Function ScheduleJumpedOver(ByVal w As ScheduleWindow, ByVal lastNowDt As DateTime, ByVal nowDt As DateTime) As Boolean
+        Dim d As DateTime = nowDt.Date
+        Dim guard As Integer = 0
+        While d >= lastNowDt.Date AndAlso guard <= 366
+            If ScheduleDayMatches(d, w.DayMask) Then
+                Dim openInstant As DateTime = d.AddMinutes(w.OpenMinutes)
+                Dim closeInstant As DateTime = d.AddMinutes(w.CloseMinutes)
+                If openInstant > lastNowDt AndAlso openInstant <= nowDt AndAlso nowDt >= closeInstant Then
+                    Return True
+                End If
+            End If
+            d = d.AddDays(-1)
+            guard += 1
+        End While
+        Return False
+    End Function
+
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----
     '
     ' Expiry must NOT trust raw DateTime.Now: rolling the clock forward past
@@ -1559,6 +1840,12 @@ Public Class Service1
         Dim partnerUnlockedAt As String = iniFile.GetKeyValue("Partner", "UnlockedAt")
         ' C4: the [Commit] Committed flag ("yes"/"no", plaintext-as-stored, MAC-covered).
         Dim committed As String = iniFile.GetKeyValue("Commit", "Committed")
+        ' C5b: [Schedule] Spec is the recurring-window rule stored PLAINTEXT (as-stored,
+        ' like CustomSites/[Partner] - NOT decrypted); [Schedule] ActiveUntil is an
+        ' ENCRYPTED datetime like CoolOffUntil ("" = no window open). Absent => "" (a v6
+        ' config read under v7 code builds a different canonical and freezes, R9).
+        Dim scheduleSpec As String = iniFile.GetKeyValue("Schedule", "Spec")
+        Dim scheduleActiveEnc As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
@@ -1567,8 +1854,10 @@ Public Class Service1
         Dim coolOffPlain As String = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
         Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
         Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
+        ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
+        Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", encryptionW.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads
