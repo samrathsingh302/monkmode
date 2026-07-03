@@ -220,7 +220,14 @@ Public Class Service1
                 ' this write. No Spec => inert fast path (unchanged on every existing block).
                 Dim scheduleSpecAtStart As String = iniFile.GetKeyValue("Schedule", "Spec")
                 scheduleActiveAtStart = ProcessScheduleWindows(scheduleActiveAtStart, scheduleSpecAtStart, "", DateTime.Now.ToString(culture), storedHw, 0, macValidAtStart, True)
-                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart) Then
+                ' C5b (c2): OnStart's scheduleArmed hold. A freshly-armed schedule-only block
+                ' at boot (past [Time] Until sentinel, Spec present, no window open yet) MUST
+                ' stay alive to await its window - without this the single lift path below would
+                ' stopMe() it the instant the service starts (the §4C OnStart trap). EXACT
+                ' derivation via ScheduleArmed (EXACT, like the tick); "" Spec on every existing
+                ' block => False => inert. Decided in the STORED HighWater frame (OnStart never advances).
+                Dim scheduleArmedAtStart As Boolean = ScheduleArmed(macValidAtStart, scheduleSpecAtStart)
+                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart, scheduleArmedAtStart) Then
                     ' The ONLY OnStart path that may lift the block: a valid B7 MAC
                     ' AND (a successfully parsed, genuinely past end time OR an
                     ' elapsed cooling-off deadline OR a partner-verified code-unlock),
@@ -1092,9 +1099,17 @@ Public Class Service1
             ' C5b (SD1): an OPEN scheduled window OUT-RANKS all three lift triggers -
             ' ClassifyHeartbeat's scheduleActive arm Restamps (keeps HighWater advancing
             ' so the window counts down), never lifting, until the window's own monotonic
-            ' close. INERT in sub-slice (b1): iniScheduleActiveUntil is the STORED value,
-            ' always "" until the (b2) tick step ever opens a window.
-            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt), ScheduleActive(iniScheduleActiveUntil, newHw))
+            ' close. C5b (c2): scheduleArmedNow (macValid AndAlso the Spec parses to >=1
+            ' window) is the BETWEEN-windows hold - a schedule-only block carries a past
+            ' [Time] Until sentinel, so between windows blockExpired is True yet we must
+            ' Restamp (stay alive for tomorrow's window), not stopMe. iniScheduleSpec is the
+            ' SAME value the b2/b3 schedule wiring reads this tick; on every block until the
+            ' CLI writes a Spec (c3) it is "" => scheduleArmedNow False and this is byte-
+            ' identical to a manual block. Derived via ScheduleArmed (the EXACT form: macValid
+            ' AndAlso ParseSchedule(Spec) yields >=1 window); the guardian uses its cheaper
+            ' Spec-non-empty over-approximation (Guardian.ScheduleArmed, no 4th parser copy).
+            Dim scheduleArmedNow As Boolean = ScheduleArmed(macValid, iniScheduleSpec)
+            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt), ScheduleActive(iniScheduleActiveUntil, newHw), scheduleArmedNow)
                 Case HeartbeatAction.Lift
                     stopMe()
                 Case HeartbeatAction.Restamp
@@ -1249,14 +1264,30 @@ Public Class Service1
     ' a completed cooling-off, not on a code. It mirrors EffectiveExit's
     ' `If ScheduleActive Then Return False`, so Lift <=> EffectiveExit still holds
     ' (both now also gate on NOT scheduleActive). Only the window reaching its
-    ' monotonic close (ScheduleElapsed => scheduleActive False) releases it. NOTE
-    ' (C5b sub-slice b1): this arm is wired but INERT on every existing block - the
-    ' per-tick ProcessScheduleWindows step that ever makes scheduleActive True is
-    ' sub-slice (b2), so the caller passes ScheduleActive("", newHw) = False today.
-    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean) As HeartbeatAction
+    ' monotonic close (ScheduleElapsed => scheduleActive False) releases it.
+    '
+    ' C5b (c2): scheduleArmed is the BETWEEN-windows lifecycle state the old binary
+    ' Restamp/Lift model lacked (design §4C). A schedule-only block carries a PAST [Time]
+    ' Until sentinel (ScheduleOnlyExpiredUntil, written by the CLI in c3), so between windows
+    ' blockExpired is True - yet the block must NOT tear down, because a recurring schedule
+    ' still needs the service alive for tomorrow's window. scheduleArmed (macValid AndAlso
+    ' the Spec parses to >=1 window) RE-STAMPS instead of Lifting when an exit is otherwise
+    ' due, giving three states: WINDOW-OPEN (scheduleActive -> Restamp, hard hold), BETWEEN-
+    ' windows (scheduleArmed -> Restamp, idle: the self-heals stand down via BlockHeld while
+    ' the service stays alive), TORN-DOWN (neither -> Lift -> stopMe, reached only once the
+    ' Spec is cleared so scheduleArmed goes False). Without this arm a past-Until schedule-
+    ' only block would Lift->stopMe at its first window's close and never enforce the next
+    ' one (the §3 trap). EffectiveExit gains the identical `If scheduleArmed Then Return
+    ' False` guard, so Lift <=> EffectiveExit still holds. INERT on every existing block
+    ' until the CLI writes a Spec (c3): scheduleActive=False AND scheduleArmed=False => the
+    ' arm is never consulted and behaviour is byte-identical to a manual block.
+    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean, ByVal scheduleArmed As Boolean) As HeartbeatAction
         If Not macValid Then Return HeartbeatAction.Hold
-        If scheduleActive Then Return HeartbeatAction.Restamp
-        If blockExpired OrElse coolOffElapsed OrElse codeUnlocked Then Return HeartbeatAction.Lift
+        If scheduleActive Then Return HeartbeatAction.Restamp           ' SD1: an open window is a hard hold
+        If blockExpired OrElse coolOffElapsed OrElse codeUnlocked Then
+            If scheduleArmed Then Return HeartbeatAction.Restamp        ' c2: BETWEEN windows of a live schedule - stay alive, don't tear down
+            Return HeartbeatAction.Lift                                 ' torn down: schedule cleared (or none) + a manual exit is due
+        End If
         Return HeartbeatAction.Restamp
     End Function
 
@@ -1458,18 +1489,33 @@ Public Class Service1
     ' monotonic close (ScheduleActive False). The check sits right after the macValid
     ' gate, so it only ever ADDS a hold; ClassifyHeartbeat's mirror arm keeps
     ' Lift <=> EffectiveExit. scheduleActiveUntilText is the decrypted [Schedule]
-    ' ActiveUntil ("" = no window, the inert default on every block without a live
-    ' schedule; the tick step that ever sets it is C5b sub-slice b2).
+    ' ActiveUntil ("" = no window, the inert default on every block without a live schedule).
     '
-    ' C3b/C5b param order (until, coolOffUntil, unlockedAt, scheduleActiveUntil,
-    ' highWater, grace, macValid): unlockedAt sits after coolOffUntil (the early-exit
-    ' reasons together); scheduleActiveUntil (a HOLD input that needs highWater) sits
-    ' just before the highWater/grace time frame - the frozen-design order,
-    ' parity-pinned with the guardian copy.
-    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+    ' C5b (c2): scheduleArmed is the BETWEEN-windows hold (design §4C) - an armed schedule
+    ' (macValid AndAlso the Spec parses to >=1 window) keeps the service AND the guardian
+    ' ALIVE between windows, so a recurring schedule enforces tomorrow's window too. A
+    ' schedule-only block carries a PAST [Time] Until sentinel (ScheduleOnlyExpiredUntil,
+    ' written by the CLI in c3), so between windows BlockHasExpired is True; without this
+    ' guard the tick/OnStart/guardian would Lift->stopMe at the first window's close and the
+    ' schedule would die (the §3 trap). It sits right after the ScheduleActive hold, so it
+    ' only ever ADDS a hold; ClassifyHeartbeat's mirror `If scheduleArmed Then Return
+    ' Restamp` keeps Lift <=> EffectiveExit. Terminal teardown (stopMe) is reached only when
+    ' the Spec is cleared (scheduleArmed False) AND no window is open AND an exit is due.
+    ' scheduleArmed is derived by the CALLER: the service exact (ParseSchedule(Spec).Windows.
+    ' Count > 0), the guardian a cheap over-approximation (Spec non-empty) - the difference is
+    ' in the caller, so this function stays byte-parity with the guardian copy.
+    '
+    ' C3b/C5b param order (until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater,
+    ' grace, macValid, scheduleArmed): unlockedAt sits after coolOffUntil (the early-exit
+    ' reasons together); scheduleActiveUntil (a HOLD input that needs highWater) sits just
+    ' before the highWater/grace time frame; scheduleArmed (the c2 HOLD, no time input of its
+    ' own) appends last - the frozen-design order, parity-pinned with the guardian copy.
+    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleArmed As Boolean) As Boolean
         If Not macValid Then Return False
         ' C5b (SD1): an open scheduled window is a HARD HOLD - nothing lifts while it is open.
         If ScheduleActive(scheduleActiveUntilText, highWaterText) Then Return False
+        ' C5b (c2): an armed schedule keeps the service+guardian ALIVE between windows.
+        If scheduleArmed Then Return False
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
@@ -1517,6 +1563,20 @@ Public Class Service1
     ' exactly as expiry does. Byte-for-byte the same as the guardian copy (parity-pinned).
     Friend Shared Function ScheduleActive(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
         Return scheduleActiveUntilText <> "" AndAlso Not ScheduleElapsed(scheduleActiveUntilText, highWaterText)
+    End Function
+
+    ' C5b (c2): the DERIVED scheduleArmed signal for the SERVICE (design §4C) - the EXACT form:
+    ' the config MAC is valid AND the Spec parses to at least one window. Folded (+1 arg) into
+    ' ClassifyHeartbeat / EffectiveExit at the tick + OnStart so a schedule-only block (past-Until
+    ' sentinel) is held ALIVE between windows and torn down (stopMe) ONLY once the Spec is cleared
+    ' (scheduleArmed False). macValid AndAlso is first, so a tampered/frozen config never reads as
+    ' armed (its freeze holds via the macValid gate regardless). Pure + Shared so the derivation
+    ' ITSELF is unit-tested, not just asserted-by-mirror. The guardian uses a cheaper over-
+    ' approximation (Guardian.ScheduleArmed - Spec non-empty) to avoid a 4th ParseSchedule copy;
+    ' the difference is fail-safe (the guardian only ever OVER-guards). INERT on every existing
+    ' block: no CLI writes a Spec until c3, so specText="" => 0 windows => False.
+    Friend Shared Function ScheduleArmed(ByVal macValid As Boolean, ByVal specText As String) As Boolean
+        Return macValid AndAlso ParseSchedule(specText).Windows.Count > 0
     End Function
 
     ' The monotonic end the service (the SOLE writer) persists when a window opens: the
@@ -1836,6 +1896,20 @@ Public Class Service1
     ' The grammar-version tag the Spec always leads with, so C6 can extend the grammar
     ' (v1 -> v2) without a canonical bump. Pinned by a unit test.
     Friend Const ScheduleSpecGrammarVersion As String = "v1"
+
+    ' C5b (c2): the schedule-only PAST [Time] Until SENTINEL (design §4B). A schedule-only
+    ' block has no manual duration, so the CLI (c3) writes THIS fixed, clearly-past,
+    ' MAC-covered value as [Time] Until. BlockHasExpired(sentinel) is therefore always True,
+    ' so BlockHeld collapses to its ScheduleActive disjunct - the four non-hosts self-heals
+    ' track the window (idle between windows) instead of latching forever on an empty Until
+    ' (fixes P1). It is a REAL en-CA datetime (parses; hugely past => reads expired) and
+    ' STABLE across restamps (unlike an arm-time-now, which would drift on every re-stamp).
+    ' The scheduleArmed guard (EffectiveExit / ClassifyHeartbeat) is what stops this past
+    ' Until from tearing the block down BETWEEN windows. Written by the CLI in c3; a
+    ' CLI<->service parity test will pin the copies equal (like SnapshotName /
+    ' CoolOff*FileName). The service itself does not special-case it - BlockHasExpired parses
+    ' it generically - so this is just the single source of truth, in the schedule-logic home.
+    Friend Const ScheduleOnlyExpiredUntil As String = "1970-01-01 00:00:00"
 
     ' Parse a [Schedule] Spec (C5a design §3 grammar) into windows + site/app lists.
     ' FAIL-CLOSED: a malformed WINDOW is skipped (keep the good ones); a wholly

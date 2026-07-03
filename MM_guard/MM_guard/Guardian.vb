@@ -98,12 +98,21 @@ Friend Module Guardian
     ' in as a HARD HOLD - while a window is open the guardian keeps guarding and never
     ' stands down, so it can't stand down at a window's start nor resurrect one at its
     ' close (the service is the sole writer of [Schedule] ActiveUntil; the guardian only
-    ' reads it). Param order parity-pinned with Service1.EffectiveExit (until,
-    ' coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, grace, macValid).
-    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+    ' reads it). C5b (c2): also folds scheduleArmed - the BETWEEN-windows hold - so the
+    ' guardian stays alive between windows of a recurring schedule (and can restart a killed
+    ' service for tomorrow's window), standing down (terminal teardown) only once the Spec is
+    ' cleared. This BODY is byte-for-byte Service1.EffectiveExit; the exact-vs-over-approx
+    ' derivation of scheduleArmed differs only in the CALLER (Program.vb uses the cheap
+    ' Spec-non-empty over-approximation - no 4th ParseSchedule copy - the fail-SAFE direction:
+    ' a garbage non-empty Spec only keeps the guardian watching a little longer, never an early
+    ' stand-down). Param order parity-pinned with Service1.EffectiveExit (until, coolOffUntil,
+    ' unlockedAt, scheduleActiveUntil, highWater, grace, macValid, scheduleArmed).
+    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleArmed As Boolean) As Boolean
         If Not macValid Then Return False
         ' C5b (SD1): an open scheduled window is a HARD HOLD - nothing lifts while it is open.
         If ScheduleActive(scheduleActiveUntilText, highWaterText) Then Return False
+        ' C5b (c2): an armed schedule keeps the service+guardian ALIVE between windows.
+        If scheduleArmed Then Return False
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
@@ -140,6 +149,20 @@ Friend Module Guardian
     ' => active (fail-closed: hold). Byte-for-byte the same as the service copy.
     Friend Function ScheduleActive(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
         Return scheduleActiveUntilText <> "" AndAlso Not ScheduleElapsed(scheduleActiveUntilText, highWaterText)
+    End Function
+
+    ' C5b (c2): the guardian's DERIVED scheduleArmed signal (design §4C) - the cheap OVER-
+    ' APPROXIMATION (the Spec is non-empty), NOT a 4th ParseSchedule copy. It over-approximates
+    ' the service's exact ScheduleArmed (ParseSchedule().Windows.Count>0) in the fail-SAFE
+    ' direction: a garbage non-empty Spec keeps the guardian guarding a little longer, never an
+    ' early stand-down (a parsed window implies a non-empty Spec, so guardian-armed superset
+    ' service-armed). Null-safe via IsNullOrWhiteSpace (so a MAC-valid absent/whitespace Spec
+    ' reads not-armed rather than throwing). macValid AndAlso first (a frozen config is never
+    ' armed). Folded into EffectiveExit so the guardian stays alive between windows and can
+    ' restart a killed service for the next one; stands down (terminal) only once the Spec is
+    ' cleared. Pure so the derivation is directly unit-tested. INERT until the CLI writes a Spec.
+    Friend Function ScheduleArmed(ByVal macValid As Boolean, ByVal specText As String) As Boolean
+        Return macValid AndAlso Not String.IsNullOrWhiteSpace(specText)
     End Function
 
     ' ---- B4: monotonic high-water mark (clock-rollback hardening) ----

@@ -78,7 +78,7 @@ public class CommitBlockEndToEndTests
         var unlocked = CommittedCanonical(unlockedAt, "yes");
         var unlockedMacValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlocked, MonkMode.ConfigIntegrity.ComputeConfigMac(unlocked, Key), Key);
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, unlockedMacValid));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, unlockedMacValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -113,7 +113,7 @@ public class CommitBlockEndToEndTests
             monkmode.Service1.ClassifyCoolOffSignal(requestPresent: true, cancelPresent: false,
                 coolOffPending: false, committed: monkmode.Service1.IsCommitted("no"), macValid: macValid));
         // And no exit gate lifts it either (frozen, not lifted).
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]

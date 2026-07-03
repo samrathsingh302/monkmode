@@ -281,15 +281,15 @@ public class EffectiveExitTests
     public void CoolOffElapsed_WithValidMac_Exits_EvenThoughUntilIsFuture()
     {
         // The whole point of cooling-off: the block ends BEFORE Until.
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: true));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
     public void CoolOffElapsed_WithInvalidMac_NeverExits()
     {
         // A tampered config can't cool off its way out (freeze).
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: false, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: false, scheduleArmed: false));
     }
 
     // C3b: a partner-code UnlockedAt exits under a valid MAC even with a FUTURE
@@ -297,16 +297,16 @@ public class EffectiveExitTests
     [Fact]
     public void CodeUnlocked_WithValidMac_Exits_EvenThoughUntilIsFutureAndNoCoolOff()
     {
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: true));
-        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: true));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: true, scheduleArmed: false));
     }
 
     // C3b (R6): a tampered config can't code-unlock its way out (freeze).
     [Fact]
     public void CodeUnlocked_WithInvalidMac_NeverExits()
     {
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: false, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Unlocked, "", HwText, 5, macValid: false, scheduleArmed: false));
     }
 
     // C3b: a code-unlock is TIME-FREE - it exits even when HighWater is unparseable
@@ -315,16 +315,16 @@ public class EffectiveExitTests
     [Fact]
     public void CodeUnlocked_ExitsEvenWithUnparseableHighWater()
     {
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", Unlocked, "", "garbage", 5, macValid: true));
-        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Unlocked, "", "", 5, macValid: true));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", Unlocked, "", "garbage", 5, macValid: true, scheduleArmed: false));
+        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Unlocked, "", "", 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
     public void NoCoolOff_ReducesToPlainExpiry()
     {
         // With no deadline pending and no code-unlock, EffectiveExit == expiry.
-        Assert.True(monkmode.Service1.EffectiveExit(PastUntil, "", "", "", HwText, 5, macValid: true));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid: true));
+        Assert.True(monkmode.Service1.EffectiveExit(PastUntil, "", "", "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
@@ -332,8 +332,8 @@ public class EffectiveExitTests
     {
         // No trustworthy mark and no code-unlock: expiry reads off MinValue (not
         // expired) and the cooling-off gate fails closed too.
-        Assert.False(monkmode.Service1.EffectiveExit(PastUntil, PastCoolOff, "", "", "garbage", 5, macValid: true));
-        Assert.False(monkmode.Service1.EffectiveExit(PastUntil, PastCoolOff, "", "", "", 5, macValid: true));
+        Assert.False(monkmode.Service1.EffectiveExit(PastUntil, PastCoolOff, "", "", "garbage", 5, macValid: true, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(PastUntil, PastCoolOff, "", "", "", 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
@@ -341,16 +341,20 @@ public class EffectiveExitTests
     {
         // The pair must never disagree on "may end", or one side stands down /
         // lifts while the other still enforces - the resurrection bug. Over the
-        // unlockedAt (C3b) AND scheduleActiveUntil (C5b, SD1) dimensions too.
+        // unlockedAt (C3b), scheduleActiveUntil (C5b, SD1) AND scheduleArmed (C5b, c2)
+        // dimensions too - the two EffectiveExit BODIES are byte-parity, so passing the
+        // SAME scheduleArmed to both must always agree (the exact-vs-over-approx difference
+        // is in the CALLERS, pinned separately in ScheduleTests).
         foreach (var until in new[] { PastUntil, FutureUntil, "garbage", "" })
             foreach (var coolOff in new[] { PastCoolOff, FutureCoolOff, "garbage", "" })
                 foreach (var unlocked in new[] { "", Unlocked })
                     foreach (var schedule in new[] { "", ScheduleOpen, ScheduleClosed, "garbage" })
                         foreach (var hw in new[] { HwText, "garbage", "" })
                             foreach (var mac in new[] { true, false })
-                                Assert.Equal(
-                                    monkmode.Service1.EffectiveExit(until, coolOff, unlocked, schedule, hw, 5, mac),
-                                    mm_guard.Guardian.EffectiveExit(until, coolOff, unlocked, schedule, hw, 5, mac));
+                                foreach (var armed in new[] { true, false })
+                                    Assert.Equal(
+                                        monkmode.Service1.EffectiveExit(until, coolOff, unlocked, schedule, hw, 5, mac, armed),
+                                        mm_guard.Guardian.EffectiveExit(until, coolOff, unlocked, schedule, hw, 5, mac, armed));
     }
 
     [Fact]
@@ -359,22 +363,25 @@ public class EffectiveExitTests
         // The tick heartbeat lifts via ClassifyHeartbeat; OnStart and the
         // guardian go through EffectiveExit. Pin that the two formulations can
         // never drift: Lift <=> EffectiveExit, over the whole input table
-        // including the code-unlock (C3b) and schedule-hold (C5b, SD1) arms.
+        // including the code-unlock (C3b), schedule-hold (C5b, SD1) and armed-
+        // between-windows (C5b, c2) arms.
         foreach (var until in new[] { PastUntil, FutureUntil, "garbage", "" })
             foreach (var coolOff in new[] { PastCoolOff, FutureCoolOff, "garbage", "" })
                 foreach (var unlocked in new[] { "", Unlocked })
                     foreach (var schedule in new[] { "", ScheduleOpen, ScheduleClosed, "garbage" })
                         foreach (var mac in new[] { true, false })
-                        {
-                            var lift = monkmode.Service1.ClassifyHeartbeat(
-                                mac,
-                                monkmode.Service1.BlockHasExpired(until, Hw, 5),
-                                monkmode.Service1.CoolOffElapsedTime(coolOff, HwText),
-                                monkmode.Service1.PartnerUnlocked(unlocked),
-                                monkmode.Service1.ScheduleActive(schedule, HwText))
-                                == monkmode.Service1.HeartbeatAction.Lift;
-                            Assert.Equal(monkmode.Service1.EffectiveExit(until, coolOff, unlocked, schedule, HwText, 5, mac), lift);
-                        }
+                            foreach (var armed in new[] { true, false })
+                            {
+                                var lift = monkmode.Service1.ClassifyHeartbeat(
+                                    mac,
+                                    monkmode.Service1.BlockHasExpired(until, Hw, 5),
+                                    monkmode.Service1.CoolOffElapsedTime(coolOff, HwText),
+                                    monkmode.Service1.PartnerUnlocked(unlocked),
+                                    monkmode.Service1.ScheduleActive(schedule, HwText),
+                                    armed)
+                                    == monkmode.Service1.HeartbeatAction.Lift;
+                                Assert.Equal(monkmode.Service1.EffectiveExit(until, coolOff, unlocked, schedule, HwText, 5, mac, armed), lift);
+                            }
     }
 }
 
@@ -407,7 +414,7 @@ public class CoolOffEndToEndTests
         Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
             monkmode.Service1.ClassifyHeartbeat(true,
                 monkmode.Service1.BlockHasExpired(FutureUntil, T0, 5),
-                monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false));
+                monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false, scheduleArmed: false));
 
         // 359 honest ticks (3590s): still waiting, still enforced.
         for (int i = 1; i <= 359; i++)
@@ -421,12 +428,12 @@ public class CoolOffEndToEndTests
         Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
             monkmode.Service1.ClassifyHeartbeat(true,
                 monkmode.Service1.BlockHasExpired(FutureUntil, DateTime.Parse(hw, EnCa), 5),
-                monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false));
+                monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false, scheduleArmed: false));
 
         // And the guardian agrees (stands down; never resurrects the service).
-        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true));
+        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false));
         Assert.False(mm_guard.Guardian.ShouldRestartService(
-            blockActive: !mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true),
+            blockActive: !mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false),
             serviceRunning: false));
     }
 
@@ -442,7 +449,7 @@ public class CoolOffEndToEndTests
         var jumped = monkmode.Service1.NextHighWater(hw, T0.AddHours(2).ToString(EnCa), Ceiling);
         Assert.Equal(hw, jumped); // the jump was refused
         Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, jumped));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", jumped, 5, macValid: true));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", jumped, 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
@@ -490,7 +497,7 @@ public class CoolOffEndToEndTests
         // advances it): the deadline is still ~55 min of UPTIME away - no lift,
         // regardless of how long the machine was off (B4: the boot gap is a
         // ForwardJump and is never credited).
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", hw, 0, macValid: true));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", hw, 0, macValid: true, scheduleArmed: false));
         var bootCandidate = monkmode.Service1.NextHighWater(hw, T0.AddHours(2).ToString(EnCa), Ceiling);
         Assert.Equal(hw, bootCandidate); // the 2h off-time gap is refused
 
@@ -528,9 +535,9 @@ public class CoolOffEndToEndTests
         Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
             monkmode.Service1.ClassifyHeartbeat(macValid,
                 monkmode.Service1.BlockHasExpired(FutureUntil, T0, 5),
-                monkmode.Service1.CoolOffElapsedTime(forgedDeadline, hw), false, false));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, forgedDeadline, "", "", hw, 5, macValid));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, forgedDeadline, "", "", hw, 5, macValid));
+                monkmode.Service1.CoolOffElapsedTime(forgedDeadline, hw), false, false, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, forgedDeadline, "", "", hw, 5, macValid, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, forgedDeadline, "", "", hw, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -555,7 +562,7 @@ public class CoolOffEndToEndTests
         Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
             monkmode.Service1.ClassifyHeartbeat(true,
                 monkmode.Service1.BlockHasExpired(FutureUntil, DateTime.Parse(hw, EnCa), 5),
-                monkmode.Service1.CoolOffElapsedTime("", hw), false, false));
+                monkmode.Service1.CoolOffElapsedTime("", hw), false, false, scheduleArmed: false));
     }
 
     [Fact]

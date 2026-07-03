@@ -411,9 +411,9 @@ public class ConfigIntegrityTests
                 monkmode.Service1.BlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5),
                 monkmode.Service1.CoolOffElapsedTime(pastCoolOff, storedHw),
                 monkmode.Service1.PartnerUnlocked(forgedUnlock),
-                monkmode.Service1.ScheduleActive("", storedHw)));
-        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid));
-        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid));
+                monkmode.Service1.ScheduleActive("", storedHw), scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
     }
 }
 

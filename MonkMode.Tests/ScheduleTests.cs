@@ -65,6 +65,23 @@ public class ScheduleConstTests
         // WITHOUT a canonical bump. A retune is a single loud edit here.
         Assert.Equal("v1", monkmode.Service1.ScheduleSpecGrammarVersion);
     }
+
+    // C5b (c2): the schedule-only past-[Time] Until SENTINEL (design §4B). It must be a REAL
+    // en-CA datetime that parses, be clearly PAST (so BlockHasExpired(sentinel) is always True
+    // -> BlockHeld collapses to its ScheduleActive disjunct, fixing P1's self-heal latch), and
+    // be STABLE (a fixed literal, not an arm-time-now that would drift on every re-stamp). The
+    // CLI (c3) writes exactly this value; a CLI<->service parity test will pin the copies then.
+    [Fact]
+    public void ScheduleOnlyExpiredUntil_IsAFixedClearlyPastEnCaDatetime()
+    {
+        var enCa = new CultureInfo("en-CA");
+        Assert.Equal("1970-01-01 00:00:00", monkmode.Service1.ScheduleOnlyExpiredUntil);
+        // Parses under en-CA (so BlockHasExpired/EffectiveExit read it, never fail-closed-hold on it).
+        Assert.True(DateTime.TryParse(monkmode.Service1.ScheduleOnlyExpiredUntil, enCa, DateTimeStyles.None, out _));
+        // Always reads EXPIRED, for any realistic HighWater (hugely negative DateDiff <= grace).
+        Assert.True(monkmode.Service1.BlockHasExpired(monkmode.Service1.ScheduleOnlyExpiredUntil, new DateTime(2026, 7, 3, 12, 0, 0), 5));
+        Assert.True(monkmode.Service1.BlockHasExpired(monkmode.Service1.ScheduleOnlyExpiredUntil, new DateTime(1970, 1, 2, 0, 0, 0), 5));
+    }
 }
 
 public class ParseScheduleTests
@@ -969,10 +986,10 @@ public class ScheduleTickDecisionEndToEndTests
         string elapsedCoolOff = t0.AddHours(-1).ToString(EnCa);
         string unlockedCode = t0.AddMinutes(-5).ToString(EnCa);
 
-        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true));
-        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true));
+        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true, scheduleArmed: false));
         // Control: no window -> the same expired/elapsed/unlocked state LIFTS.
-        Assert.True(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, "", hw, 5, macValid: true));
+        Assert.True(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, "", hw, 5, macValid: true, scheduleArmed: false));
     }
 }
 
@@ -1743,5 +1760,162 @@ public class ScheduleSnapshotTamperFreezeTests
             Assert.Equal(user, monkmode.Service1.StripMonkModeBlock(written!));
         }
         finally { Cleanup(snap); }
+    }
+}
+
+// ===== C5b sub-slice (c2): the schedule-only TEARDOWN + service/guardian LIFECYCLE =====
+//
+// c2 closes P1 and the §3 trap. A schedule-only block has no manual duration, so the CLI (c3)
+// writes a PAST [Time] Until SENTINEL (ScheduleOnlyExpiredUntil, §4B) - which makes BlockHeld
+// track ScheduleActive (self-heals idle between windows, not latched forever). But a past Until
+// alone is a TRAP: the old binary Restamp/Lift model would Lift->stopMe at the first window's
+// close and the recurring schedule would die. c2 adds the DERIVED scheduleArmed signal (§4C)
+// folded into ClassifyHeartbeat / Service1.EffectiveExit / Guardian.EffectiveExit, giving the
+// third lifecycle state: BETWEEN-windows (armed) = Restamp (stay alive), TORN-DOWN (Spec cleared
+// -> not armed) = Lift -> stopMe. The pure gate arms (Restamp-when-armed, Lift-when-cleared,
+// open-window out-ranks, macValid-first, Lift<=>EffectiveExit, service<->guardian parity across
+// the armed dimension) are pinned in HeartbeatRestampTests + CoolOffTests. These tests pin the
+// SCHEDULE-SPECIFIC half: the sentinel, the caller's scheduleArmed DERIVATION (service exact vs
+// guardian over-approx), and the between-windows / pre-window / cleared lifecycle end-to-end
+// through the real gates. Pure, temp-path-free: hand-built schedule-only ini STATE (Until =
+// sentinel, ActiveUntil, Spec) fed to the gates - never arms a block, never touches live paths.
+public class ScheduleArmedLifecycleTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private const string LiveSpec = "v1;12345:0900-1700;sites=x.com;apps=";   // Mon-Fri 09:00-17:00, >=1 window
+    private static string Sentinel => monkmode.Service1.ScheduleOnlyExpiredUntil;
+
+    // The scheduleArmed the SERVICE derives at the tick/OnStart: macValid AndAlso the Spec parses
+    // to >=1 window. A real Spec is armed; a cleared ("") or wholly-malformed Spec is not (the
+    // terminal-teardown trigger). This is the exact predicate wired at Service1.vb tick + OnStart.
+    [Theory]
+    [InlineData("v1;12345:0900-1700;sites=x.com;apps=", true)]
+    [InlineData("v1;7:1000-1400;sites=x.com", true)]
+    [InlineData("", false)]                       // schedule --clear
+    [InlineData("garbage", false)]                // unparseable -> inert
+    [InlineData("v1;99:9999-0000;sites=x", false)] // every window malformed -> 0 windows
+    public void ServiceScheduleArmed_IsExact_ParseScheduleHasAWindow(string spec, bool expectedArmed)
+    {
+        // Exercises the REAL production helper (wired at the tick + OnStart), not a mirror:
+        // macValid AndAlso the Spec parses to >=1 window.
+        Assert.Equal(expectedArmed, monkmode.Service1.ScheduleArmed(macValid: true, spec));
+        // ...and a tampered/frozen config (macValid=False) is NEVER armed, whatever the Spec.
+        Assert.False(monkmode.Service1.ScheduleArmed(macValid: false, spec));
+    }
+
+    // The guardian avoids a 4th ParseSchedule copy (design §4C) by OVER-APPROXIMATING armed as
+    // "Spec non-empty". For a real Spec and for a cleared Spec, exact and over-approx AGREE. They
+    // DIVERGE only on a garbage NON-EMPTY Spec: the service (exact) reads NOT armed while the
+    // guardian (over-approx) reads armed - the fail-SAFE direction (the guardian only over-guards;
+    // it can never stand down EARLY, only delay its stand-down until --clear blanks the Spec). That
+    // divergent input is unreachable from the CLI (c3 validates the Spec before it stamps a MAC),
+    // and a MAC-valid garbage Spec needs the attacker-known key (the standing B7/B10 residual).
+    [Fact]
+    public void GuardianScheduleArmed_OverApprox_AgreesExceptFailSafeOnGarbage()
+    {
+        // Both derivations exercised through the REAL helpers (service EXACT vs guardian OVER-APPROX).
+        // Real Spec: both armed.
+        Assert.True(monkmode.Service1.ScheduleArmed(true, LiveSpec));
+        Assert.True(mm_guard.Guardian.ScheduleArmed(true, LiveSpec));
+        // Cleared Spec: both NOT armed (the terminal-teardown trigger agrees on both sides).
+        Assert.False(monkmode.Service1.ScheduleArmed(true, ""));
+        Assert.False(mm_guard.Guardian.ScheduleArmed(true, ""));
+        // Garbage NON-empty Spec: service NOT armed, guardian armed = the documented fail-SAFE
+        // divergence (a parsed window implies a non-empty Spec, so guardian-armed superset
+        // service-armed => the guardian only ever OVER-guards, never an early stand-down).
+        Assert.False(monkmode.Service1.ScheduleArmed(true, "garbage"));   // exact: 0 windows
+        Assert.True(mm_guard.Guardian.ScheduleArmed(true, "garbage"));    // over-approx: non-empty
+        // Both null-/whitespace-safe (=> not armed) and macValid-gated (a frozen config => not armed).
+        Assert.False(mm_guard.Guardian.ScheduleArmed(true, "   "));
+        Assert.False(mm_guard.Guardian.ScheduleArmed(true, null!));
+        Assert.False(monkmode.Service1.ScheduleArmed(true, null!));
+        Assert.False(mm_guard.Guardian.ScheduleArmed(false, LiveSpec));
+        Assert.False(monkmode.Service1.ScheduleArmed(false, LiveSpec));
+    }
+
+    // THE c2 KEYSTONE (P1 + §3 trap) end-to-end through the real gates. A schedule-only block:
+    // manual Until = the past sentinel (always expired), ActiveUntil="" between windows. While the
+    // Spec is armed the heartbeat RESTAMPS (service stays alive) and EffectiveExit HOLDS (OnStart/
+    // guardian stay alive) - NOT stopMe. schedule --clear blanks the Spec -> not armed -> the SAME
+    // state now Lifts/exits = the clean terminal teardown. Service and guardian agree throughout.
+    [Fact]
+    public void ScheduleOnlyBlock_HeldBetweenWindows_TornDownOnlyWhenSpecCleared()
+    {
+        // A Friday 20:00 - after the 17:00 close, before Monday's window: genuinely between windows.
+        var now = new DateTime(2026, 7, 3, 20, 0, 0);
+        string hw = now.ToString(EnCa);
+        bool expiredSentinel = monkmode.Service1.BlockHasExpired(Sentinel, now, 5);
+        Assert.True(expiredSentinel);                                    // the manual portion always reads expired
+        Assert.False(monkmode.Service1.ScheduleActive("", hw));         // no window open (ActiveUntil="")
+
+        // ARMED (Spec has windows) -> RESTAMP (stay alive), never Lift.
+        bool armed = monkmode.Service1.ScheduleArmed(true, LiveSpec);
+        Assert.True(armed);
+        Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
+            monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: expiredSentinel,
+                coolOffElapsed: false, codeUnlocked: false,
+                scheduleActive: monkmode.Service1.ScheduleActive("", hw), scheduleArmed: armed));
+        // OnStart / guardian HOLD it alive (EffectiveExit False) - service and guardian agree.
+        Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: armed));
+        Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: armed));
+
+        // schedule --clear -> Spec="" -> NOT armed -> the SAME state now tears down (Lift -> stopMe).
+        bool clearedArmed = monkmode.Service1.ScheduleArmed(true, "");
+        Assert.False(clearedArmed);
+        Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
+            monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: expiredSentinel,
+                coolOffElapsed: false, codeUnlocked: false,
+                scheduleActive: monkmode.Service1.ScheduleActive("", hw), scheduleArmed: clearedArmed));
+        Assert.True(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: clearedArmed));
+        Assert.True(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: clearedArmed));
+    }
+
+    // §4C OnStart trap: a schedule armed at 08:00 (past-Until sentinel, Spec present, the 09:00
+    // window NOT yet open) must NOT be stopMe'd the instant the service starts. OnStart's single
+    // lift path is EffectiveExit, decided in the STORED HighWater frame; scheduleArmed=True holds
+    // it alive to await the window. Without the guard (control: not armed) it would exit at boot.
+    [Fact]
+    public void OnStart_HoldsAFreshlyArmedPreWindowScheduleOnlyBlock()
+    {
+        var boot = new DateTime(2026, 7, 3, 8, 0, 0);   // 08:00, before a 09:00-17:00 window
+        string storedHw = boot.ToString(EnCa);
+        bool armed = monkmode.Service1.ScheduleArmed(true, LiveSpec);
+        Assert.True(armed);
+        // Held alive (grace 0, the stricter OnStart grace) despite the expired sentinel + no open window.
+        Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", storedHw, 0, macValid: true, scheduleArmed: armed));
+        Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", storedHw, 0, macValid: true, scheduleArmed: armed));
+        // Control: the SAME boot state with NO schedule (not armed) WOULD stopMe (the sentinel is expired).
+        Assert.True(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", storedHw, 0, macValid: true, scheduleArmed: false));
+    }
+
+    // Regression: a plain MANUAL block has no Spec, so scheduleArmed is always False and behaviour
+    // is byte-identical to pre-c2 - a future Until holds, a past Until lifts. c2 adds nothing to a
+    // block without a schedule.
+    [Fact]
+    public void ManualOnlyBlock_Unaffected_WhenScheduleArmedFalse()
+    {
+        var now = new DateTime(2026, 7, 3, 12, 0, 0);
+        string hw = now.ToString(EnCa);
+        bool armed = monkmode.Service1.ScheduleArmed(true, "");   // no Spec -> not armed
+        Assert.False(armed);
+        Assert.False(monkmode.Service1.EffectiveExit(now.AddHours(3).ToString(EnCa), "", "", "", hw, 5, macValid: true, scheduleArmed: armed));  // future Until holds
+        Assert.True(monkmode.Service1.EffectiveExit(now.AddHours(-1).ToString(EnCa), "", "", "", hw, 5, macValid: true, scheduleArmed: armed));  // past Until lifts
+    }
+
+    // A tampered/frozen config (macValid False) never reads as armed and never lifts regardless of
+    // scheduleArmed - the macValid gate is first on every gate (B7 freeze out-ranks the lifecycle).
+    [Fact]
+    public void InvalidMac_FreezeOutranksScheduleArmed()
+    {
+        var now = new DateTime(2026, 7, 3, 20, 0, 0);
+        string hw = now.ToString(EnCa);
+        foreach (var armed in new[] { true, false })
+        {
+            Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: false, scheduleArmed: armed));
+            Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: false, scheduleArmed: armed));
+            Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
+                monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true,
+                    coolOffElapsed: false, codeUnlocked: false, scheduleActive: false, scheduleArmed: armed));
+        }
     }
 }
