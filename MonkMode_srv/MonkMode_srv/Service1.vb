@@ -225,7 +225,9 @@ Public Class Service1
                 ' stay alive to await its window - without this the single lift path below would
                 ' stopMe() it the instant the service starts (the §4C OnStart trap). EXACT
                 ' derivation via ScheduleArmed (EXACT, like the tick); "" Spec on every existing
-                ' block => False => inert. Decided in the STORED HighWater frame (OnStart never advances).
+                ' block => False => inert. ScheduleArmed is frame-independent (Spec + macValid
+                ' only, no HighWater input); the EffectiveExit below decides in the STORED frame
+                ' (storedHw - OnStart never advances the high-water mark).
                 Dim scheduleArmedAtStart As Boolean = ScheduleArmed(macValidAtStart, scheduleSpecAtStart)
                 If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart, scheduleArmedAtStart) Then
                     ' The ONLY OnStart path that may lift the block: a valid B7 MAC
