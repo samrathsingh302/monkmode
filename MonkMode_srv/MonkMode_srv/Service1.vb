@@ -865,6 +865,19 @@ Public Class Service1
             iniScheduleActiveUntil = ProcessScheduleWindows(iniScheduleActiveUntil, iniScheduleSpec, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
         End If
 
+        ' C5b (b3-i/b3-ii): the effective schedule state for THIS tick's ENFORCEMENT, computed
+        ' ONCE now that iniScheduleActiveUntil is settled (the post-poll value when TimeChanging=
+        ' "no", else the read value - the self-heal below runs every tick regardless) and SHARED by
+        ' the hosts self-heal UNION (b3-ii, below) and the app-kill UNION (b3-i). ScheduleActive is
+        ' deliberately NOT macValid-gated here (see the app-kill loop / the b3-i verifier's P3): a
+        ' union only ever ADDS enforcement, so a frozen/forged config can only ever block MORE,
+        ' never lift. activeSchedule is parsed ONCE and only while active (the inert path does no
+        ' extra work); it is never Nothing when scheduleActiveNow is True (ParseSchedule always
+        ' returns a non-null ParsedSchedule). Every block today reads iniScheduleActiveUntil="" ->
+        ' scheduleActiveNow=False -> both unions degenerate to today's exact behaviour.
+        Dim scheduleActiveNow As Boolean = ScheduleActive(iniScheduleActiveUntil, newHw)
+        Dim activeSchedule As ParsedSchedule = If(scheduleActiveNow, ParseSchedule(iniScheduleSpec), Nothing)
+
         ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
         ' we no longer hold the file open, so this is how the lock is maintained).
         Try
@@ -879,35 +892,48 @@ Public Class Service1
         ' entries from the snapshot the CLI persisted next to the exe.
         ' B4: asOf is newHwAsOf (the trusted high-water mark), NOT DateTime.Now,
         ' so a clock-forward can't flip this to "expired" and stop the repair.
-        ' C5b (b3-i): the ENFORCE-WHILE gate now folds in the schedule hold via BlockHeld,
-        ' so an open window keeps the manual block's snapshot sites repaired past manual
-        ' expiry (the union held until the longest end, SD2). The union TARGET - adding the
-        ' schedule's OWN site entries (snapshot union scheduleSiteEntries, incl. a
-        ' schedule-only block that has no snapshot) - is sub-slice (b3-ii): this slice only
-        ' widens WHEN the repair fires, not WHAT it repairs, so a no-schedule block
-        ' (iniScheduleActiveUntil="") is byte-identical (BlockHeld reduces to
-        ' Not EffectiveBlockHasExpired). Try/Catch so a transient lock never crashes the service.
+        ' C5b (b3-ii): while a scheduled window is open the repair TARGET is the UNION of the
+        ' manual snapshot's entries and the schedule's OWN synthesised site entries
+        ' (EffectiveHostsBlock, design §6.3) - the service's FIRST stateful hosts writes for a
+        ' block it armed itself. A SCHEDULE-ONLY block has no snapshot, so the synthesised schedule
+        ' entries ARE the block: the gate no longer requires a snapshot FILE - it enters whenever
+        ' HELD and the computed target is non-empty. A no-schedule block (scheduleActiveNow=False)
+        ' makes EffectiveHostsBlock return the snapshot VERBATIM, so with a snapshot present this
+        ' is RepairHostsBlock(hostsText, snapshot) - BYTE-IDENTICAL to before - and with no
+        ' snapshot the target is "" and nothing is written (also as before). Try/Catch so a
+        ' transient lock never crashes the service.
         Try
             Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) AndAlso My.Computer.FileSystem.FileExists(snapshotPath) Then
-                Dim hostsText As String = ""
-                If My.Computer.FileSystem.FileExists(hostDirS) Then
-                    hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
+            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
+                ' The manual block's snapshot (the CLI persisted it at arm), or "" for a
+                ' schedule-only block that never manually armed (no snapshot file on disk).
+                Dim snapshotBlock As String = ""
+                If My.Computer.FileSystem.FileExists(snapshotPath) Then
+                    snapshotBlock = My.Computer.FileSystem.ReadAllText(snapshotPath)
                 End If
-                Dim repaired As String = RepairHostsBlock(hostsText, My.Computer.FileSystem.ReadAllText(snapshotPath))
-                If repaired IsNot Nothing Then
-                    If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbNormal)
-                    Try
-                        ' C1: atomic write (temp + rename) - this self-heal fires
-                        ' every 10s tick, so an in-place truncate-rewrite here was
-                        ' opening a blank-hosts/lost-user-entries window constantly.
-                        AtomicHosts.WriteAtomic(hostDirS, repaired)
-                    Finally
-                        ' Even if the write throws mid-way, never leave hosts
-                        ' writable (a writable hosts is the fail-OPEN state the
-                        ' DNS client would then re-read around).
-                        SetAttr(hostDirS, vbReadOnly)
-                    End Try
+                ' The effective marker block for this tick: snapshot UNION schedule sites while a
+                ' window is open, else the snapshot verbatim (the no-schedule byte-identity).
+                Dim expectedBlock As String = EffectiveHostsBlock(snapshotBlock, If(scheduleActiveNow, activeSchedule.Sites, Nothing), scheduleActiveNow)
+                If Not String.IsNullOrWhiteSpace(expectedBlock) Then
+                    Dim hostsText As String = ""
+                    If My.Computer.FileSystem.FileExists(hostDirS) Then
+                        hostsText = My.Computer.FileSystem.ReadAllText(hostDirS)
+                    End If
+                    Dim repaired As String = RepairHostsBlock(hostsText, expectedBlock)
+                    If repaired IsNot Nothing Then
+                        If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbNormal)
+                        Try
+                            ' C1: atomic write (temp + rename) - this self-heal fires
+                            ' every 10s tick, so an in-place truncate-rewrite here was
+                            ' opening a blank-hosts/lost-user-entries window constantly.
+                            AtomicHosts.WriteAtomic(hostDirS, repaired)
+                        Finally
+                            ' Even if the write throws mid-way, never leave hosts
+                            ' writable (a writable hosts is the fail-OPEN state the
+                            ' DNS client would then re-read around).
+                            SetAttr(hostDirS, vbReadOnly)
+                        End Try
+                    End If
                 End If
             End If
         Catch ex As Exception
@@ -984,25 +1010,18 @@ Public Class Service1
         Catch ex As Exception
         End Try
 
-        ' C5b (b3-i): the effective app-kill set is the manual [Process] List, PLUS - only
-        ' while a scheduled window is OPEN (ScheduleActive over the MAC-covered [Schedule]
-        ' ActiveUntil) - the schedule's own apps (design §6.3 app-kill union, SD2). Gated on
-        ' ScheduleActive so a no-schedule block (iniScheduleActiveUntil="" - every block today
-        ' until the CLI writes a Spec in slice (c)) is BYTE-IDENTICAL: EffectiveKillList returns
-        ' iniProcessList verbatim, so the loop below kills exactly what it does today. The Spec
-        ' is parsed only while active (the inert path does no extra work). Computed once per tick.
-        ' NOT gated on macValid (unlike BlockHeld's `macValid AndAlso ScheduleActive` arm): this
-        ' loop has no `Not EffectiveBlockHasExpired` base gate, so gating the schedule arm on
-        ' macValid would DROP schedule-app kills under a tampered/frozen config (fail-OPEN).
-        ' Ungated, a frozen config keeps killing the schedule's apps, and a forged ActiveUntil can
-        ' only ever ADD kills, never lift (fail-closed - the tool ethos). SCOPE: this is only the
-        ' SERVICE session-0 kill loop; the notifier's user-session loop (MM_notify\Form1.vb
+        ' C5b (b3-i): the effective app-kill set is the manual [Process] List, PLUS - only while a
+        ' scheduled window is OPEN - the schedule's own apps (design §6.3 app-kill union, SD2),
+        ' from the SHARED scheduleActiveNow/activeSchedule computed once above (the same values the
+        ' hosts UNION uses; deliberately NOT macValid-gated - see that hoist's note). A no-schedule
+        ' block (scheduleActiveNow=False) makes EffectiveKillList return iniProcessList verbatim,
+        ' so the loop below kills exactly what it does today (BYTE-IDENTICAL). SCOPE: this is only
+        ' the SERVICE session-0 kill loop; the notifier's user-session loop (MM_notify\Form1.vb
         ' appKillTimer_Tick, SessionId<>0) still keys off iniProcessList alone, so blocking a
         ' schedule's USER-session apps (browsers/games) needs the same union THERE - a follow-up
         ' slice (b3-iii, see handoff), exactly as the manual block's app-kill is split today.
-        Dim scheduleActiveNow As Boolean = ScheduleActive(iniScheduleActiveUntil, newHw)
         Dim killList As String = EffectiveKillList(iniProcessList,
-                                                   If(scheduleActiveNow, ParseSchedule(iniScheduleSpec).Apps, Nothing),
+                                                   If(scheduleActiveNow, activeSchedule.Apps, Nothing),
                                                    scheduleActiveNow)
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
@@ -1574,6 +1593,92 @@ Public Class Service1
         For Each app As String In scheduleApps
             sb.Append("|"c)
             sb.Append(app)
+        Next
+        Return sb.ToString()
+    End Function
+
+    ' ---- C5b (b3-ii): the hosts self-heal UNION (design §6.3, the meaty stateful half) ----
+    '
+    ' While a scheduled window is open the per-tick hosts self-heal repairs the marker block to
+    ' the UNION of the manual block's snapshot entries and the schedule's OWN site entries -
+    ' synthesised HERE in the CLI's exact hosts-line format, so a schedule-only block (no manual
+    ' arm -> no monkmode_hosts.block snapshot) is still enforced and an overlap block over-blocks
+    ' the union (SD2). The two synthesisers are a BYTE-FOR-BYTE parity copy of the CLI's
+    ' Blocker.NormalizeDomain / BuildHostsEntries (MonkMode and monkmode are separate assemblies
+    ' that can't reference one another - the same reason StripMonkModeBlock / ConfigIntegrity /
+    ' AtomicHosts are duplicated and parity-pinned); a CLI<->service parity test pins them equal,
+    ' so the synthesised block matches what the CLI would write for the same sites - and
+    ' stopMe()'s StripMonkModeBlock strips the whole marker block cleanly regardless of contents
+    ' (only the marker block is ever touched - the paramount no-data-loss fence).
+
+    ' The MonkMode-owned hosts marker line (the same literal StripMonkModeBlock/stopMe/CLI match).
+    Friend Const HostsMarker As String = "#### MonkMode Entries ####"
+
+    ' Parity copy of Blocker.NormalizeDomain: trim + lowercase, strip a pasted scheme/path.
+    Private Shared Function NormalizeDomain(ByVal d As String) As String
+        d = d.Trim().ToLowerInvariant()
+        ' strip scheme and any path if a URL was pasted
+        If d.Contains("://") Then d = d.Substring(d.IndexOf("://") + 3)
+        Dim slash As Integer = d.IndexOf("/"c)
+        If slash >= 0 Then d = d.Substring(0, slash)
+        Return d.Trim()
+    End Function
+
+    ' Parity copy of Blocker.BuildHostsEntries: one "127.0.0.1 <domain>" line per site (plus a
+    ' "127.0.0.1 www.<domain>" line for a bare second-level domain), each CRLF-terminated. Uses
+    ' 127.0.0.1 (NOT 0.0.0.0 - Windows' resolver ignores 0.0.0.0 hosts entries). Byte-for-byte
+    ' identical to the CLI so the synthesised schedule block matches a manual block's format.
+    ' Friend Shared so the CLI<->service parity test (and EffectiveHostsBlock) can call it.
+    Friend Shared Function BuildHostsEntries(ByVal domains As IEnumerable(Of String)) As String
+        Dim sb As New System.Text.StringBuilder
+        For Each raw As String In domains
+            Dim d As String = NormalizeDomain(raw)
+            If d = "" Then Continue For
+            sb.Append("127.0.0.1 ").Append(d).Append(vbCrLf)
+            If Not d.StartsWith("www.") AndAlso d.IndexOf("."c) = d.LastIndexOf("."c) Then
+                ' bare second-level domain -> also block www.
+                sb.Append("127.0.0.1 www.").Append(d).Append(vbCrLf)
+            End If
+        Next
+        Return sb.ToString()
+    End Function
+
+    ' design §6.3: the effective hosts marker block to repair THIS tick. While a scheduled window
+    ' is open (scheduleActive) the target is snapshotBlock UNION the schedule's own synthesised
+    ' site entries; otherwise (the inert path - every block today until the CLI writes a Spec in
+    ' slice (c)) it is snapshotBlock VERBATIM, so a no-schedule block is BYTE-IDENTICAL to before.
+    ' Cases:
+    '   - not active / no schedule sites / all sites normalise away -> snapshotBlock verbatim;
+    '   - schedule-only (no manual snapshot -> "") -> marker + synthesised entries (the block IS
+    '     the schedule's sites - byte-identical to Blocker.BuildMonkModeBlock(sites));
+    '   - overlap (a manual snapshot exists) -> the snapshot verbatim, then each schedule entry
+    '     LINE not already present appended (dedup line-wise, order-preserving, marker once).
+    ' Rides the existing RepairHostsBlock/AtomicHosts machinery (no new writer): the target is
+    ' DETERMINISTIC, so once written it is found intact next tick and RepairHostsBlock no-churns;
+    ' stopMe()'s StripMonkModeBlock removes the whole marker block at the effective end (NO data
+    ' loss - only the marker block is ever touched). Pure + Shared (unit-tested).
+    Friend Shared Function EffectiveHostsBlock(ByVal snapshotBlock As String, ByVal scheduleSites As List(Of String), ByVal scheduleActive As Boolean) As String
+        If Not scheduleActive OrElse scheduleSites Is Nothing OrElse scheduleSites.Count = 0 Then Return snapshotBlock
+        Dim scheduleEntries As String = BuildHostsEntries(scheduleSites)
+        If scheduleEntries = "" Then Return snapshotBlock   ' all sites normalised away -> nothing to add
+        ' Schedule-only block: the synthesised entries ARE the block (matches the CLI's layout for
+        ' the same sites, so the expiry strip removes it exactly as it would a manual block's).
+        If String.IsNullOrWhiteSpace(snapshotBlock) Then Return HostsMarker & vbCrLf & scheduleEntries
+        ' Overlap: snapshot verbatim + each NEW schedule entry line. A line-set (seeded from the
+        ' snapshot's lines) gives a precise, non-substring dedup so a shared site is never
+        ' duplicated and the union is stable tick-to-tick.
+        Dim present As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each ln As String In snapshotBlock.Split(New String() {vbCrLf, vbLf}, StringSplitOptions.None)
+            present.Add(ln)
+        Next
+        Dim sb As New System.Text.StringBuilder(snapshotBlock)
+        ' The snapshot ends in a line terminator (BuildMonkModeBlock = marker & CRLF & CRLF-
+        ' terminated entries); if a hand-tampered snapshot somehow doesn't, add one so an appended
+        ' line can't fuse onto the last.
+        If sb.Length > 0 AndAlso Not snapshotBlock.EndsWith(vbCrLf, StringComparison.Ordinal) _
+           AndAlso Not snapshotBlock.EndsWith(vbLf, StringComparison.Ordinal) Then sb.Append(vbCrLf)
+        For Each ln As String In scheduleEntries.Split(New String() {vbCrLf}, StringSplitOptions.RemoveEmptyEntries)
+            If present.Add(ln) Then sb.Append(ln).Append(vbCrLf)   ' Add returns True only for a NEW line
         Next
         Return sb.ToString()
     End Function

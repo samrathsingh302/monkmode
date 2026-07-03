@@ -1083,3 +1083,207 @@ public class EffectiveKillListTests
             monkmode.Service1.EffectiveKillList("chrome.exe", Apps("discord.exe"), scheduleActive: true));
     }
 }
+
+// ===== C5b sub-slice (b3-ii): the hosts self-heal UNION =====
+//
+// The meaty stateful half of design §6.3 - the service's FIRST stateful hosts writes for a block
+// it armed itself. While a scheduled window is open the per-tick hosts self-heal repairs the
+// marker block to the UNION of the manual block's snapshot entries and the schedule's OWN site
+// entries, synthesised in the CLI's exact hosts-line format:
+//   - the synthesiser (Service1.BuildHostsEntries) is a byte-for-byte PARITY copy of the CLI's
+//     Blocker.BuildHostsEntries (separate assemblies, parity-pinned like StripMonkModeBlock);
+//   - EffectiveHostsBlock computes the effective marker block: snapshot VERBATIM when inert (the
+//     no-schedule byte-identity), the synthesised entries alone for a SCHEDULE-ONLY block (no
+//     snapshot), or snapshot UNION schedule entries (line-dedup) for an OVERLAP.
+// The live tick (reading the snapshot + calling RepairHostsBlock/AtomicHosts) is the smoke-only
+// seam (fence: unit tests never touch the real hosts); its SAFETY is these pure invariants plus
+// the RepairHostsBlock/StripMonkModeBlock round-trips below - deterministic target => NO churn
+// once written, and stopMe()'s strip removes the WHOLE union cleanly (no data loss).
+
+// Blocker.BuildHostsEntries (CLI) and Service1.BuildHostsEntries (service) must be byte-for-byte
+// identical, or a schedule-only block's synthesised hosts would not match a manual block's format
+// (mis-block, or a block the expiry strip can't cleanly recognise).
+public class HostsEntriesParityTests
+{
+    [Theory]
+    [InlineData("reddit.com")]                // bare 2LD -> also gets a www. line
+    [InlineData("news.ycombinator.com")]      // subdomain (two dots) -> no www.
+    [InlineData("www.reddit.com")]            // already www. -> no extra www.
+    [InlineData("Reddit.COM")]                // uppercase -> lowercased
+    [InlineData("HTTPS://reddit.com/r/all")]  // pasted URL -> scheme + path stripped
+    [InlineData("  spaced.com  ")]            // surrounding whitespace trimmed
+    public void ServiceSynthesiser_MatchesCli_ByteForByte_SingleDomain(string domain)
+    {
+        var domains = new[] { domain };
+        Assert.Equal(MonkMode.Blocker.BuildHostsEntries(domains),
+                     monkmode.Service1.BuildHostsEntries(domains));
+    }
+
+    [Fact]
+    public void ServiceSynthesiser_MatchesCli_MultipleDomains_DropsEmpties()
+    {
+        var domains = new[] { "reddit.com", "", "news.ycombinator.com", "   ", "x.com" };
+        Assert.Equal(MonkMode.Blocker.BuildHostsEntries(domains),
+                     monkmode.Service1.BuildHostsEntries(domains));
+        // ...and a schedule-only synthesised block is byte-identical to the block the CLI would
+        // write for the same sites (marker + entries), so the marker parity is pinned too.
+        Assert.Equal(MonkMode.Blocker.BuildMonkModeBlock(domains),
+                     monkmode.Service1.EffectiveHostsBlock("", new System.Collections.Generic.List<string>(domains), scheduleActive: true));
+    }
+
+    [Fact]
+    public void EmptyDomainList_ProducesNoEntries_BothCopies()
+    {
+        var none = System.Array.Empty<string>();
+        Assert.Equal("", monkmode.Service1.BuildHostsEntries(none));
+        Assert.Equal(MonkMode.Blocker.BuildHostsEntries(none), monkmode.Service1.BuildHostsEntries(none));
+    }
+}
+
+public class EffectiveHostsBlockTests
+{
+    private const string Marker = "#### MonkMode Entries ####";
+    // A manual block's snapshot (marker + CRLF-terminated entries), exactly as the CLI persists it.
+    private static readonly string ManualSnapshot =
+        Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 www.reddit.com\r\n";
+    private static System.Collections.Generic.List<string> Sites(params string[] s) =>
+        new System.Collections.Generic.List<string>(s);
+
+    [Fact]
+    public void NotActive_ReturnsSnapshotVerbatim_ByteIdentical_EvenWithSites()
+    {
+        // The no-schedule byte-identity: with no open window the repair target is the snapshot
+        // verbatim (the SAME reference - no allocation), even if schedule sites are (defensively)
+        // passed. This is what makes every block today byte-identical to before (b3-ii inert path).
+        Assert.Same(ManualSnapshot, monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("x.com"), scheduleActive: false));
+    }
+
+    [Fact]
+    public void Active_NoScheduleSites_ReturnsSnapshotVerbatim()
+    {
+        // A window is open but the Spec lists no sites: still the snapshot verbatim (null and empty
+        // are both no-ops), so an apps-only schedule never disturbs the manual hosts block.
+        Assert.Same(ManualSnapshot, monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, null, scheduleActive: true));
+        Assert.Same(ManualSnapshot, monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites(), scheduleActive: true));
+    }
+
+    [Fact]
+    public void Active_SitesAllNormaliseAway_ReturnsSnapshotVerbatim()
+    {
+        // Sites that all normalise to "" add nothing -> snapshot verbatim (no spurious rewrite/churn).
+        Assert.Same(ManualSnapshot, monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("", "   "), scheduleActive: true));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public void ScheduleOnly_NoSnapshot_SynthesisesTheBlock_MatchesCliManualLayout(string? snapshot)
+    {
+        // A schedule-only block (no manual snapshot) synthesises its sites as THE block - byte-
+        // identical to a manual block armed with the same sites (Blocker.BuildMonkModeBlock).
+        var expected = MonkMode.Blocker.BuildMonkModeBlock(new[] { "reddit.com", "x.com" });
+        Assert.Equal(expected, monkmode.Service1.EffectiveHostsBlock(snapshot!, Sites("reddit.com", "x.com"), scheduleActive: true));
+    }
+
+    [Fact]
+    public void ScheduleOnly_SynthesisedBlock_StripsCleanly_NoDataLoss()
+    {
+        // The schedule-only block rides RepairHostsBlock into the user's own hosts and stopMe's
+        // StripMonkModeBlock removes the WHOLE marker block, handing back exactly the user content.
+        var block = monkmode.Service1.EffectiveHostsBlock("", Sites("reddit.com"), scheduleActive: true);
+        var userContent = "# my hosts\r\n127.0.0.1 my-dev-box";
+        var repaired = monkmode.Service1.RepairHostsBlock(userContent, block);
+        Assert.Equal(userContent + "\r\n" + block, repaired);
+        Assert.Equal(userContent, monkmode.Service1.StripMonkModeBlock(repaired!));
+        // No churn: an intact synthesised block repairs to null next tick.
+        Assert.Null(monkmode.Service1.RepairHostsBlock(repaired, block));
+    }
+
+    [Fact]
+    public void Overlap_UnionsSnapshotAndScheduleEntries_MarkerExactlyOnce()
+    {
+        // A manual snapshot + schedule sites: the union is the snapshot verbatim then the schedule
+        // entries, marker exactly once, every 127.0.0.1 line present.
+        var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("x.com"), scheduleActive: true);
+        Assert.StartsWith(ManualSnapshot, union);                                    // snapshot kept verbatim
+        Assert.Equal(0, union.IndexOf(Marker, System.StringComparison.Ordinal));     // marker at the top
+        Assert.Equal(union.IndexOf(Marker, System.StringComparison.Ordinal),         // ...and only once
+                     union.LastIndexOf(Marker, System.StringComparison.Ordinal));
+        Assert.Contains("127.0.0.1 x.com\r\n", union);                               // schedule site appended
+        Assert.Contains("127.0.0.1 www.x.com\r\n", union);                           // ...with its www. line
+    }
+
+    [Fact]
+    public void Overlap_SharedSite_IsNotDuplicated()
+    {
+        // reddit.com is in BOTH the manual snapshot and the schedule: the union dedups it line-wise
+        // and adds only the genuinely new x.com (extend, never duplicate).
+        var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("reddit.com", "x.com"), scheduleActive: true);
+        Assert.Equal(ManualSnapshot + "127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);
+        Assert.Equal(1, CountOccurrences(union, "127.0.0.1 reddit.com\r\n"));   // the shared line, exactly once
+    }
+
+    [Fact]
+    public void Overlap_Union_StripsCleanly_And_NoChurnOnceWritten()
+    {
+        // The safety-critical round-trip: the overlap union rides RepairHostsBlock into hosts,
+        // no-churns next tick, and stopMe's strip removes the WHOLE union (manual + schedule) at
+        // the effective end, restoring the user's content byte-for-byte (no data loss).
+        var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("x.com"), scheduleActive: true);
+        var userContent = "# my hosts\r\n127.0.0.1 my-dev-box";
+        var written = monkmode.Service1.RepairHostsBlock(userContent, union);
+        Assert.Equal(userContent + "\r\n" + union, written);
+        Assert.Null(monkmode.Service1.RepairHostsBlock(written, union));          // deterministic target -> no churn
+        Assert.Equal(userContent, monkmode.Service1.StripMonkModeBlock(written!)); // clean strip, user content intact
+    }
+
+    [Fact]
+    public void AppsOnlyManualBlock_MarkerOnlySnapshot_UnionAppendsScheduleEntries()
+    {
+        // A manual block with apps but no sites snapshots just the marker line (BuildMonkModeBlock
+        // over no domains). While a window is open the union appends the schedule's site entries
+        // after the bare marker - a valid single-marker block.
+        var markerOnly = MonkMode.Blocker.BuildMonkModeBlock(System.Array.Empty<string>());  // "marker\r\n"
+        var union = monkmode.Service1.EffectiveHostsBlock(markerOnly, Sites("x.com"), scheduleActive: true);
+        Assert.Equal(markerOnly + "127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);
+    }
+
+    [Fact]
+    public void Overlap_AllScheduleSitesAlreadyInSnapshot_AddsNothing_NoChurn()
+    {
+        // Every schedule site is already in the manual snapshot: the union adds nothing (value-
+        // equal to the snapshot), so a written block re-repairs to null (no per-tick churn).
+        var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("reddit.com"), scheduleActive: true);
+        Assert.Equal(ManualSnapshot, union);
+        var written = "# mine\r\n127.0.0.1 box\r\n" + ManualSnapshot;
+        Assert.Null(monkmode.Service1.RepairHostsBlock(written, union));
+    }
+
+    [Fact]
+    public void Overlap_SnapshotWithoutTrailingTerminator_AppendsWithoutFusingLines()
+    {
+        // A hand-tampered snapshot missing its trailing terminator: the guard adds one so the
+        // first schedule line can't FUSE onto the snapshot's last line.
+        var snapshot = Marker + "\r\n127.0.0.1 reddit.com";   // no trailing CRLF
+        var union = monkmode.Service1.EffectiveHostsBlock(snapshot, Sites("x.com"), scheduleActive: true);
+        Assert.Equal(Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);
+    }
+
+    [Fact]
+    public void Overlap_LfOnlySnapshot_DedupsAgainstLfLines_AppendsCrLf()
+    {
+        // An LF-ending snapshot (hand-edited): the line-set split on {CRLF,LF} still dedups a
+        // shared site (terminator-agnostic), and genuinely new schedule lines are appended.
+        var snapshot = Marker + "\n127.0.0.1 reddit.com\n127.0.0.1 www.reddit.com\n";
+        var union = monkmode.Service1.EffectiveHostsBlock(snapshot, Sites("reddit.com", "x.com"), scheduleActive: true);
+        Assert.Equal(snapshot + "127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);   // reddit.* not re-added
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int n = 0, i = 0;
+        while ((i = haystack.IndexOf(needle, i, System.StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+        return n;
+    }
+}
