@@ -175,6 +175,11 @@ Public Class Service1
                 ' is never credited and OnStart expiry is decided off the STORED
                 ' mark; live ticks advance it, bounded by real elapsed.
                 lastMonoMs = Environment.TickCount64
+                ' C5b (b2): seed the wall-clock jump-OVER anchor together with the monotonic
+                ' one, so the first LIVE tick after this (re)start measures wallDelta from
+                ' boot - not from the stale pre-reboot [CurrentTime] Now - and a window that
+                ' closed during the downtime stays MISSED (crux #4b), not falsely re-opened.
+                lastTickWallNow = DateTime.Now.ToString(culture)
                 Dim newHw As String = storedHw
 
                 Dim macValidAtStart As Boolean = ConfigMacIsValidForIni(iniFile)
@@ -203,6 +208,18 @@ Public Class Service1
                 ' existing block this reads "" (inert).
                 Dim scheduleActiveEncAtStart As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
                 Dim scheduleActiveAtStart As String = If(scheduleActiveEncAtStart = "", "", encryptionW.DecryptData(scheduleActiveEncAtStart))
+                ' C5b (b2) boot re-hold: re-evaluate the wall-clock windows at boot
+                ' (isBoot:=True) so a reboot that lands INSIDE a window RE-OPENS it (writes
+                ' ActiveUntil off the STORED HighWater - OnStart never advances the mark) and
+                ' the lift path below then HOLDS through it (SD1); a reboot AFTER a window
+                ' closed leaves it clear (the one intended miss, crux #4b). isBoot disables
+                ' live jump-OVER detection (no trustworthy monoElapsed across a reboot), so
+                ' lastNow/monoElapsed are unused - pass ""/0. This may Save a fresh ini (new
+                ' ActiveUntil + re-stamp); safe because the only later OnStart save
+                ' (ShouldRestampOnStart) is inert here (newHw = storedHw), so it can't clobber
+                ' this write. No Spec => inert fast path (unchanged on every existing block).
+                Dim scheduleSpecAtStart As String = iniFile.GetKeyValue("Schedule", "Spec")
+                scheduleActiveAtStart = ProcessScheduleWindows(scheduleActiveAtStart, scheduleSpecAtStart, "", DateTime.Now.ToString(culture), storedHw, 0, macValidAtStart, True)
                 If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart) Then
                     ' The ONLY OnStart path that may lift the block: a valid B7 MAC
                     ' AND (a successfully parsed, genuinely past end time OR an
@@ -556,12 +573,95 @@ Public Class Service1
         Return currentUnlockedAt
     End Function
 
+    ' C5b (b2) live wiring: the per-tick schedule window step - the sibling of
+    ' ProcessCoolOffSignals/ProcessPartnerCodeSignal, polled AFTER them (inside tickLock
+    ' while TimeChanging="no", the caller gates both), returning the post-step [Schedule]
+    ' ActiveUntil so THIS tick's heartbeat (its SD1 schedule-hold arm) decides off it. This
+    ' is the FIRST code that ever WRITES a non-empty ActiveUntil: it runs the window->
+    ' duration conversion (design §4.1/§6.1) - evaluate the wall-clock windows, convert each
+    ' open one to a HighWater-anchored deadline, extend-never-shorten into ActiveUntil
+    ' (NextScheduleActiveUntil, the pure decision), and clear it at the window's monotonic
+    ' close. currentScheduleActiveUntil/newHwText/macValid are the tick's already-loaded
+    ' state; lastNowText (the in-memory lastTickWallNow anchor from the previous tick - NOT
+    ' the stored [CurrentTime] Now, which is stale across a reboot)/nowText/monoElapsedSeconds
+    ' drive the live jump-OVER detection (§4.2); isBoot=False for a live tick (OnStart passes
+    ' True - and lastNow/monoElapsed unused - to re-hold a window a reboot lands inside).
+    '
+    ' macValid REQUIRED to act - a frozen config never has its schedule state modified or
+    ' re-stamped (fail-closed: an invalid MAC is already enforcing). The service is the SOLE
+    ' writer of ActiveUntil (the guardian only reads it), so there is no write race. Persist
+    ' ONLY on change, via PersistScheduleActiveUntil (RELOAD + TOCTOU re-validate + re-stamp
+    ' with the existing key + Save + refresh the C1b backup) - the ProcessCoolOffSignals
+    ' discipline. Best-effort throughout; a throw never crashes the tick (it continues off
+    ' the returned value). No CLI writes a Spec until sub-slice (c), so in production this
+    ' fast-paths out (spec="" AND ActiveUntil="") on every block - (b2) ships the machinery
+    ' + its e2e tests; the site/app UNION enforcement behind BlockHeld is (b3).
+    Private Function ProcessScheduleWindows(ByVal currentScheduleActiveUntil As String, ByVal spec As String, ByVal lastNowText As String, ByVal nowText As String, ByVal newHwText As String, ByVal monoElapsedSeconds As Long, ByVal macValid As Boolean, ByVal isBoot As Boolean) As String
+        Try
+            ' Frozen config: never touch the schedule state (already enforcing, fail-closed).
+            If Not macValid Then Return currentScheduleActiveUntil
+            ' Fast path: no schedule rule AND no window currently open - the overwhelmingly
+            ' common case (every block that never used `monkmode schedule`). Nothing to do.
+            If String.IsNullOrEmpty(spec) AndAlso currentScheduleActiveUntil = "" Then Return currentScheduleActiveUntil
+            Dim openNow As List(Of ScheduleOpen) = EvaluateWindows(ParseSchedule(spec).Windows, lastNowText, nowText, monoElapsedSeconds, isBoot)
+            Dim target As String = NextScheduleActiveUntil(currentScheduleActiveUntil, openNow, newHwText)
+            If target <> currentScheduleActiveUntil Then
+                ' A window opened/extended, or an elapsed window cleared: persist it. If the
+                ' TOCTOU re-validate fails (the config went invalid in the read->reload
+                ' window) nothing is written and we keep the pre-read value (fail-closed; the
+                ' heartbeat's own reload re-validates and Holds).
+                If PersistScheduleActiveUntil(target) Then Return target
+                Return currentScheduleActiveUntil
+            End If
+            Return currentScheduleActiveUntil
+        Catch ex As Exception
+            Return currentScheduleActiveUntil
+        End Try
+    End Function
+
+    ' Persist [Schedule] ActiveUntil = newValue ("" clears it), the ProcessCoolOffSignals
+    ' write discipline: RELOAD the ini, TOCTOU re-validate its MAC (only re-stamp bytes just
+    ' re-verified - never re-bless a swap in the read->reload window), set the field
+    ' (encrypted like CoolOffUntil; "" stored verbatim = no window), re-stamp with the
+    ' EXISTING key, Save, and refresh the C1b backup (guarded on the in-memory MAC, so a bad
+    ' primary can never overwrite a good backup - no data loss). Returns True iff the write
+    ' happened (a failed re-validate returns False; the caller keeps the old value). Best-
+    ' effort; never throws (the caller is inside a Try too).
+    Private Function PersistScheduleActiveUntil(ByVal newValue As String) As Boolean
+        Try
+            Dim iniFile = New IniFile
+            iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+            If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            iniFile.SetKeyValue("Schedule", "ActiveUntil", If(newValue = "", "", encryptionW.EncryptData(newValue)))
+            RestampMacWithExistingKey(iniFile)
+            iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+            RefreshBackupFromValid(iniFile)
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
     ' immune to wall-clock changes) captured at the last HighWater advance. The
     ' per-tick HighWater credit is capped by the real elapsed since this anchor, so
     ' nudging the wall clock forward each tick can't advance the mark faster than
     ' real time. Seeded at OnStart; 0 = not yet seeded (=> credit 0 that tick).
     Private lastMonoMs As Long = 0
+
+    ' C5b (b2): the WALL-CLOCK sibling of lastMonoMs - the previous tick's DateTime.Now,
+    ' held in memory and seeded at OnStart alongside lastMonoMs. The schedule jump-OVER
+    ' detector needs wallDelta and monoElapsed measured over the SAME (previous-live-tick ->
+    ' this-tick) interval. The STORED [CurrentTime] Now can't serve as lastNow: it is stale
+    ' across a reboot (OnStart's active path never rewrites it), so the FIRST live tick would
+    ' read the whole downtime gap as a live jump and re-open a window crux #4b says must be
+    ' MISSED. Seeding this in memory at OnStart - exactly like lastMonoMs, which also resets
+    ' on every (re)start - makes the first live tick measure wallDelta from boot, not from
+    ' the pre-reboot Now, so a missed window stays missed. "" = not yet seeded (=> the
+    ' evaluator cannot detect a jump that tick; the HighWater still holds any open window).
+    ' Supersedes the C5a design §4.2 "lastNowText = the stored [CurrentTime] Now" (that
+    ' contract had the reboot-staleness gap the b2 verifier caught).
+    Private lastTickWallNow As String = ""
 
     ' #2 (audit P2): serialize timer ticks. System.Timers.Timer runs with
     ' AutoReset=True and no SynchronizingObject, so a tick that overruns the 10s
@@ -593,11 +693,24 @@ Public Class Service1
         Dim iniPartnerUnlockedAt As String = ""
         ' C5b: the decrypted [Schedule] ActiveUntil (an open window's converted monotonic
         ' close) for THIS tick ("" = no window open, also the fail-closed default on a
-        ' read failure). SUB-SLICE (b1): only READ + fed to the heartbeat's schedule-hold
-        ' gate (SD1: an open window out-ranks every lift trigger). The per-tick step that
-        ' OPENS/EXTENDS/CLEARS it (ProcessScheduleWindows) is sub-slice (b2), so on every
-        ' existing block this stays "" and the schedule hold is inert.
+        ' read failure). SUB-SLICE (b2): now WRITTEN by ProcessScheduleWindows below (the
+        ' window->duration conversion), so an open scheduled window makes the heartbeat's SD1
+        ' schedule-hold arm (ScheduleActive) LIVE. Still "" on every block with no [Schedule]
+        ' Spec - and no CLI writes a Spec until sub-slice (c) - so production stays inert;
+        ' (b2) ships the machinery + e2e tests. The self-heal ENFORCEMENT sites still key off
+        ' the manual block only (the site/app union enforcement behind BlockHeld is (b3)).
         Dim iniScheduleActiveUntil As String = ""
+        ' C5b (b2): the [Schedule] Spec (recurring-window rule, plaintext-as-stored, MAC-
+        ' covered) read in the Try below; the wall-clock jump-OVER pair (prevTickWallNow = the
+        ' in-memory anchor from the PREVIOUS tick = lastNow; tickWallNow = this tick's now);
+        ' and monoElapsedSeconds (hoisted from the B4 block). All method-scope so they survive
+        ' the Try into the schedule poll section. prevTickWallNow uses the in-memory anchor
+        ' (seeded at OnStart), NOT the stored [CurrentTime] Now, so a reboot's downtime gap is
+        ' never misread as a live jump (crux #4b - see lastTickWallNow above).
+        Dim iniScheduleSpec As String = ""
+        Dim prevTickWallNow As String = ""
+        Dim tickWallNow As String = ""
+        Dim monoElapsedSeconds As Long = 0
         ' C4: whether THIS block is committed (self-serve cooling-off disabled = code-
         ' only exit). Only consulted under macValid (a frozen config Ignores cooling-off
         ' regardless), and under macValid the MAC-covered flag is authentic. Default
@@ -643,13 +756,18 @@ Public Class Service1
             ' MAC-covered, not decrypted). Absent/"" = not code-unlocked.
             iniPartnerUnlockedAt = iniFile.GetKeyValue("Partner", "UnlockedAt")
             ' C5b: read the schedule's converted monotonic deadline [Schedule] ActiveUntil
-            ' (encrypted like CoolOffUntil; absent/empty = no window open). SUB-SLICE (b1):
-            ' this is the STORED value only - the ProcessScheduleWindows step that OPENS/
-            ' EXTENDS/CLEARS it is (b2) - so on every existing block it reads "" and the
-            ' heartbeat's schedule hold below is inert. Consumed via ScheduleActive so an
-            ' open window out-ranks every lift trigger (SD1).
+            ' (encrypted like CoolOffUntil; absent/empty = no window open). Consumed via
+            ' ScheduleActive so an open window out-ranks every lift trigger (SD1), and updated
+            ' by ProcessScheduleWindows below. Decrypt-before-macValid is LOAD-BEARING: a
+            ' garbled ciphertext must THROW here (-> Catch -> RecoverPrimaryConfig, fail-
+            ' closed), never silently read "" (which would drop the schedule hold).
             Dim scheduleActiveEnc As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
             iniScheduleActiveUntil = If(scheduleActiveEnc = "", "", encryptionW.DecryptData(scheduleActiveEnc))
+            ' C5b (b2): the recurring-window rule [Schedule] Spec (plaintext-as-stored, MAC-
+            ' covered - a tampered Spec fails the MAC -> freeze, B7). The jump-OVER lastNow is
+            ' NOT read from the ini (the stored [CurrentTime] Now is stale across a reboot) but
+            ' from the in-memory lastTickWallNow anchor captured below.
+            iniScheduleSpec = iniFile.GetKeyValue("Schedule", "Spec")
             ' C4: read the [Commit] Committed policy flag ("yes"=committed). MAC-covered.
             iniCommitted = IsCommitted(iniFile.GetKeyValue("Commit", "Committed"))
             iniProcessList = iniFile.GetKeyValue("Process", "List")
@@ -677,8 +795,18 @@ Public Class Service1
             ' within-ceiling creep that the per-step 120s ceiling alone allowed.
             ' monoElapsed is 0 on the first tick after OnStart seeded the anchor.
             Dim nowMono As Long = Environment.TickCount64
-            Dim monoElapsedSeconds As Long = If(lastMonoMs <= 0, 0L, (nowMono - lastMonoMs) \ 1000L)
+            ' monoElapsedSeconds is method-scoped (hoisted up top) so the schedule poll
+            ' below can read it too; assigned (not re-declared) here.
+            monoElapsedSeconds = If(lastMonoMs <= 0, 0L, (nowMono - lastMonoMs) \ 1000L)
             lastMonoMs = nowMono
+            ' C5b (b2): capture this tick's wall 'now' for the schedule jump-OVER detection
+            ' and roll the in-memory anchor forward, remembering the PREVIOUS tick's now as
+            ' lastNow. Captured right after lastMonoMs so wallDelta (tickWallNow -
+            ' prevTickWallNow) and monoElapsedSeconds span the SAME previous-tick->this-tick
+            ' interval - the whole point of an in-memory anchor over the stored Now.
+            prevTickWallNow = lastTickWallNow
+            tickWallNow = DateTime.Now.ToString(culture)
+            lastTickWallNow = tickWallNow
             Dim candidateHw As String = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
             newHw = CapHighWaterAdvance(storedHw, candidateHw, monoElapsedSeconds)
             Dim parsedHw As DateTime
@@ -714,6 +842,16 @@ Public Class Service1
             ' over the user's own change-of-mind about the slow path). Returns the
             ' post-verify UnlockedAt so THIS tick's heartbeat decides off it.
             iniPartnerUnlockedAt = ProcessPartnerCodeSignal(iniPartnerUnlockedAt, macValid)
+            ' C5b (b2): poll the schedule windows AFTER cooling-off + code (still inside
+            ' tickLock + the TimeChanging="no" guard). The FIRST step that can WRITE a
+            ' non-empty [Schedule] ActiveUntil - the window->duration conversion (§6.1):
+            ' evaluate the wall-clock windows off the in-memory lastNow (prevTickWallNow) and
+            ' this tick's now (tickWallNow), convert each open one to a HighWater-anchored
+            ' deadline, extend-never-shorten, and clear at the monotonic close. Returns the
+            ' post-step ActiveUntil so THIS tick's heartbeat + its SD1 schedule-hold arm decide
+            ' off it (an open window out-ranks expiry/cooling-off/code). isBoot:=False (a live
+            ' tick; OnStart re-evaluates with isBoot:=True). No Spec => inert fast path.
+            iniScheduleActiveUntil = ProcessScheduleWindows(iniScheduleActiveUntil, iniScheduleSpec, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
         End If
 
         ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
@@ -1305,6 +1443,61 @@ Public Class Service1
         Dim highWater As DateTime
         If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return ""
         Return highWater.AddSeconds(remainingSeconds).ToString(ca)
+    End Function
+
+    ' Extend-never-shorten primitive (design §4.1): the LATER of two en-CA schedule-end
+    ' strings, treating "" as "no bound" (so later("", e) = e). A newly-opened window's
+    ' converted end can only ever PUSH the deadline out, never pull it in - so overlapping
+    ' windows resolve to the longest end (SD2). Fail-closed: a non-empty but UNPARSEABLE
+    ' accumulator 'a' (a corrupt current ActiveUntil, which ScheduleActive already treats
+    ' as a permanent hold) is KEPT - never replaced by a shorter parseable end, which would
+    ' turn a fail-closed hold into a liftable window. A "" computed end 'b' (ComputeSchedule-
+    ' End failed on an unparseable HighWater) likewise leaves 'a' untouched (retry next
+    ' tick). Pure + Shared, unit-tested (never-shorten is a safety invariant). Byte-
+    ' preserving: returns one input verbatim, never a reformat, so an unchanged decision is
+    ' string-identical to the stored value (no spurious "changed" write).
+    Friend Shared Function LaterScheduleEnd(ByVal a As String, ByVal b As String) As String
+        If a = "" Then Return b
+        If b = "" Then Return a
+        Dim ca As New CultureInfo("en-CA")
+        Dim da As DateTime, db As DateTime
+        If Not DateTime.TryParse(a, ca, DateTimeStyles.None, da) Then Return a   ' keep a fail-closed hold
+        If Not DateTime.TryParse(b, ca, DateTimeStyles.None, db) Then Return a   ' can't trust b; keep a
+        If db > da Then Return b Else Return a
+    End Function
+
+    ' The pure per-tick schedule-state DECISION (design §6.1): given the current [Schedule]
+    ' ActiveUntil, the windows the evaluator says are open THIS tick, and the trusted
+    ' HighWater, return the ActiveUntil the service should now hold. ProcessScheduleWindows
+    ' persists it iff the result differs from current.
+    '   * OPEN / EXTEND: fold each open window's converted end (ComputeScheduleEnd =
+    '     HighWater + remaining) into ActiveUntil via LaterScheduleEnd - extend-never-
+    '     shorten, so a window only pushes the end out (overlap => longest end, SD2), and a
+    '     first open (current="") sets it.
+    '   * CLEAR: only when the current deadline has reached its monotonic close
+    '     (ScheduleElapsed) AND no window is open this tick - so a still-open overlapping
+    '     window never blips the deadline closed, and clearing Spec never shortens an open
+    '     window (its ActiveUntil runs to close).
+    '   * STEADY: otherwise return current unchanged (no write).
+    ' Pure + Shared (no DPAPI/filesystem) so the whole open/extend/clear/steady decision is
+    ' unit- and e2e-testable through the real gates - exactly as ClassifyCoolOffSignal
+    ' relates to ProcessCoolOffSignals. Fail-closed throughout: an unparseable HighWater
+    ' yields "" ends (no extend) and ScheduleElapsed=False (no clear) => the window holds
+    ' and the tick retries; the extend branch out-ranks clear (an open later window wins).
+    Friend Shared Function NextScheduleActiveUntil(ByVal currentActiveUntil As String, ByVal openNow As List(Of ScheduleOpen), ByVal highWaterText As String) As String
+        Dim newEnd As String = currentActiveUntil
+        If openNow IsNot Nothing Then
+            For Each o As ScheduleOpen In openNow
+                newEnd = LaterScheduleEnd(newEnd, ComputeScheduleEnd(highWaterText, o.RemainingSeconds))
+            Next
+        End If
+        ' A window opened or extended the deadline: hold the later end.
+        If newEnd <> currentActiveUntil Then Return newEnd
+        ' The open window reached its monotonic close and nothing is open now: clear it.
+        If currentActiveUntil <> "" AndAlso (openNow Is Nothing OrElse openNow.Count = 0) _
+           AndAlso ScheduleElapsed(currentActiveUntil, highWaterText) Then Return ""
+        ' Steady state: no change (no write).
+        Return currentActiveUntil
     End Function
 
     ' The shared "is the effective block held this tick?" helper (design §6.3). The

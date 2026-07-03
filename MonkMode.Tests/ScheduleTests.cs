@@ -27,10 +27,29 @@
 //     monotonic close; a mid-window clock-forward is refused (the wait is never
 //     skipped).
 //
-// The live wiring (ProcessScheduleWindows' file I/O + ini save + backup refresh, the
-// lift/hold fold into EffectiveExit/ClassifyHeartbeat, the union enforcement, the
-// guardian fold, the CLI `schedule` front-end) is the C5b sub-slice (b)/(c) seam,
-// smoke-tested at the CV checkpoint - exactly like the C2b/C3b live wiring.
+// Sub-slice (b1) folded the schedule HOLD into EffectiveExit/ClassifyHeartbeat (an open
+// window out-ranks every lift trigger, SD1) with all call sites reading the STORED
+// ActiveUntil - provably inert while nothing writes a non-empty one.
+//
+// Sub-slice (b2) [THIS slice's additions below] ships the tick DECISION that first writes
+// a non-empty ActiveUntil - the window->duration conversion (design §6.1):
+//   - LaterScheduleEnd: the extend-never-shorten primitive (overlap => longest end, SD2;
+//     a corrupt/"" value never shortens a hold);
+//   - NextScheduleActiveUntil: the pure open/extend/clear/steady decision the service
+//     persists (ProcessScheduleWindows is the thin file-I/O wrapper around it, exactly as
+//     ClassifyCoolOffSignal relates to ProcessCoolOffSignals - the wrapper is smoke-only);
+//   - end-to-end compositions through the REAL gates (EvaluateWindows -> the decision ->
+//     ScheduleActive/Elapsed + NextHighWater/CapHighWaterAdvance): a window opens ->
+//     converts -> counts down -> clears at its monotonic close; a mid-window clock-forward
+//     can't end it early; jump-into/over; boot re-hold (inside re-opens, past missed,
+//     reboot mid-window survives with downtime never credited); overlap union + longest
+//     end; and SD1 proven end-to-end (an open window holds through an expired manual block
+//     + elapsed cooling-off + an unlocked code, service<->guardian parity).
+//
+// Still the (b3)/(b4)/(c) seam (smoke-tested at CV, like the C2b/C3b live wiring): the
+// site/app UNION enforcement behind BlockHeld (b3), the guardian ActiveUntil read (b4),
+// and the CLI `schedule` front-end (c). No CLI writes a Spec until (c), so production
+// stays inert through (b2) - these tests exercise the machinery with an injected Spec.
 
 using System.Globalization;
 
@@ -547,5 +566,411 @@ public class ScheduleEndToEndTests
         }
         Assert.False(monkmode.Service1.ScheduleElapsed(deadline, hw));
         Assert.Equal(t0.AddSeconds(600).ToString(EnCa), hw);   // only the real 600s
+    }
+}
+
+// ===== C5b sub-slice (b2): the tick decision =====
+
+// LaterScheduleEnd: extend-never-shorten. A newly-opened window can only PUSH the
+// schedule deadline out, never pull it in - and a corrupt/"" value never shortens a hold.
+public class LaterScheduleEndTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static readonly DateTime Base = new(2026, 6, 25, 12, 0, 0);
+    private static string At(int mins) => Base.AddMinutes(mins).ToString(EnCa);
+
+    [Fact]
+    public void EmptyAccumulator_TakesTheNewEnd()
+    {
+        // later("", e) = e: a first open sets the deadline.
+        Assert.Equal(At(30), monkmode.Service1.LaterScheduleEnd("", At(30)));
+    }
+
+    [Fact]
+    public void EmptyNewEnd_KeepsTheAccumulator()
+    {
+        // later(e, "") = e: a window whose ComputeScheduleEnd failed (unparseable HighWater
+        // -> "") leaves the current deadline untouched (retry next tick).
+        Assert.Equal(At(30), monkmode.Service1.LaterScheduleEnd(At(30), ""));
+    }
+
+    [Fact]
+    public void ReturnsTheLater_RegardlessOfArgumentOrder_ExtendNeverShorten()
+    {
+        Assert.Equal(At(60), monkmode.Service1.LaterScheduleEnd(At(30), At(60)));   // extend out
+        Assert.Equal(At(60), monkmode.Service1.LaterScheduleEnd(At(60), At(30)));   // never pulled in
+    }
+
+    [Fact]
+    public void EqualEnds_ReturnTheAccumulatorVerbatim_NoSpuriousChange()
+    {
+        // Equal -> returns 'a' byte-for-byte, so a steady tick is string-identical to the
+        // stored value (ProcessScheduleWindows then writes nothing).
+        Assert.Equal(At(30), monkmode.Service1.LaterScheduleEnd(At(30), At(30)));
+    }
+
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("25.06.2026 11:00:00")]   // legacy de-DE format the en-CA parse rejects; and
+                                          // 11:00 is BEFORE At(30)=12:30, so a wrongful parse
+                                          // would flip the result to At(30) and FAIL the test
+    public void UnparseableAccumulator_IsKept_NeverReplacedByAShorterParseableEnd(string corrupt)
+    {
+        // A corrupt current ActiveUntil already reads as a permanent HOLD (ScheduleActive
+        // true). LaterScheduleEnd must NEVER replace it with a parseable end - that would
+        // turn a fail-closed hold into a liftable window.
+        Assert.Equal(corrupt, monkmode.Service1.LaterScheduleEnd(corrupt, At(30)));
+    }
+
+    [Fact]
+    public void UnparseableNewEnd_KeepsTheAccumulator()
+    {
+        Assert.Equal(At(30), monkmode.Service1.LaterScheduleEnd(At(30), "garbage"));
+    }
+}
+
+// NextScheduleActiveUntil: the pure open/extend/clear/steady decision the service persists
+// each tick (ProcessScheduleWindows is the thin file-I/O wrapper around it).
+public class NextScheduleActiveUntilTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
+    private static string HwText => Hw.ToString(EnCa);
+
+    private static System.Collections.Generic.List<monkmode.Service1.ScheduleOpen> Opens(params long[] remainings)
+    {
+        var list = new System.Collections.Generic.List<monkmode.Service1.ScheduleOpen>();
+        foreach (var r in remainings) list.Add(new monkmode.Service1.ScheduleOpen { RemainingSeconds = r });
+        return list;
+    }
+
+    [Fact]
+    public void NoWindowOpen_NoCurrent_StaysEmpty()
+    {
+        Assert.Equal("", monkmode.Service1.NextScheduleActiveUntil("", Opens(), HwText));
+        Assert.Equal("", monkmode.Service1.NextScheduleActiveUntil("", null, HwText));
+    }
+
+    [Fact]
+    public void WindowOpens_FromNoCurrent_ConvertsToHighWaterPlusRemaining()
+    {
+        // First open: ActiveUntil = HighWater + remaining (the window->duration conversion).
+        var r = monkmode.Service1.NextScheduleActiveUntil("", Opens(1800), HwText);
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(HwText, 1800), r);
+        Assert.True(monkmode.Service1.ScheduleActive(r, HwText));
+    }
+
+    [Fact]
+    public void OverlappingOpens_TakeTheLongestEnd_SD2()
+    {
+        // Two windows open this tick (2h and 5h remaining): the deadline is the LATER end
+        // (union held until the longest end).
+        var r = monkmode.Service1.NextScheduleActiveUntil("", Opens(7200, 18000), HwText);
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(HwText, 18000), r);
+    }
+
+    [Fact]
+    public void ANewShorterWindow_NeverShortensAnExistingLaterDeadline()
+    {
+        // current = Hw+5h; a shorter 2h window opens -> extend-never-shorten keeps the later
+        // end (the shorter overlapping window is subsumed, SD2).
+        var current = monkmode.Service1.ComputeScheduleEnd(HwText, 18000);
+        Assert.Equal(current, monkmode.Service1.NextScheduleActiveUntil(current, Opens(7200), HwText));
+    }
+
+    [Fact]
+    public void ALaterWindow_ExtendsTheCurrentDeadline()
+    {
+        var current = monkmode.Service1.ComputeScheduleEnd(HwText, 7200);        // Hw+2h
+        var r = monkmode.Service1.NextScheduleActiveUntil(current, Opens(18000), HwText);   // Hw+5h opens
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(HwText, 18000), r);
+    }
+
+    [Fact]
+    public void CurrentDeadlineNotYetElapsed_NoWindowOpen_StaysSteady_ClearingSpecNeverShortens()
+    {
+        // The "clear the schedule while a window is open" case: no window evaluates open this
+        // tick (e.g. Spec was cleared) but the current deadline hasn't elapsed -> it is KEPT
+        // (runs to its monotonic close). Never shortened by a rule edit.
+        var current = monkmode.Service1.ComputeScheduleEnd(HwText, 1800);   // Hw+30m, future
+        Assert.Equal(current, monkmode.Service1.NextScheduleActiveUntil(current, Opens(), HwText));
+    }
+
+    [Fact]
+    public void CurrentDeadlineElapsed_NoWindowOpen_Clears()
+    {
+        // The window reached its monotonic close and nothing is open now -> clear to "".
+        var elapsed = Hw.AddMinutes(-1).ToString(EnCa);   // <= HighWater -> elapsed
+        Assert.Equal("", monkmode.Service1.NextScheduleActiveUntil(elapsed, Opens(), HwText));
+    }
+
+    [Fact]
+    public void CurrentDeadlineElapsed_ButAWindowStillOpen_DoesNotClear_ReOpensInstead()
+    {
+        // An elapsed deadline BUT a window is open this tick: the extend branch out-ranks
+        // clear, so it never blips closed - it re-opens to the new end.
+        var elapsed = Hw.AddMinutes(-1).ToString(EnCa);
+        var r = monkmode.Service1.NextScheduleActiveUntil(elapsed, Opens(1800), HwText);
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(HwText, 1800), r);
+        Assert.True(monkmode.Service1.ScheduleActive(r, HwText));
+    }
+
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("")]
+    public void UnparseableHighWater_NoExtendNoClear_HoldsAndRetries(string hw)
+    {
+        // Fail-closed: no trustworthy mark -> ComputeScheduleEnd yields "" (no extend) and
+        // ScheduleElapsed is false (no clear). A current deadline is kept; "" stays "".
+        var current = monkmode.Service1.ComputeScheduleEnd(HwText, 1800);
+        Assert.Equal(current, monkmode.Service1.NextScheduleActiveUntil(current, Opens(1800), hw));
+        Assert.Equal("", monkmode.Service1.NextScheduleActiveUntil("", Opens(1800), hw));
+    }
+}
+
+// End-to-end: the tick DECISION driven through the REAL gates (EvaluateWindows ->
+// NextScheduleActiveUntil -> ScheduleActive/Elapsed, HighWater advanced by the live
+// NextHighWater + CapHighWaterAdvance pair). This is exactly what ProcessScheduleWindows
+// computes each tick minus the file I/O (smoke-only), mirroring CoolOffEndToEndTests.
+public class ScheduleTickDecisionEndToEndTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private const long Ceiling = 120;   // Service1.HighWaterJumpCeilingSeconds
+
+    // A Wednesday 09:00. All-days windows so the weekday never excludes a tick.
+    private static DateTime T0()
+    {
+        var d = new DateTime(2026, 6, 25);
+        while (d.DayOfWeek != DayOfWeek.Wednesday) d = d.AddDays(1);
+        return d.AddHours(9);
+    }
+    private static System.Collections.Generic.List<monkmode.Service1.ScheduleWindow> W(string spec) =>
+        monkmode.Service1.ParseSchedule(spec).Windows;
+    private static string HonestTick(string hw, DateTime wallNow) =>
+        monkmode.Service1.CapHighWaterAdvance(hw, monkmode.Service1.NextHighWater(hw, wallNow.ToString(EnCa), Ceiling), 10);
+
+    [Fact]
+    public void WindowOpens_Converts_CountsDown_ThenClearsAtItsMonotonicClose()
+    {
+        var t0 = T0();
+        var win = W("v1;1234567:0900-0930;sites=x.com;apps=");   // 30-minute window
+        string activeUntil = "", hw = t0.ToString(EnCa), lastNow = "";
+
+        // Tick 1 at 09:00: inside the window -> open + convert to hw+1800.
+        string now = t0.ToString(EnCa);
+        activeUntil = monkmode.Service1.NextScheduleActiveUntil(
+            activeUntil, monkmode.Service1.EvaluateWindows(win, lastNow, now, 10, false), hw);
+        lastNow = now;
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(t0.ToString(EnCa), 1800), activeUntil);
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+
+        // 179 honest 10s ticks: still inside the window, the decision re-derives the SAME
+        // deadline every tick (extend-never-shorten) -> steady, still held.
+        for (int i = 1; i <= 179; i++)
+        {
+            var wall = t0.AddSeconds(i * 10);
+            hw = HonestTick(hw, wall);
+            now = wall.ToString(EnCa);
+            activeUntil = monkmode.Service1.NextScheduleActiveUntil(
+                activeUntil, monkmode.Service1.EvaluateWindows(win, lastNow, now, 10, false), hw);
+            lastNow = now;
+        }
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(t0.ToString(EnCa), 1800), activeUntil);   // unchanged
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+
+        // Tick 180 reaches hw = t0+1800 and wall = 09:30 (window closed): no window open +
+        // deadline elapsed -> the decision CLEARS ActiveUntil; no longer active. Guardian agrees.
+        var w180 = t0.AddSeconds(1800);
+        hw = HonestTick(hw, w180);
+        var opens180 = monkmode.Service1.EvaluateWindows(win, lastNow, w180.ToString(EnCa), 10, false);
+        Assert.Empty(opens180);
+        activeUntil = monkmode.Service1.NextScheduleActiveUntil(activeUntil, opens180, hw);
+        Assert.Equal("", activeUntil);
+        Assert.False(monkmode.Service1.ScheduleActive(activeUntil, hw));
+        Assert.False(mm_guard.Guardian.ScheduleActive(activeUntil, hw));
+    }
+
+    [Fact]
+    public void MidWindowClockForward_TheDecisionNeverEndsEarly()
+    {
+        // Open the window, then jump the wall +2h. HighWater refuses the jump, so the
+        // decision sees an unchanged hw < ActiveUntil -> not elapsed -> not cleared.
+        var t0 = T0();
+        var win = W("v1;1234567:0900-0930;sites=x.com;apps=");
+        string hw = t0.ToString(EnCa);
+        string activeUntil = monkmode.Service1.NextScheduleActiveUntil(
+            "", monkmode.Service1.EvaluateWindows(win, "", t0.ToString(EnCa), 10, false), hw);
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+
+        var jumpWall = t0.AddHours(2);
+        var hwAfter = HonestTick(hw, jumpWall);
+        Assert.Equal(hw, hwAfter);   // jump refused: HighWater unchanged
+        var opens = monkmode.Service1.EvaluateWindows(win, t0.ToString(EnCa), jumpWall.ToString(EnCa), 10, false);
+        var after = monkmode.Service1.NextScheduleActiveUntil(activeUntil, opens, hwAfter);
+        Assert.Equal(activeUntil, after);   // unchanged (not cleared, not shortened)
+        Assert.True(monkmode.Service1.ScheduleActive(after, hwAfter));   // still held
+    }
+
+    [Fact]
+    public void DstSpringForwardInsideAWindow_OverRuns_NeverEndsEarly()
+    {
+        // A +1h DST-like forward shift mid-window is a >ceiling ForwardJump -> HighWater
+        // refuses it -> the monotonic countdown doesn't jump -> the window over-runs the
+        // wall close rather than ending early (Q4, LOCAL wall-clock).
+        var t0 = T0();
+        string hw = t0.ToString(EnCa);
+        string activeUntil = monkmode.Service1.ComputeScheduleEnd(hw, 1800);   // 30-min window
+        var shifted = HonestTick(hw, t0.AddHours(1));
+        Assert.Equal(hw, shifted);   // refused
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, shifted));   // over-runs, still held
+    }
+
+    [Fact]
+    public void DstFallBackInsideAWindow_OverWaits_NeverEndsEarly()
+    {
+        // A -1h DST-like backward shift: NextHighWater classifies Backward and keeps the
+        // stored mark (HighWater freezes until the wall catches up) -> the window over-waits
+        // its real duration, never ends early.
+        var t0 = T0();
+        string hw = t0.ToString(EnCa);
+        string activeUntil = monkmode.Service1.ComputeScheduleEnd(hw, 1800);
+        var rolledBack = HonestTick(hw, t0.AddHours(-1));
+        Assert.Equal(hw, rolledBack);   // frozen (backward roll not credited)
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, rolledBack));   // over-waits, still held
+    }
+
+    [Fact]
+    public void LiveJumpOverAWholeWindow_OpensItForTheFullDuration_SD4()
+    {
+        // The wall leaps 08:59 -> 17:01 in one ~10s real tick across a 09:00-17:00 window:
+        // EvaluateWindows flags the jump-over -> the decision opens the FULL 8h duration,
+        // HighWater-anchored (you can't skip a window by leaping past it).
+        var t0d = new DateTime(2026, 6, 25); while (t0d.DayOfWeek != DayOfWeek.Wednesday) t0d = t0d.AddDays(1);
+        var win = W("v1;1234567:0900-1700;sites=x.com;apps=");
+        var last = t0d.AddHours(8).AddMinutes(59);
+        var now = last.AddHours(8).AddMinutes(2);   // 17:01
+        string hw = last.ToString(EnCa);
+        var opens = monkmode.Service1.EvaluateWindows(win, last.ToString(EnCa), now.ToString(EnCa), 10, false);
+        Assert.Single(opens);
+        Assert.Equal(8 * 3600, opens[0].RemainingSeconds);
+        var activeUntil = monkmode.Service1.NextScheduleActiveUntil("", opens, hw);
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(hw, 8 * 3600), activeUntil);
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+    }
+
+    [Fact]
+    public void TwoOverlappingWindows_HoldUntilTheLongestEnd_SD2()
+    {
+        // 09:00-17:00 and 10:00-14:00 overlap at 12:00; the decision holds until the LONGER
+        // end (17:00's remaining), the shorter subsumed (union over-block).
+        var t0d = new DateTime(2026, 6, 25); while (t0d.DayOfWeek != DayOfWeek.Wednesday) t0d = t0d.AddDays(1);
+        var win = W("v1;1234567:0900-1700,1234567:1000-1400;sites=x.com;apps=");
+        var now = t0d.AddHours(12);   // remaining 5h and 2h
+        string hw = now.ToString(EnCa);
+        var opens = monkmode.Service1.EvaluateWindows(win, now.AddSeconds(-10).ToString(EnCa), now.ToString(EnCa), 10, false);
+        Assert.Equal(2, opens.Count);
+        var activeUntil = monkmode.Service1.NextScheduleActiveUntil("", opens, hw);
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(hw, 5 * 3600), activeUntil);   // the 5h (longest) end
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+    }
+
+    [Fact]
+    public void BootInsideAWindow_ReOpensOffStoredHighWater_Crux4a()
+    {
+        // OnStart (isBoot=True) with the wall clock inside the window and no prior deadline
+        // (e.g. the backup didn't carry it): re-open off the STORED HighWater, remaining =
+        // close - now.
+        var t0 = T0();   // window 09:00-09:30
+        var win = W("v1;1234567:0900-0930;sites=x.com;apps=");
+        string storedHw = t0.AddSeconds(50).ToString(EnCa);
+        var bootWall = t0.AddMinutes(10);   // 09:10 -> 20 min remaining
+        var opens = monkmode.Service1.EvaluateWindows(win, "", bootWall.ToString(EnCa), 0, isBoot: true);
+        var activeUntil = monkmode.Service1.NextScheduleActiveUntil("", opens, storedHw);
+        Assert.Equal(monkmode.Service1.ComputeScheduleEnd(storedHw, 1200), activeUntil);
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, storedHw));
+    }
+
+    [Fact]
+    public void BootPastANeverOpenedWindow_IsMissed_Crux4b()
+    {
+        // The one intended coverage gap: off through the whole window, boot past its close
+        // with no prior deadline -> missed (no retroactive block).
+        var t0 = T0();
+        var win = W("v1;1234567:0900-0930;sites=x.com;apps=");
+        var opens = monkmode.Service1.EvaluateWindows(win, "", t0.AddHours(2).ToString(EnCa), 0, isBoot: true);
+        var activeUntil = monkmode.Service1.NextScheduleActiveUntil("", opens, t0.ToString(EnCa));
+        Assert.Equal("", activeUntil);
+        Assert.False(monkmode.Service1.ScheduleActive(activeUntil, t0.ToString(EnCa)));
+    }
+
+    [Fact]
+    public void RebootMidWindow_DeadlineSurvives_DowntimeNeverCredited()
+    {
+        // A window opened pre-reboot (ActiveUntil = hw+1800). The machine is OFF (HighWater
+        // does NOT advance across downtime), then boots with the wall already past the
+        // window's wall-close. Boot re-evaluation opens nothing (past close, no jump across a
+        // reboot) but must NOT clear the still-unelapsed deadline: the window paused while off
+        // and resumes on boot (over-run, never an early lift).
+        var t0 = T0();
+        var win = W("v1;1234567:0900-0930;sites=x.com;apps=");
+        string storedHw = t0.AddSeconds(300).ToString(EnCa);   // 5 min of ticks, then off
+        string activeUntil = monkmode.Service1.ComputeScheduleEnd(t0.ToString(EnCa), 1800);  // closes at hw t0+1800
+        var opens = monkmode.Service1.EvaluateWindows(win, "", t0.AddHours(2).ToString(EnCa), 0, isBoot: true);
+        Assert.Empty(opens);
+        var after = monkmode.Service1.NextScheduleActiveUntil(activeUntil, opens, storedHw);
+        Assert.Equal(activeUntil, after);   // NOT cleared (t0+1800 > storedHw t0+300)
+        Assert.True(monkmode.Service1.ScheduleActive(after, storedHw));
+    }
+
+    [Fact]
+    public void FirstLiveTickAfterReboot_UsesTheBootSeededAnchor_MissedWindowStaysMissed_Crux4b()
+    {
+        // The reboot-correctness contract the b2 wiring must satisfy (the bug the in-memory
+        // lastTickWallNow anchor fixes): OnStart seeds the wall anchor to BOOT time - NOT the
+        // stale pre-reboot [CurrentTime] Now. So the FIRST LIVE tick (isBoot=false) sees
+        // lastNow ~= 10s ago with monoElapsed ~= 10s => NO false jump-over => a window that
+        // closed while the machine was OFF stays MISSED (crux #4b).
+        var t0d = new DateTime(2026, 6, 25); while (t0d.DayOfWeek != DayOfWeek.Wednesday) t0d = t0d.AddDays(1);
+        var win = W("v1;1234567:0900-1700;sites=x.com;apps=");
+        var bootNow = t0d.AddHours(18);              // booted at 18:00, past the 17:00 close
+        var firstTickNow = bootNow.AddSeconds(10);   // first live tick ~10s after boot
+        // Correct anchor (boot-seeded): lastNow ~= 10s ago, mono = 10s -> no jump -> missed.
+        var correct = monkmode.Service1.EvaluateWindows(
+            win, bootNow.ToString(EnCa), firstTickNow.ToString(EnCa), 10, isBoot: false);
+        Assert.Empty(correct);
+        var afterCorrect = monkmode.Service1.NextScheduleActiveUntil("", correct, bootNow.ToString(EnCa));
+        Assert.Equal("", afterCorrect);   // stays missed, no block
+
+        // Documents the failure mode the anchor prevents: feeding the STALE pre-reboot now
+        // (08:00) with the reset mono (10s) reads the whole downtime as a live jump and
+        // WRONGLY re-opens the window - which is exactly why the tick must pass the in-memory
+        // anchor, never the stored [CurrentTime] Now.
+        var buggy = monkmode.Service1.EvaluateWindows(
+            win, t0d.AddHours(8).ToString(EnCa), firstTickNow.ToString(EnCa), 10, isBoot: false);
+        Assert.Single(buggy);
+    }
+
+    [Fact]
+    public void SD1_OpenWindow_HoldsThroughExpiredManual_ElapsedCoolOff_AndUnlockedCode()
+    {
+        // SD1 proven end-to-end through the b2 decision: with a window open, EffectiveExit
+        // HOLDS even though the manual block expired, cooling-off elapsed, and a code
+        // unlocked - the open window out-ranks all three lift triggers (design §6.2). Service
+        // and guardian agree (parity); removing the window LIFTS (the control).
+        var t0 = T0();
+        string hw = t0.ToString(EnCa);
+        var win = W("v1;1234567:0900-1700;sites=x.com;apps=");   // long window, open now
+        var activeUntil = monkmode.Service1.NextScheduleActiveUntil(
+            "", monkmode.Service1.EvaluateWindows(win, "", t0.ToString(EnCa), 10, false), hw);
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+
+        string pastUntil = t0.AddHours(-1).ToString(EnCa);
+        string elapsedCoolOff = t0.AddHours(-1).ToString(EnCa);
+        string unlockedCode = t0.AddMinutes(-5).ToString(EnCa);
+
+        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true));
+        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true));
+        // Control: no window -> the same expired/elapsed/unlocked state LIFTS.
+        Assert.True(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, "", hw, 5, macValid: true));
     }
 }
