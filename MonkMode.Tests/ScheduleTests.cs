@@ -1287,3 +1287,127 @@ public class EffectiveHostsBlockTests
         return n;
     }
 }
+
+// ===== C5b sub-slice (b3-iii): the NOTIFIER user-session app-kill union =====
+//
+// The notifier (mm_notify) kills a schedule's USER-session apps (browsers/games) while a window is
+// open, mirroring the SERVICE session-0 loop (b3-i) - the manual block's app-kill has always been
+// split across the two binaries. It reaches the decision through a 3rd byte-for-byte PARITY copy of
+// the pure gates (Form1.ScheduleActive/ScheduleElapsed/ParseSchedule/EffectiveKillList) - the same
+// duplication+parity pattern as the guardian's ScheduleActive and the 4 ConfigIntegrity copies. The
+// notifier only READS the service-written [Schedule] ActiveUntil/Spec + [Time] HighWater (no write
+// race). These tests pin the notifier's copies EQUAL to the service's (a drift would silently stop
+// killing the right apps in the user session), plus the no-schedule byte-identity and the
+// schedule-only union. The live per-tick read + kill loop (appKillTimer_Tick) is the smoke-only seam
+// (fence: unit tests never enumerate/kill real processes); its safety is these pure invariants - a
+// no-schedule ActiveUntil="" makes EffectiveKillList return the manual list verbatim (unchanged
+// kills), and the tick's early-return guards the EFFECTIVE union so a schedule-only "null" manual
+// list still kills the schedule's apps.
+public class NotifierScheduleGateParityTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
+
+    private static System.Collections.Generic.List<string> Apps(params string[] a) =>
+        new System.Collections.Generic.List<string>(a);
+
+    [Fact]
+    public void GrammarVersionTag_MatchesTheService()
+    {
+        // A Spec grammar retune (v1 -> v2) must move all copies together; pin the notifier's.
+        Assert.Equal(monkmode.Service1.ScheduleSpecGrammarVersion, mm_notify.Form1.ScheduleSpecGrammarVersion);
+    }
+
+    [Fact]
+    public void ScheduleElapsedAndActive_AgreeWithTheService_AcrossTheTable()
+    {
+        // The notifier reads the service-written [Schedule] ActiveUntil + [Time] HighWater and must
+        // agree on "window open" exactly, or it would kill the schedule's user-session apps a window
+        // too long/short relative to the service's session-0 loop. Fail-closed on every axis
+        // (unparseable deadline/mark => held), exactly like the service<->guardian parity.
+        var deadlines = new[]
+        {
+            Hw.AddMinutes(-1).ToString(EnCa), Hw.ToString(EnCa),
+            Hw.AddHours(1).ToString(EnCa), "garbage", "",
+        };
+        foreach (var d in deadlines)
+            foreach (var hw in new[] { Hw.ToString(EnCa), "garbage", "" })
+            {
+                Assert.Equal(monkmode.Service1.ScheduleElapsed(d, hw), mm_notify.Form1.ScheduleElapsed(d, hw));
+                Assert.Equal(monkmode.Service1.ScheduleActive(d, hw), mm_notify.Form1.ScheduleActive(d, hw));
+            }
+    }
+
+    [Theory]
+    [InlineData("v1;12345:0900-1700,67:1000-1400;sites=reddit.com|news.ycombinator.com;apps=chrome.exe|brave.exe")]
+    [InlineData("v1;1234567:0000-2359;sites=x.com;apps=")]              // apps= with an empty body
+    [InlineData("v1;7:1000-1100;apps=chrome.exe;sites=a.com||b.com")]   // order-tolerant; apps first
+    [InlineData("v1;12345:0900-1700,BADWIN,67:2500-2600;sites=x.com;apps=discord.exe")] // one bad window
+    [InlineData("")]                                                    // inert -> no apps
+    [InlineData("   ")]                                                 // inert -> no apps
+    [InlineData("garbage")]                                            // no ';' -> inert
+    [InlineData("v2;12345:0900-1700;sites=x;apps=chrome.exe")]          // unknown tag -> inert (no apps)
+    public void ParseSchedule_MatchesTheService(string spec)
+    {
+        // The notifier's ParseSchedule is a FULL byte-for-byte parity copy; only .Apps is consumed
+        // today, but pin the WHOLE parsed output (.Apps + .Sites + .Windows count) equal to the
+        // service's, so a drift in ANY part of the copied parser (incl. the window/day/time parsing
+        // the notifier never reads) is caught - not just the apps branch. A garbage/unknown-tag Spec
+        // yields nothing on every axis; the one-bad-window case pins the fail-closed window skip.
+        var svc = monkmode.Service1.ParseSchedule(spec);
+        var noti = mm_notify.Form1.ParseSchedule(spec);
+        Assert.Equal(svc.Apps.ToArray(), noti.Apps.ToArray());
+        Assert.Equal(svc.Sites.ToArray(), noti.Sites.ToArray());
+        Assert.Equal(svc.Windows.Count, noti.Windows.Count);
+    }
+
+    [Fact]
+    public void EffectiveKillList_NoOpenWindow_IsManualListVerbatim_ByteIdentical()
+    {
+        // The no-schedule byte-identity: with no open window the notifier's kill set is EXACTLY the
+        // manual list (even if schedule apps are defensively passed) - what it kills today.
+        Assert.Equal("chrome.exe,firefox.exe",
+            mm_notify.Form1.EffectiveKillList("chrome.exe,firefox.exe", Apps("brave.exe"), scheduleActive: false));
+        Assert.Equal(monkmode.Service1.EffectiveKillList("chrome.exe,firefox.exe", Apps("brave.exe"), false),
+                     mm_notify.Form1.EffectiveKillList("chrome.exe,firefox.exe", Apps("brave.exe"), false));
+    }
+
+    [Fact]
+    public void EffectiveKillList_ScheduleActiveButNoApps_IsManualListVerbatim()
+    {
+        // A window open with an apps-less schedule (null or empty) never disturbs the manual kill set.
+        Assert.Equal("chrome.exe", mm_notify.Form1.EffectiveKillList("chrome.exe", null, scheduleActive: true));
+        Assert.Equal("chrome.exe", mm_notify.Form1.EffectiveKillList("chrome.exe", Apps(), scheduleActive: true));
+    }
+
+    [Fact]
+    public void EffectiveKillList_WindowOpen_UnionsManualAndScheduleApps_MatchesTheService()
+    {
+        // While a window is open the kill set is the UNION, pipe-joined, byte-identical to the service
+        // (so both the session-0 and user-session loops kill the SAME set). Every app is matched by
+        // the loop's `.Contains(name + ".exe")`.
+        var apps = Apps("brave.exe", "discord.exe");
+        Assert.Equal(monkmode.Service1.EffectiveKillList("chrome.exe", apps, true),
+                     mm_notify.Form1.EffectiveKillList("chrome.exe", apps, true));
+        var union = mm_notify.Form1.EffectiveKillList("chrome.exe", apps, true);
+        Assert.Contains("chrome.exe", union);   // manual app still matched
+        Assert.Contains("brave.exe", union);    // schedule apps added
+        Assert.Contains("discord.exe", union);
+        // Exact serialisation: manual then schedule apps, "|"-joined.
+        Assert.Equal("chrome.exe|discord.exe",
+            mm_notify.Form1.EffectiveKillList("chrome.exe", Apps("discord.exe"), true));
+    }
+
+    [Fact]
+    public void EffectiveKillList_ScheduleOnlyBlock_NullManualSentinel_ScheduleAppsAreTheKillSet()
+    {
+        // A schedule-only block has no manual [Process] List (the "null" sentinel); while its window
+        // is open the schedule's apps ARE the kill set (byte-identical to the service). The tick's
+        // early-return keys off THIS effective set, so "null|chrome.exe" is not skipped, and the
+        // "null" token never substring-matches a real "<proc>.exe" under the loop's .Contains.
+        var scheduleOnly = mm_notify.Form1.EffectiveKillList("null", Apps("chrome.exe"), scheduleActive: true);
+        Assert.Equal(monkmode.Service1.EffectiveKillList("null", Apps("chrome.exe"), true), scheduleOnly);
+        Assert.Contains("chrome.exe", scheduleOnly);
+        Assert.NotEqual("null", scheduleOnly);   // the guard must NOT early-return on a schedule-only union
+    }
+}

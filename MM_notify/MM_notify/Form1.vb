@@ -116,10 +116,45 @@ Public Class Form1
     End Sub
 
     Private Sub appKillTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles appKillTimer.Tick
-        If iniProcessList Is Nothing OrElse iniProcessList = "" OrElse iniProcessList = "null" Then Return
+        ' C5b (b3-iii): the effective USER-SESSION kill set is the manual [Process] List, PLUS -
+        ' ONLY while a scheduled window is OPEN - the schedule's OWN apps (design §6.3 app-kill
+        ' UNION, SD2), mirroring the SERVICE session-0 loop (b3-i). The service is the sole writer of
+        ' [Schedule] ActiveUntil / [Time] HighWater / [Schedule] Spec and advances them every tick, so
+        ' the schedule state is RE-READ here each tick (ActiveUntil always; HighWater + Spec only when
+        ' ActiveUntil is set - the manual iniProcessList, fixed for the block, stays the load value).
+        ' GATED on ScheduleActive: a no-schedule block (ActiveUntil="" - every block until the CLI
+        ' writes a Spec in slice (c)) skips ALL decryption and leaves killList = iniProcessList, so
+        ' this loop kills EXACTLY what it does today (BYTE-IDENTICAL, no extra crypto per tick). NOT
+        ' macValid-gated (a union only ADDS kills - iniProcessList is always a prefix of killList, so
+        ' it can never remove a manual kill; fail-closed, per the b3-i verifier's P3; the notifier
+        ' holds no enforcement, and the hosts block is the real one). The schedule read is best-effort:
+        ' ANY failure (a transient mid-write ini read, an unreadable ActiveUntil) falls back to the
+        ' manual list - never LESS than today, self-heals next tick (the service is the real enforcer;
+        ' hosts self-heal (b3-ii) keeps the schedule SITES blocked at manual strength regardless).
+        Dim killList As String = iniProcessList
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            Dim scheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+            If scheduleActiveEnc <> "" Then
+                Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
+                Dim highWater As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
+                If ScheduleActive(enc.DecryptData(scheduleActiveEnc), highWater) Then
+                    killList = EffectiveKillList(iniProcessList, ParseSchedule(ini.GetKeyValue("Schedule", "Spec")).Apps, True)
+                End If
+            End If
+        Catch ex As Exception
+            killList = iniProcessList
+        End Try
+
+        ' Guard on the EFFECTIVE set (not iniProcessList): a SCHEDULE-ONLY block has a "null"/empty
+        ' manual list yet a non-empty union while its window is open, so keying the early-return off
+        ' the manual list alone would wrongly skip killing the schedule's apps. For a no-schedule
+        ' block killList IS iniProcessList, so this is the IDENTICAL early-return as before.
+        If killList Is Nothing OrElse killList = "" OrElse killList = "null" Then Return
         For Each proc As Process In Process.GetProcesses()
             Try
-                If proc.SessionId <> 0 AndAlso iniProcessList.Contains(proc.ProcessName & ".exe") Then
+                If proc.SessionId <> 0 AndAlso killList.Contains(proc.ProcessName & ".exe") Then
                     proc.Kill()
                 End If
             Catch ex As Exception
@@ -307,6 +342,154 @@ Public Class Form1
         End Try
         Application.Exit()
     End Sub
+
+    ' ================= C5b (b3-iii): schedule gates — the notifier's parity copy =================
+    '
+    ' The notifier's USER-SESSION app-kill (appKillTimer_Tick) unions the schedule's own apps while a
+    ' window is open (design §6.3, SD2), exactly as the SERVICE session-0 loop does (b3-i). To decide
+    ' "is a window open now?" and "what apps does it block?" it needs the same pure gates the service
+    ' and guardian use. MonkMode / monkmode (service) / mm_guard / mm_notify are separate assemblies
+    ' that can't reference one another, so these are a BYTE-FOR-BYTE parity copy of Service1.Schedule-
+    ' Elapsed / ScheduleActive / ParseSchedule / EffectiveKillList (and helpers) - the same
+    ' duplication+parity pattern as ConfigIntegrity / Simple3Des / the guardian's ScheduleActive,
+    ' pinned equal to the service by CLI-independent parity [Theory]s. The notifier only READS
+    ' [Schedule] ActiveUntil/Spec + [Time] HighWater (the service is their sole writer) - no write
+    ' race, exactly like the guardian. Friend Shared (like ComputeCompensatedUntil) so the parity
+    ' tests reach them as mm_notify.Form1.X.
+
+    ' The Spec grammar-version tag (parity copy of Service1.ScheduleSpecGrammarVersion).
+    Friend Const ScheduleSpecGrammarVersion As String = "v1"
+
+    ' Has the open scheduled window reached its monotonic close? "" (no window) and any unparseable
+    ' input read as NOT elapsed (fail-closed: a corrupted deadline/mark keeps the window held).
+    ' Byte-for-byte Service1.ScheduleElapsed (parity-pinned).
+    Friend Shared Function ScheduleElapsed(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        If scheduleActiveUntilText = "" Then Return False
+        Dim ca As New CultureInfo("en-CA")
+        Dim activeUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(scheduleActiveUntilText, ca, DateTimeStyles.None, activeUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return activeUntil <= highWater
+    End Function
+
+    ' Is a scheduled window currently open (set AND not yet elapsed)? SD1 hard hold. Empty => not
+    ' active; a non-empty-but-unparseable deadline => active (fail-closed: hold). Byte-for-byte
+    ' Service1.ScheduleActive (parity-pinned).
+    Friend Shared Function ScheduleActive(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
+        Return scheduleActiveUntilText <> "" AndAlso Not ScheduleElapsed(scheduleActiveUntilText, highWaterText)
+    End Function
+
+    ' The effective app-kill set this tick: the manual [Process] List, plus - ONLY while a window is
+    ' open (scheduleActive) - the schedule's apps, "|"-joined (the separator can't appear in an exe
+    ' name). scheduleActive=False / null / no apps => manualProcessList verbatim (byte-identical).
+    ' Byte-for-byte Service1.EffectiveKillList (parity-pinned).
+    Friend Shared Function EffectiveKillList(ByVal manualProcessList As String, ByVal scheduleApps As List(Of String), ByVal scheduleActive As Boolean) As String
+        If Not scheduleActive OrElse scheduleApps Is Nothing OrElse scheduleApps.Count = 0 Then Return manualProcessList
+        Dim sb As New System.Text.StringBuilder(manualProcessList)
+        For Each app As String In scheduleApps
+            sb.Append("|"c)
+            sb.Append(app)
+        Next
+        Return sb.ToString()
+    End Function
+
+    ' One recurring window (parity copy of Service1.ScheduleWindow).
+    Friend Class ScheduleWindow
+        Public DayMask As Integer
+        Public OpenMinutes As Integer
+        Public CloseMinutes As Integer
+    End Class
+
+    ' A parsed [Schedule] Spec: windows + schedule-wide site/app lists (parity copy of
+    ' Service1.ParsedSchedule).
+    Friend Class ParsedSchedule
+        Public Windows As New List(Of ScheduleWindow)
+        Public Sites As New List(Of String)
+        Public Apps As New List(Of String)
+    End Class
+
+    ' Parse a [Schedule] Spec into windows + site/app lists. The notifier only consumes .Apps, but
+    ' the WHOLE parser is copied byte-for-byte so .Apps is provably identical to the service's (a
+    ' trimmed apps-only parser could drift). FAIL-CLOSED: a malformed window is skipped (keep the
+    ' good ones); a wholly unparseable/empty Spec or an unknown grammar tag yields NO windows (inert
+    ' - a self-authored garbage rule never invents a phantom block; a TAMPERED Spec fails the MAC
+    ' upstream -> the service freezes, B7). Byte-for-byte Service1.ParseSchedule (parity-pinned).
+    Friend Shared Function ParseSchedule(ByVal specText As String) As ParsedSchedule
+        Dim result As New ParsedSchedule()
+        If String.IsNullOrWhiteSpace(specText) Then Return result
+        Dim parts() As String = specText.Split(";"c)
+        If parts.Length < 2 Then Return result
+        If parts(0).Trim() <> ScheduleSpecGrammarVersion Then Return result
+        For Each winTok As String In parts(1).Split(","c)
+            Dim w As ScheduleWindow = TryParseWindow(winTok)
+            If w IsNot Nothing Then result.Windows.Add(w)
+        Next
+        For i As Integer = 2 To parts.Length - 1
+            Dim p As String = parts(i)
+            If p.StartsWith("sites=", StringComparison.Ordinal) Then
+                AppendListTokens(result.Sites, p.Substring(6))
+            ElseIf p.StartsWith("apps=", StringComparison.Ordinal) Then
+                AppendListTokens(result.Apps, p.Substring(5))
+            End If
+        Next
+        Return result
+    End Function
+
+    ' Split a "a|b|c" list body on "|", trimming and dropping empties, into dest. Parity copy.
+    Private Shared Sub AppendListTokens(ByVal dest As List(Of String), ByVal body As String)
+        For Each tok As String In body.Split("|"c)
+            Dim t As String = tok.Trim()
+            If t <> "" Then dest.Add(t)
+        Next
+    End Sub
+
+    ' Parse one "dayMask:HHMM-HHMM" window; Nothing if malformed (fail-closed skip). Enforces SD3:
+    ' same-day only (open < close); rejects any out-of-range time or day. Parity copy.
+    Private Shared Function TryParseWindow(ByVal token As String) As ScheduleWindow
+        If token Is Nothing Then Return Nothing
+        Dim tok As String = token.Trim()
+        If tok = "" Then Return Nothing
+        Dim halves() As String = tok.Split(":"c)
+        If halves.Length <> 2 Then Return Nothing
+        Dim mask As Integer = TryParseDayMask(halves(0))
+        If mask = 0 Then Return Nothing
+        Dim times() As String = halves(1).Split("-"c)
+        If times.Length <> 2 Then Return Nothing
+        Dim openMin As Integer = TryParseHhmm(times(0))
+        Dim closeMin As Integer = TryParseHhmm(times(1))
+        If openMin < 0 OrElse closeMin < 0 Then Return Nothing
+        If openMin >= closeMin Then Return Nothing
+        Dim w As New ScheduleWindow()
+        w.DayMask = mask
+        w.OpenMinutes = openMin
+        w.CloseMinutes = closeMin
+        Return w
+    End Function
+
+    ' "12345" -> bitmask (bit 0 = Mon .. bit 6 = Sun). 0 if empty or any char is not '1'..'7'
+    ' (fail-closed). Parity copy.
+    Private Shared Function TryParseDayMask(ByVal s As String) As Integer
+        If s Is Nothing OrElse s.Length = 0 Then Return 0
+        Dim mask As Integer = 0
+        For Each ch As Char In s
+            If ch < "1"c OrElse ch > "7"c Then Return 0
+            mask = mask Or (1 << (AscW(ch) - AscW("1"c)))
+        Next
+        Return mask
+    End Function
+
+    ' "0900" -> 540 (minute-of-day). -1 if not exactly 4 digits or out of range (HH 0..23, MM 0..59).
+    ' Fail-closed. Parity copy.
+    Private Shared Function TryParseHhmm(ByVal s As String) As Integer
+        If s Is Nothing OrElse s.Length <> 4 Then Return -1
+        For Each ch As Char In s
+            If ch < "0"c OrElse ch > "9"c Then Return -1
+        Next
+        Dim hh As Integer = Integer.Parse(s.Substring(0, 2), CultureInfo.InvariantCulture)
+        Dim mm As Integer = Integer.Parse(s.Substring(2, 2), CultureInfo.InvariantCulture)
+        If hh > 23 OrElse mm > 59 Then Return -1
+        Return hh * 60 + mm
+    End Function
 
 End Class
 
