@@ -34,13 +34,13 @@ public class ClassifyHeartbeatTests
     [Fact]
     public void ValidMac_Expired_Lifts()
     {
-        Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: true, coolOffElapsed: false, codeUnlocked: false));
+        Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: true, coolOffElapsed: false, codeUnlocked: false, scheduleActive: false));
     }
 
     [Fact]
     public void ValidMac_NotExpired_Restamps()
     {
-        Assert.Equal(Hb.Restamp, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: false));
+        Assert.Equal(Hb.Restamp, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: false, scheduleActive: false));
     }
 
     // THE REGRESSION. A tampered/invalid MAC over a (back-dated) past Until must
@@ -49,27 +49,27 @@ public class ClassifyHeartbeatTests
     [Fact]
     public void HeartbeatForTamperedExpiredConfig_IsHold()
     {
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: false, codeUnlocked: false));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: false, codeUnlocked: false, scheduleActive: false));
     }
 
     [Fact]
     public void InvalidMac_NotExpired_Holds()
     {
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: false, codeUnlocked: false));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: false, codeUnlocked: false, scheduleActive: false));
     }
 
     // C2b: a completed cooling-off lifts - but ONLY under a valid MAC.
     [Fact]
     public void ValidMac_CoolOffElapsed_Lifts()
     {
-        Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: true, codeUnlocked: false));
+        Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: true, codeUnlocked: false, scheduleActive: false));
     }
 
     // C3b: a partner-verified code-unlock lifts - but ONLY under a valid MAC.
     [Fact]
     public void ValidMac_CodeUnlocked_Lifts()
     {
-        Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: true));
+        Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: true, scheduleActive: false));
     }
 
     // C2b KEYSTONE: a tampered config can never cool off its way out. Even with
@@ -78,8 +78,8 @@ public class ClassifyHeartbeatTests
     [Fact]
     public void InvalidMac_EvenWithCoolOffElapsed_Holds()
     {
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: true, codeUnlocked: false));
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: true, codeUnlocked: false));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: true, codeUnlocked: false, scheduleActive: false));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: true, codeUnlocked: false, scheduleActive: false));
     }
 
     // C3b KEYSTONE (R6): a tampered config can never code-unlock its way out. Even
@@ -88,8 +88,8 @@ public class ClassifyHeartbeatTests
     [Fact]
     public void InvalidMac_EvenWithCodeUnlocked_Holds()
     {
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: false, codeUnlocked: true));
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: true, codeUnlocked: true));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: false, codeUnlocked: true, scheduleActive: false));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: true, codeUnlocked: true, scheduleActive: false));
     }
 
     // A pending-but-not-elapsed cooling-off with no code-unlock keeps re-stamping:
@@ -98,39 +98,60 @@ public class ClassifyHeartbeatTests
     [Fact]
     public void ValidMac_NothingDue_Restamps()
     {
-        Assert.Equal(Hb.Restamp, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: false));
+        Assert.Equal(Hb.Restamp, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: false, scheduleActive: false));
     }
 
-    // Core invariant of the B7 fix, carried over (now over all three exit reasons):
-    // an invalid MAC NEVER re-stamps (and never lifts) under ANY input combination.
-    [Theory]
-    [InlineData(true, true, true)]
-    [InlineData(true, true, false)]
-    [InlineData(true, false, true)]
-    [InlineData(false, true, true)]
-    [InlineData(true, false, false)]
-    [InlineData(false, true, false)]
-    [InlineData(false, false, true)]
-    [InlineData(false, false, false)]
-    public void InvalidMac_NeverRestampsNorLifts(bool blockExpired, bool coolOffElapsed, bool codeUnlocked)
-    {
-        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: blockExpired, coolOffElapsed: coolOffElapsed, codeUnlocked: codeUnlocked));
-    }
-
-    // The full truth table (all 16 combos): lift exactly when macValid AND (expired
-    // OR cooling-off elapsed OR code-unlocked) - i.e. exactly when EffectiveExit
-    // would say so. Pinned so a future edit can't silently widen (or narrow) "lift".
+    // C5b KEYSTONE (SD1): an OPEN scheduled window OUT-RANKS every lift trigger. Even
+    // with a genuinely expired manual block, an elapsed cooling-off AND a code-unlock,
+    // a valid MAC + scheduleActive RE-STAMPS (holds, and keeps HighWater advancing so
+    // the window counts down to its own close) - it NEVER lifts. This is what makes
+    // "a cooling-off or a code can't lift an OPEN scheduled window" true.
     [Fact]
-    public void Lifts_IffMacValidAndAnExitIsDue()
+    public void ValidMac_ScheduleActive_Restamps_EvenWhenEveryExitIsDue()
+    {
+        Assert.Equal(Hb.Restamp, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: true, coolOffElapsed: true, codeUnlocked: true, scheduleActive: true));
+        // and with nothing else due, the open window is itself the hold (still Restamp).
+        Assert.Equal(Hb.Restamp, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: false, scheduleActive: true));
+    }
+
+    // C5b: an invalid MAC HOLDS even with an open window - the macValid gate is first,
+    // so a frozen config never even consults the schedule arm (freeze always wins).
+    [Fact]
+    public void InvalidMac_EvenWithScheduleActive_Holds()
+    {
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: false, codeUnlocked: false, scheduleActive: true));
+        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true, coolOffElapsed: true, codeUnlocked: true, scheduleActive: true));
+    }
+
+    // Core invariant of the B7 fix, carried over (now over all four hold/exit inputs):
+    // an invalid MAC NEVER re-stamps (and never lifts) under ANY input combination -
+    // including an open scheduled window (macValid is the first gate).
+    [Fact]
+    public void InvalidMac_NeverRestampsNorLifts()
+    {
+        foreach (var blockExpired in new[] { true, false })
+            foreach (var coolOffElapsed in new[] { true, false })
+                foreach (var codeUnlocked in new[] { true, false })
+                    foreach (var scheduleActive in new[] { true, false })
+                        Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: blockExpired, coolOffElapsed: coolOffElapsed, codeUnlocked: codeUnlocked, scheduleActive: scheduleActive));
+    }
+
+    // The full truth table (all 32 combos): lift exactly when macValid AND NOT an open
+    // scheduled window (SD1) AND (expired OR cooling-off elapsed OR code-unlocked) -
+    // i.e. exactly when EffectiveExit would say so. Pinned so a future edit can't
+    // silently widen (or narrow) "lift", and so the schedule HOLD can't be bypassed.
+    [Fact]
+    public void Lifts_IffMacValidAndNoOpenWindowAndAnExitIsDue()
     {
         foreach (var macValid in new[] { true, false })
             foreach (var blockExpired in new[] { true, false })
                 foreach (var coolOffElapsed in new[] { true, false })
                     foreach (var codeUnlocked in new[] { true, false })
-                    {
-                        bool lifts = monkmode.Service1.ClassifyHeartbeat(macValid, blockExpired, coolOffElapsed, codeUnlocked) == Hb.Lift;
-                        Assert.Equal(macValid && (blockExpired || coolOffElapsed || codeUnlocked), lifts);
-                    }
+                        foreach (var scheduleActive in new[] { true, false })
+                        {
+                            bool lifts = monkmode.Service1.ClassifyHeartbeat(macValid, blockExpired, coolOffElapsed, codeUnlocked, scheduleActive) == Hb.Lift;
+                            Assert.Equal(macValid && !scheduleActive && (blockExpired || coolOffElapsed || codeUnlocked), lifts);
+                        }
     }
 }
 

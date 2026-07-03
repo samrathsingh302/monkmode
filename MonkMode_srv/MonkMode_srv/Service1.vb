@@ -194,7 +194,16 @@ Public Class Service1
                 ' stopMe() gap after a code-unlock, OnStart sees the persisted flag and
                 ' completes the teardown (the same convergence cooling-off relies on).
                 Dim unlockedAtStart As String = iniFile.GetKeyValue("Partner", "UnlockedAt")
-                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, storedHw, 0, macValidAtStart) Then
+                ' C5b: read the stored [Schedule] ActiveUntil (encrypted like CoolOffUntil;
+                ' "" = no window open) so OnStart's one lift path also HOLDS through an open
+                ' scheduled window (SD1 - a window out-ranks expiry/cooling-off/code at boot
+                ' too). SUB-SLICE (b1): OnStart decides off the STORED deadline (it never
+                ' advances HighWater, so it uses storedHw as the frame); the boot-mode
+                ' window RE-EVALUATION that can (re)open a window at boot is (b2). On every
+                ' existing block this reads "" (inert).
+                Dim scheduleActiveEncAtStart As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
+                Dim scheduleActiveAtStart As String = If(scheduleActiveEncAtStart = "", "", encryptionW.DecryptData(scheduleActiveEncAtStart))
+                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart) Then
                     ' The ONLY OnStart path that may lift the block: a valid B7 MAC
                     ' AND (a successfully parsed, genuinely past end time OR an
                     ' elapsed cooling-off deadline OR a partner-verified code-unlock),
@@ -582,6 +591,13 @@ Public Class Service1
         ' unlocked, the fail-closed default - a tick that couldn't read it holds
         ' the block). Plaintext-as-stored (MAC-covered), not decrypted.
         Dim iniPartnerUnlockedAt As String = ""
+        ' C5b: the decrypted [Schedule] ActiveUntil (an open window's converted monotonic
+        ' close) for THIS tick ("" = no window open, also the fail-closed default on a
+        ' read failure). SUB-SLICE (b1): only READ + fed to the heartbeat's schedule-hold
+        ' gate (SD1: an open window out-ranks every lift trigger). The per-tick step that
+        ' OPENS/EXTENDS/CLEARS it (ProcessScheduleWindows) is sub-slice (b2), so on every
+        ' existing block this stays "" and the schedule hold is inert.
+        Dim iniScheduleActiveUntil As String = ""
         ' C4: whether THIS block is committed (self-serve cooling-off disabled = code-
         ' only exit). Only consulted under macValid (a frozen config Ignores cooling-off
         ' regardless), and under macValid the MAC-covered flag is authentic. Default
@@ -626,6 +642,14 @@ Public Class Service1
             ' C3b: read the [Partner] UnlockedAt exit flag (plaintext, as-stored -
             ' MAC-covered, not decrypted). Absent/"" = not code-unlocked.
             iniPartnerUnlockedAt = iniFile.GetKeyValue("Partner", "UnlockedAt")
+            ' C5b: read the schedule's converted monotonic deadline [Schedule] ActiveUntil
+            ' (encrypted like CoolOffUntil; absent/empty = no window open). SUB-SLICE (b1):
+            ' this is the STORED value only - the ProcessScheduleWindows step that OPENS/
+            ' EXTENDS/CLEARS it is (b2) - so on every existing block it reads "" and the
+            ' heartbeat's schedule hold below is inert. Consumed via ScheduleActive so an
+            ' open window out-ranks every lift trigger (SD1).
+            Dim scheduleActiveEnc As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
+            iniScheduleActiveUntil = If(scheduleActiveEnc = "", "", encryptionW.DecryptData(scheduleActiveEnc))
             ' C4: read the [Commit] Committed policy flag ("yes"=committed). MAC-covered.
             iniCommitted = IsCommitted(iniFile.GetKeyValue("Commit", "Committed"))
             iniProcessList = iniFile.GetKeyValue("Process", "List")
@@ -837,7 +861,12 @@ Public Class Service1
             ' tampered config can never code-unlock its way out (a raw-edited UnlockedAt
             ' fails the MAC => Hold). Natural expiry, cooling-off and partner-code all
             ' converge on the one Lift => stopMe().
-            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt))
+            ' C5b (SD1): an OPEN scheduled window OUT-RANKS all three lift triggers -
+            ' ClassifyHeartbeat's scheduleActive arm Restamps (keeps HighWater advancing
+            ' so the window counts down), never lifting, until the window's own monotonic
+            ' close. INERT in sub-slice (b1): iniScheduleActiveUntil is the STORED value,
+            ' always "" until the (b2) tick step ever opens a window.
+            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt), ScheduleActive(iniScheduleActiveUntil, newHw))
                 Case HeartbeatAction.Lift
                     stopMe()
                 Case HeartbeatAction.Restamp
@@ -984,8 +1013,21 @@ Public Class Service1
     ' is only trusted UNDER a valid MAC (forging it by raw edit fails the MAC =>
     ' Hold), so a code-unlock can only ever have come from the service verifying a
     ' correct code. Lift <=> EffectiveExit still holds (now three OR-ed reasons).
-    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean) As HeartbeatAction
+    '
+    ' C5b (SD1): scheduleActive (ScheduleActive over the MAC-covered [Schedule]
+    ' ActiveUntil) is a HARD HOLD that OUT-RANKS every lift trigger. While a window
+    ' is open, keep RE-STAMPING (that arm is what advances HighWater, so the window
+    ' counts down to its OWN monotonic close) and NEVER lift - not on expiry, not on
+    ' a completed cooling-off, not on a code. It mirrors EffectiveExit's
+    ' `If ScheduleActive Then Return False`, so Lift <=> EffectiveExit still holds
+    ' (both now also gate on NOT scheduleActive). Only the window reaching its
+    ' monotonic close (ScheduleElapsed => scheduleActive False) releases it. NOTE
+    ' (C5b sub-slice b1): this arm is wired but INERT on every existing block - the
+    ' per-tick ProcessScheduleWindows step that ever makes scheduleActive True is
+    ' sub-slice (b2), so the caller passes ScheduleActive("", newHw) = False today.
+    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean) As HeartbeatAction
         If Not macValid Then Return HeartbeatAction.Hold
+        If scheduleActive Then Return HeartbeatAction.Restamp
         If blockExpired OrElse coolOffElapsed OrElse codeUnlocked Then Return HeartbeatAction.Lift
         Return HeartbeatAction.Restamp
     End Function
@@ -1182,11 +1224,24 @@ Public Class Service1
     ' not passed + macValid => still active" and SCM-resurrect the just-exited
     ' block. Pure + Shared, parity-pinned with the guardian copy.
     '
-    ' C3b param order (until, coolOffUntil, unlockedAt, highWater, grace, macValid):
-    ' unlockedAt sits after coolOffUntil (the two early-exit reasons together),
-    ' before the highWater/grace time frame - the frozen-design order.
-    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+    ' C5b (SD1): an OPEN scheduled window is a HARD HOLD that out-ranks every exit
+    ' reason - while it is open NOTHING lifts the effective block (not expiry, not a
+    ' completed cooling-off, not a partner code), until the window reaches its own
+    ' monotonic close (ScheduleActive False). The check sits right after the macValid
+    ' gate, so it only ever ADDS a hold; ClassifyHeartbeat's mirror arm keeps
+    ' Lift <=> EffectiveExit. scheduleActiveUntilText is the decrypted [Schedule]
+    ' ActiveUntil ("" = no window, the inert default on every block without a live
+    ' schedule; the tick step that ever sets it is C5b sub-slice b2).
+    '
+    ' C3b/C5b param order (until, coolOffUntil, unlockedAt, scheduleActiveUntil,
+    ' highWater, grace, macValid): unlockedAt sits after coolOffUntil (the early-exit
+    ' reasons together); scheduleActiveUntil (a HOLD input that needs highWater) sits
+    ' just before the highWater/grace time frame - the frozen-design order,
+    ' parity-pinned with the guardian copy.
+    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         If Not macValid Then Return False
+        ' C5b (SD1): an open scheduled window is a HARD HOLD - nothing lifts while it is open.
+        If ScheduleActive(scheduleActiveUntilText, highWaterText) Then Return False
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw

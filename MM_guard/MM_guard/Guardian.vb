@@ -94,10 +94,16 @@ Friend Module Guardian
     ' guardian's stand-down gates on this, so it agrees with the service's lift
     ' within one tick - and never resurrects a cooled-off OR code-unlocked block
     ' (worst case, one bounce: a restarted service's OnStart immediately re-lifts,
-    ' and the guardian's next read stands it down). Param order parity-pinned with
-    ' Service1.EffectiveExit (until, coolOffUntil, unlockedAt, highWater, grace, macValid).
-    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+    ' and the guardian's next read stands it down). C5b (SD1): also folds ScheduleActive
+    ' in as a HARD HOLD - while a window is open the guardian keeps guarding and never
+    ' stands down, so it can't stand down at a window's start nor resurrect one at its
+    ' close (the service is the sole writer of [Schedule] ActiveUntil; the guardian only
+    ' reads it). Param order parity-pinned with Service1.EffectiveExit (until,
+    ' coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, grace, macValid).
+    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         If Not macValid Then Return False
+        ' C5b (SD1): an open scheduled window is a HARD HOLD - nothing lifts while it is open.
+        If ScheduleActive(scheduleActiveUntilText, highWaterText) Then Return False
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw

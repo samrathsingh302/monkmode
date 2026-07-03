@@ -90,8 +90,9 @@ Module Program
                 Dim highWater As String = ""
                 Dim coolOffUntil As String = ""
                 Dim unlockedAt As String = ""
+                Dim scheduleActiveUntil As String = ""
                 Dim macValid As Boolean = False
-                ReadBlockState(until, highWater, coolOffUntil, unlockedAt, macValid)
+                ReadBlockState(until, highWater, coolOffUntil, unlockedAt, scheduleActiveUntil, macValid)
 
                 ' Fail CLOSED on every axis: an unparseable Until OR an invalid/
                 ' absent B7 MAC (a tampered config) reads as NOT ended, so the
@@ -107,7 +108,7 @@ Module Program
                 ' resurrecting the cooled-off block. C3b: folding the partner-code
                 ' UnlockedAt in is LOAD-BEARING for the identical reason - the
                 ' guardian must not resurrect a just-code-unlocked block.
-                Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, highWater, ExpiryGraceSeconds, macValid)
+                Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, ExpiryGraceSeconds, macValid)
                 If Not blockActive Then
                     ' Genuinely expired (parsed, past end time, valid MAC): stand
                     ' down for good. The service's stopMe() also kills us at
@@ -140,12 +141,14 @@ Module Program
             Dim highWater As String = ""
             Dim coolOffUntil As String = ""
             Dim unlockedAt As String = ""
+            Dim scheduleActiveUntil As String = ""
             Dim macValid As Boolean = False
-            ReadBlockState(until, highWater, coolOffUntil, unlockedAt, macValid)
-            ' C2b/C3b: same EffectiveExit gate as the loop - the dying guardian must
-            ' not restart the service into a block that just cooled off OR was
-            ' code-unlocked.
-            Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, highWater, ExpiryGraceSeconds, macValid)
+            ReadBlockState(until, highWater, coolOffUntil, unlockedAt, scheduleActiveUntil, macValid)
+            ' C2b/C3b/C5b: same EffectiveExit gate as the loop - the dying guardian must
+            ' not restart the service into a block that just cooled off, was code-unlocked
+            ' OR whose scheduled window has closed (nor stand down mid-window: an open
+            ' window holds via ScheduleActive).
+            Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, ExpiryGraceSeconds, macValid)
             TryRestartService(blockActive)
         Catch ex As Exception
         End Try
@@ -160,12 +163,19 @@ Module Program
     ' early stand-down), macValidOut False means a tampered/unreadable config
     ' also reads active - so a deleted or corrupted config keeps the guardian
     ' guarding, never stands it down. One load (not four) so Until, HighWater,
-    ' CoolOffUntil and the MAC are all evaluated against the same bytes.
-    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef coolOffUntilOut As String, ByRef unlockedOut As String, ByRef macValidOut As Boolean)
+    ' CoolOffUntil, ScheduleActiveUntil and the MAC are all evaluated against the
+    ' same bytes. C5b: scheduleActiveOut is the decrypted [Schedule] ActiveUntil
+    ' ("" = no window open, the fail-closed default); the guardian only READS it (the
+    ' service is its sole writer, like HighWater/CoolOffUntil), and folding
+    ' ScheduleActive into the stand-down (via EffectiveExit) is LOAD-BEARING - without
+    ' it the guardian could stand down at a window's start (not restart a killed
+    ' service mid-window) or resurrect the block at its close.
+    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef coolOffUntilOut As String, ByRef unlockedOut As String, ByRef scheduleActiveOut As String, ByRef macValidOut As Boolean)
         untilOut = ""
         highWaterOut = ""
         coolOffUntilOut = ""
         unlockedOut = ""
+        scheduleActiveOut = ""
         macValidOut = False
         Try
             Dim ini As New IniFile
@@ -177,6 +187,11 @@ Module Program
             ' C3b: [Partner] UnlockedAt is plaintext-as-stored (MAC-covered), not
             ' decrypted; absent/"" = not code-unlocked (never an early stand-down).
             unlockedOut = ini.GetKeyValue("Partner", "UnlockedAt")
+            ' C5b: [Schedule] ActiveUntil is an encrypted datetime like CoolOffUntil
+            ' ("" = no window open). Absent/unreadable => "" (fail-closed: no phantom
+            ' window; a genuine window's deadline is covered by the same MAC).
+            Dim scheduleEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+            scheduleActiveOut = If(scheduleEnc = "", "", enc.DecryptData(scheduleEnc))
             macValidOut = ConfigMacIsValidForIni(ini)
         Catch ex As Exception
         End Try
