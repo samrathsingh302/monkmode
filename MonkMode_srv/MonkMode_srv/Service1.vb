@@ -659,8 +659,11 @@ Public Class Service1
     ' on every (re)start - makes the first live tick measure wallDelta from boot, not from
     ' the pre-reboot Now, so a missed window stays missed. "" = not yet seeded (=> the
     ' evaluator cannot detect a jump that tick; the HighWater still holds any open window).
-    ' Supersedes the C5a design §4.2 "lastNowText = the stored [CurrentTime] Now" (that
-    ' contract had the reboot-staleness gap the b2 verifier caught).
+    ' Rolled only while TimeChanging="no" (see the tick), so it freezes through the notifier's
+    ' clock-change flag and a jump-OVER coinciding with it still surfaces (SD4, fail-closed).
+    ' Supersedes the C5a design §4.2 "lastNowText = the stored [CurrentTime] Now": in-memory +
+    ' boot-seeded closes the reboot-staleness gap the b2 verifier caught, while the "no"-gated
+    ' roll keeps the old stored-Now cadence (which was heartbeat-written, also "no"-gated).
     Private lastTickWallNow As String = ""
 
     ' #2 (audit P2): serialize timer ticks. System.Timers.Timer runs with
@@ -800,13 +803,21 @@ Public Class Service1
             monoElapsedSeconds = If(lastMonoMs <= 0, 0L, (nowMono - lastMonoMs) \ 1000L)
             lastMonoMs = nowMono
             ' C5b (b2): capture this tick's wall 'now' for the schedule jump-OVER detection
-            ' and roll the in-memory anchor forward, remembering the PREVIOUS tick's now as
-            ' lastNow. Captured right after lastMonoMs so wallDelta (tickWallNow -
-            ' prevTickWallNow) and monoElapsedSeconds span the SAME previous-tick->this-tick
-            ' interval - the whole point of an in-memory anchor over the stored Now.
+            ' and remember the PREVIOUS tick's now as lastNow. Captured right after lastMonoMs
+            ' so wallDelta (tickWallNow - prevTickWallNow) and monoElapsedSeconds span the SAME
+            ' previous-tick->this-tick interval - the whole point of an in-memory anchor over
+            ' the stored Now. The anchor is ROLLED only while TimeChanging="no" (the same gate
+            ' the schedule poll + heartbeat take below): during the notifier's ~2s clock-change
+            ' flag the poll is skipped, so freezing the anchor through the episode keeps the
+            ' full wallDelta visible on the resume tick - a live forward jump-OVER a window that
+            ' coincides with the flag still surfaces (fail-closed, SD4), instead of being hidden
+            ' by an anchor that rolled to the post-jump time mid-episode. A no-op flag (no real
+            ' change) leaves wallDelta ~= real elapsed, so it never false-opens. lastMonoMs
+            ' stays ungated (B4 needs it every tick); across a >5min episode the two anchors can
+            ' diverge by that episode, which only ever OVER-blocks (never lifts).
             prevTickWallNow = lastTickWallNow
             tickWallNow = DateTime.Now.ToString(culture)
-            lastTickWallNow = tickWallNow
+            If StrComp("no", iniTimeChanging) = 0 Then lastTickWallNow = tickWallNow
             Dim candidateHw As String = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
             newHw = CapHighWaterAdvance(storedHw, candidateHw, monoElapsedSeconds)
             Dim parsedHw As DateTime
