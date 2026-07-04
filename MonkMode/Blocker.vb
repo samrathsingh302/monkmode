@@ -352,6 +352,72 @@ Module Blocker
         End Try
     End Sub
 
+    ' ---- D1a: site presets (named category -> domains, INPUT sugar only) ----
+    '
+    ' A preset is a named bundle of well-known domains the CLI expands into the SAME site
+    ' list a user could type by hand with --sites. It is PURE INPUT: the expanded domains
+    ' flow into WriteHostsBlock + [User] CustomSites exactly like --sites, so the enforcement
+    ' canonical (B7) MAC-covers them downstream with NO new canonical surface and NO schema
+    ' bump - the preset TABLE is a compile-time constant, not stored config, so there is
+    ' nothing extra to protect. The categories are FIXED (the user picks them, can't edit
+    ' them); an EDITABLE user default site list is a separate concern (D1b, stored MAC-covered
+    ' on the setup ini, mirroring the C6c cooling-off default). Every domain is the bare
+    ' registrable single-label-TLD form, so BuildHostsEntries adds the www. variant and the
+    ' same NormalizeDomain scheme/path handling applies as for a hand-typed --sites domain.
+    Private ReadOnly PresetTable As New Dictionary(Of String, String())(StringComparer.OrdinalIgnoreCase) From {
+        {"social", New String() {"facebook.com", "instagram.com", "twitter.com", "x.com", "tiktok.com", "reddit.com", "snapchat.com", "tumblr.com", "pinterest.com", "linkedin.com", "threads.net"}},
+        {"video", New String() {"youtube.com", "netflix.com", "twitch.tv", "hulu.com", "disneyplus.com", "primevideo.com"}},
+        {"news", New String() {"cnn.com", "nytimes.com", "foxnews.com", "bbc.com", "buzzfeed.com", "theverge.com"}},
+        {"shopping", New String() {"amazon.com", "ebay.com", "etsy.com", "aliexpress.com", "walmart.com", "target.com"}},
+        {"adult", New String() {"pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com", "redtube.com", "onlyfans.com"}}
+    }
+
+    ' The sorted list of known preset category names (for usage/help + the "unknown preset"
+    ' error hint). A read-only snapshot; the table is never mutated. Public so the CLI usage
+    ' text lists the live categories rather than a hand-maintained copy that could drift.
+    Public Function KnownPresetNames() As String()
+        Dim names As New List(Of String)(PresetTable.Keys)
+        names.Sort(StringComparer.OrdinalIgnoreCase)
+        Return names.ToArray()
+    End Function
+
+    ' Expand a comma/semicolon-separated preset argument ("social,video") into the union of
+    ' those categories' domains, deduped case-insensitively with order preserved (category
+    ' order, then domain order within each). FAIL-CLOSED on an unrecognised category: it
+    ' collects EVERY unknown token and returns False with a friendly error listing them + the
+    ' valid names, and emits NOTHING - rather than silently expanding only the known ones. In
+    ' a self-control tool a typo'd preset must never quietly UNDER-block (the same fail-closed
+    ' stance as the schedule day-name parser rejecting an unknown day). An empty/whitespace/
+    ' Nothing arg returns True with an empty list (nothing requested - the caller's other site
+    ' sources still apply). Friend so the expansion contract is unit-tested without arming a block.
+    Friend Function TryExpandPresets(ByVal presetArg As String, ByRef domains As List(Of String), ByRef errorMsg As String) As Boolean
+        domains = New List(Of String)
+        errorMsg = ""
+        If presetArg Is Nothing OrElse presetArg.Trim() = "" Then Return True
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim unknown As New List(Of String)
+        For Each rawTok As String In presetArg.Split(New Char() {","c, ";"c})
+            Dim tok As String = rawTok.Trim()
+            If tok = "" Then Continue For
+            Dim entries() As String = Nothing
+            If Not PresetTable.TryGetValue(tok, entries) Then
+                unknown.Add(tok)
+                Continue For
+            End If
+            For Each d As String In entries
+                If seen.Add(d) Then domains.Add(d)
+            Next
+        Next
+        If unknown.Count > 0 Then
+            domains = New List(Of String)   ' fail-closed: emit NOTHING when any category is unknown
+            errorMsg = If(unknown.Count > 1, "Unknown presets: ", "Unknown preset: ") &
+                       String.Join(", ", unknown) &
+                       ". Available presets: " & String.Join(", ", KnownPresetNames()) & "."
+            Return False
+        End If
+        Return True
+    End Function
+
     ' ---- config (ini) ----
 
     Private Function PackList(ByVal items As IEnumerable(Of String)) As String
