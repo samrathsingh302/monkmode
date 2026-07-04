@@ -1,6 +1,7 @@
 '    MonkMode - CLI entry point
 '
 '    Usage:
+'      monkmode setup  [--partner "Alex (alex@example.com)"]  (required first-run onboarding)
 '      monkmode block  --sites a.com,b.com [--apps chrome.exe,foo.exe]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit]
 '      monkmode status
@@ -40,6 +41,7 @@ Module Program
             ' freeze per B7); best-effort, never throws.
             Blocker.RestorePrimaryFromBackupIfCorrupt()
             Select Case verb
+                Case "setup" : Return DoSetup(args)
                 Case "block" : Return DoBlock(args)
                 Case "status" : Return DoStatus()
                 Case "add" : Return DoAdd(args)
@@ -62,7 +64,52 @@ Module Program
 
     ' ---------- verbs ----------
 
+    ' C6a: `monkmode setup` - required first-run onboarding. Records that setup has run (a
+    ' MAC-covered [Setup] Done in the SEPARATE monkmode_setup.ini) plus the optional
+    ' accountability-partner label, then explains the exit model. `block`/`schedule` refuse
+    ' to arm until this has run (SetupIsComplete), so a first block always goes through this
+    ' explanation and is never armed by a user who hasn't seen how to get out. Idempotent +
+    ' safe to re-run any time (it never touches a live block). C6a does NOT mint an
+    ' account-level code: each `block` already mints its OWN one-time code (C3b,
+    ' rotate-on-use), so setup RELAYS that model rather than double-minting a second code
+    ' (the lighter reconciliation, design gotcha #3). The configurable cooling-off duration
+    ' + default blocklist/presets are deferred (C6b / D1).
+    Private Function DoSetup(ByVal args As String()) As Integer
+        Dim partner As String = GetOption(args, "--partner").Trim()
+        If Not Blocker.WriteSetupConfig(partner) Then
+            Console.Error.WriteLine("Could not secure the setup file (Windows DPAPI is unavailable on this machine).")
+            Console.Error.WriteLine("MonkMode can't protect its config here, so it won't arm blocks safely. Resolve DPAPI, then re-run 'monkmode setup'.")
+            Return 2
+        End If
+        Console.WriteLine("MonkMode is set up. Here's how it works before you start your first block:")
+        Console.WriteLine("")
+        Console.WriteLine("  Accountability code - every block you start mints a ONE-TIME code, shown once at")
+        Console.WriteLine("  the start. Relay it to your accountability partner" & If(partner <> "", " (" & partner & ")", "") & " straight away. To end")
+        Console.WriteLine("  a block early, they run:  monkmode unblock --code <CODE>  (a fresh code each block).")
+        Console.WriteLine("")
+        Console.WriteLine("  Cooling-off - without the code you can still leave, but not instantly: 'monkmode")
+        Console.WriteLine("  unblock' starts a mandatory ~1 hour wait of active machine time; the block stays")
+        Console.WriteLine("  fully enforced until it elapses, then lifts itself ('monkmode unblock --cancel' aborts it).")
+        Console.WriteLine("")
+        Console.WriteLine("  Committed blocks - 'monkmode block --commit' disables even the cooling-off exit, so")
+        Console.WriteLine("  the accountability code is the ONLY early way out. Use it when you mean it.")
+        Console.WriteLine("")
+        Console.WriteLine("  Schedules - 'monkmode schedule' arms recurring wall-clock windows that open/close")
+        Console.WriteLine("  automatically; a window can't be ended early once open.")
+        Console.WriteLine("")
+        Console.WriteLine("You're ready. Start a block with, e.g.:  monkmode block --sites reddit.com --for 2h")
+        Return 0
+    End Function
+
     Private Function DoBlock(ByVal args As String()) As Integer
+        ' C6a: required first-run setup. Refuse to arm until `monkmode setup` has run, so a
+        ' first block always goes through the accountability-model explanation (and can
+        ' never be armed by someone who hasn't seen how to exit). Gates only NEW arms -
+        ' status/unblock/add against an EXISTING block are never gated, so this can't trap
+        ' an already-active block. Fail-closed: a missing/tampered setup file reads as not
+        ' set up -> re-run `setup`.
+        If Not Blocker.SetupIsComplete() Then Return SetupRequired()
+
         Dim domains As New List(Of String)
         domains.AddRange(SplitList(GetOption(args, "--sites")))
 
@@ -267,6 +314,11 @@ Module Program
             Console.WriteLine("If a window is open now it runs to its end; MonkMode then tears down within ~10s.")
             Return 0
         End If
+
+        ' C6a: required first-run setup gates a fresh ARM only - NOT --show/--validate
+        ' (read-only) or --clear (a reduction), which returned above. Same gate as DoBlock,
+        ' so a first schedule also goes through the accountability-model explanation.
+        If Not Blocker.SetupIsComplete() Then Return SetupRequired()
 
         ' SD-c1: a manual `--for` block and a schedule are mutually exclusive in C5b.
         If Blocker.BlockIsActive() Then
@@ -518,6 +570,14 @@ Module Program
 
     ' ---------- helpers ----------
 
+    ' C6a: the shared "run setup first" refusal for the arm paths (block/schedule). A
+    ' distinct exit code (4) so a script can tell "not set up" apart from a usage error (1)
+    ' or an already-active block (3).
+    Private Function SetupRequired() As Integer
+        Console.Error.WriteLine("MonkMode isn't set up yet. Run 'monkmode setup' once first - it takes a minute and explains how to end a block (the accountability code + cooling-off).")
+        Return 4
+    End Function
+
     ' Run one best-effort teardown step: print what it does, swallow + report any
     ' failure so the escape hatch always continues to the next step. Returns
     ' whether the step succeeded so a dependent step can be gated on it (audit
@@ -616,6 +676,7 @@ Module Program
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
+        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""]   (first-run onboarding; required before the first block)")
         Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
@@ -630,6 +691,7 @@ Module Program
         Console.WriteLine("  monkmode help")
         Console.WriteLine("")
         Console.WriteLine("Notes:")
+        Console.WriteLine("  - Run 'monkmode setup' once before your first block; it explains the accountability code + cooling-off and is required to arm.")
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
         Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
         Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")

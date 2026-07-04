@@ -954,6 +954,157 @@ Module Blocker
         Next
     End Sub
 
+    ' ---- C6a: first-run setup / onboarding preferences (CLI-only, MAC-covered) ----
+    '
+    ' `monkmode setup` records that first-run onboarding has happened and stores the
+    ' user's account-level preferences in a SEPARATE file (monkmode_setup.ini) next to
+    ' the exes - deliberately NOT the enforcement config (monkmode_settings.ini), which
+    ' every `block`/`schedule` arm OVERWRITES and whose canonical is the 4-copy parity-
+    ' pinned enforcement MAC. Keeping onboarding state out of that file means C6a adds
+    ' ZERO enforcement-canonical surface (no v7->v8 lockstep) and can never perturb a
+    ' live block. The setup file is CLI-only (the service never reads it), so its MAC is
+    ' a private CLI canonical with no cross-assembly parity requirement.
+    '
+    ' The gate is a USABILITY guardrail, not a security control: `block`/`schedule`
+    ' refuse to arm until setup has run, so a first block always goes through the
+    ' accountability-model explanation (each block mints a one-time partner code you must
+    ' relay; cooling-off is a mandatory wait) and can't be armed by a user who never saw
+    ' how to get out. Forging "setup done" grants nothing an attacker wants (arming a
+    ' block is the tool's PURPOSE, not a bypass; removing a block is unaffected). It is
+    ' still MAC-covered - for tamper-evidence, house-pattern consistency, and as the
+    ' trusted home for the load-bearing preferences C6b (the configurable cooling-off
+    ' duration) and D1 (default blocklist/presets) will add.
+    '
+    ' Fail-closed like the rest of the tool: any read failure / missing file / invalid
+    ' MAC / Done<>"yes" reads as NOT set up -> the arm-gate refuses -> the user just
+    ' re-runs `setup`. A DPAPI failure that stops the stamp is surfaced by WriteSetupConfig
+    ' returning False (the verb warns), never a silent trap; and a machine whose DPAPI is
+    ' dead already can't run MonkMode safely (the B7 enforcement MAC is dead too), so
+    ' refusing a NEW arm there is correct, not a regression.
+
+    Public Const SetupIniName As String = "monkmode_setup.ini"
+    ' The setup file's own canonical version tag (independent of the enforcement
+    ' ConfigIntegrity.CurrentSchemaVersion). Bumping it invalidates older setup files so a
+    ' schema change forces a one-off `setup` re-run (fail-closed), mirroring the "arm
+    ' blocks after upgrading" operational rule. s1 = C6a: Done + Partner.
+    Public Const SetupSchemaVersion As String = "s1"
+    Public Const SetupSection As String = "Setup"
+    Public Const SetupDoneKey As String = "Done"
+    Public Const SetupPartnerKey As String = "Partner"
+
+    Public Function SetupIniPath() As String
+        Return Path.Combine(AppDir(), SetupIniName)
+    End Function
+
+    ' The MAC canonical over the setup file's fields (version-tagged, [Integrity]
+    ' excluded). A PRIVATE CLI canonical - the service never reads this file, so unlike
+    ' CanonicalFromIni it needs no 4-copy parity. Absent fields pass through as "" (so the
+    ' empty-partner case, which reloads as a bare-key Nothing, canonicalises identically
+    ' at stamp-time and verify-time - the shipped CoolOffUntil="" round-trip pattern).
+    ' Friend so a test can re-stamp a hand-edited setup file (e.g. Done="no" under a VALID
+    ' MAC) to prove SetupIsComplete gates on the Done flag, not merely on the MAC.
+    Friend Function SetupCanonicalFromIni(ByVal ini As IniFile) As String
+        Dim done As String = If(ini.GetKeyValue(SetupSection, SetupDoneKey), "")
+        Dim partner As String = If(ini.GetKeyValue(SetupSection, SetupPartnerKey), "")
+        Return SetupSchemaVersion & vbLf &
+               "Done=" & done & vbLf &
+               "Partner=" & partner & vbLf
+    End Function
+
+    ' Is the setup file's MAC valid over its canonical? DPAPI-unprotect [Integrity] Key +
+    ' FixedTimeEquals, exactly like ConfigMacIsValidForIni but over the setup canonical.
+    ' False (never throws) on any failure - absent/invalid MAC, unreadable key,
+    ' foreign-machine blob.
+    Private Function SetupMacIsValidForIni(ByVal ini As IniFile) As Boolean
+        Try
+            Dim key() As Byte = ConfigIntegrity.UnprotectKey(ini.GetKeyValue(IntegritySection, IntegrityKeyName))
+            If key Is Nothing Then Return False
+            Return ConfigIntegrity.ConfigMacIsValid(SetupCanonicalFromIni(ini), ini.GetKeyValue(IntegritySection, IntegrityMacName), key)
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' Has first-run setup completed? True ONLY if the setup file loads, its MAC is valid
+    ' AND [Setup] Done = "yes" (case-insensitive). Fail-closed: a missing file, a read
+    ' error, a tampered field/MAC, or Done<>"yes" all read as NOT set up (the arm-gate
+    ' then refuses and the user re-runs `setup`). Never throws. Independent of any block or
+    ' schedule - it reads only the setup file, so an active block does not make setup
+    ' "complete" and setup does not touch a live block.
+    Public Function SetupIsComplete() As Boolean
+        Try
+            Dim path As String = SetupIniPath()
+            If Not File.Exists(path) Then Return False
+            Dim ini As New IniFile
+            ini.Load(path)
+            If Not SetupMacIsValidForIni(ini) Then Return False
+            Return String.Equals(If(ini.GetKeyValue(SetupSection, SetupDoneKey), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' The stored accountability-partner label (informational only - a name/contact the
+    ' user relays their one-time codes to). "" if setup is not complete or none was set.
+    ' Read-only; never throws.
+    Public Function SetupPartnerLabel() As String
+        Try
+            Dim path As String = SetupIniPath()
+            If Not File.Exists(path) Then Return ""
+            Dim ini As New IniFile
+            ini.Load(path)
+            ' The SAME fail-closed completeness gate as SetupIsComplete (valid MAC AND Done="yes"),
+            ' but reusing this single load rather than loading the file twice: an incomplete/tampered
+            ' setup file never leaks a label.
+            If Not SetupMacIsValidForIni(ini) Then Return ""
+            If Not String.Equals(If(ini.GetKeyValue(SetupSection, SetupDoneKey), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase) Then Return ""
+            Return If(ini.GetKeyValue(SetupSection, SetupPartnerKey), "").Trim()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ' Write (or re-write) the first-run setup file: [Setup] Done="yes" + the optional
+    ' partner label, MAC-stamped from birth (fresh key + MAC over the setup canonical).
+    ' Idempotent - re-running just overwrites (a fresh key/MAC) and is safe while a block
+    ' is active (it never touches the enforcement config). Returns True only if the fresh
+    ' stamp is genuinely MAC-valid on disk; False if DPAPI stamping failed (the caller
+    ' warns - an unstamped setup file reads as NOT complete, so the arm-gate keeps
+    ' refusing rather than trust an unprotected marker). A file-write failure throws to the
+    ' verb's outer Catch (reported as an error), never a half-written trusted state.
+    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "") As Boolean
+        Dim ini As New IniFile
+        ini.AddSection(SetupSection)
+        ini.SetKeyValue(SetupSection, SetupDoneKey, "yes")
+        ini.SetKeyValue(SetupSection, SetupPartnerKey, If(partnerLabel, "").Trim())
+        StampFreshSetupMac(ini)
+        ini.Save(SetupIniPath())
+        ' Re-read + verify: only report success if the file on disk is genuinely MAC-valid
+        ' (a DPAPI failure in StampFreshSetupMac would have left it unstamped).
+        Try
+            Dim check As New IniFile
+            check.Load(SetupIniPath())
+            Return SetupMacIsValidForIni(check)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' Stamp a fresh key + MAC over the setup canonical (mirrors StampFreshMac, but for the
+    ' setup file's PRIVATE canonical). Best-effort: a DPAPI failure leaves the file
+    ' unstamped (WriteSetupConfig then returns False).
+    Private Sub StampFreshSetupMac(ByVal ini As IniFile)
+        Try
+            Dim key() As Byte = ConfigIntegrity.NewRandomKey()
+            Dim protectedKey As String = ConfigIntegrity.ProtectKey(key)
+            If protectedKey Is Nothing Then Return
+            ini.AddSection(IntegritySection)
+            ini.SetKeyValue(IntegritySection, IntegrityKeyName, protectedKey)
+            ini.SetKeyValue(IntegritySection, IntegrityMacName, ConfigIntegrity.ComputeConfigMac(SetupCanonicalFromIni(ini), key))
+        Catch ex As Exception
+        End Try
+    End Sub
+
     ' ---- C2b: cooling-off request channel (authority-free trigger files) ----
 
     ' Drop the cooling-off REQUEST trigger. Presence-only: the service polls for
