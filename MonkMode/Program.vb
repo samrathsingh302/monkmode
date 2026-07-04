@@ -190,6 +190,19 @@ Module Program
             Console.WriteLine("MonkMode: no block has ever been installed on this machine.")
             Return 0
         End If
+        ' C5b (c4): a schedule-only block reads as BlockIsActive()=False (its [Time] Until is the past
+        ' sentinel), so report an armed schedule HERE, before the manual-block/idle branches below - or
+        ' status would misreport an armed schedule as "no active block (idle)". Read-only; writes nothing.
+        If Blocker.ScheduleIsArmed() Then
+            Dim windows As List(Of String) = Nothing, sites As List(Of String) = Nothing, apps As List(Of String) = Nothing
+            Blocker.DescribeScheduleSpec(Blocker.ArmedScheduleSpec(), windows, sites, apps)
+            Console.WriteLine("MonkMode: SCHEDULE ARMED")
+            If windows.Count > 0 Then Console.WriteLine("  Windows: " & String.Join("; ", windows))
+            If sites.Count > 0 Then Console.WriteLine("  Sites:   " & String.Join(", ", sites))
+            If apps.Count > 0 Then Console.WriteLine("  Apps:    " & String.Join(", ", apps))
+            Console.WriteLine("  Windows open automatically at their times; run 'monkmode schedule --show' for detail.")
+            Return 0
+        End If
         Dim ends As DateTime = Blocker.ActiveBlockEnd()
         If Blocker.ServiceIsRunning() AndAlso ends > DateTime.Now Then
             Console.WriteLine("MonkMode: ACTIVE")
@@ -236,6 +249,12 @@ Module Program
     ' windows vanish; a currently-open window still runs to its monotonic close, C5a §7). SD-c1:
     ' refuses while a manual block is active (mutually exclusive with `block` in C5b).
     Private Function DoSchedule(ByVal args As String()) As Integer
+        ' C5b (c4): read-only introspection FIRST - writes nothing, touches no service/hosts/registry
+        ' and returns before any arm/clear path. `--show` prints the armed schedule in a human form;
+        ' `--validate` dry-runs the builder and prints the canonical Spec or the exact grammar error.
+        If HasFlag(args, "--show") Then Return DoScheduleShow()
+        If HasFlag(args, "--validate") Then Return DoScheduleValidate(args)
+
         ' `--clear`: blank the Spec (only if a schedule is armed) -> the service tears down after any
         ' open window closes. Never installs/starts anything; a no-op message if nothing is armed.
         If HasFlag(args, "--clear") Then
@@ -299,6 +318,62 @@ Module Program
         If apps.Count > 0 Then Console.WriteLine("  Apps:    " & String.Join(", ", apps))
         Console.WriteLine("During a window the block holds at full strength until the window closes; it cannot be ended early.")
         Console.WriteLine("Change it any time with 'monkmode schedule ...'; stop future windows with 'monkmode schedule --clear'.")
+        Return 0
+    End Function
+
+    ' C5b (c4): `schedule --show` - READ-ONLY. Print the armed schedule's windows/sites/apps in a human
+    ' form (a cosmetic reverse of the compact Spec; NO live window/remaining state - that folds into the
+    ' richer `status`, D5). WRITES NOTHING. "No schedule is armed" when none - a tampered Spec reads as
+    ' not-armed (frozen by the service) and is likewise not shown.
+    Private Function DoScheduleShow() As Integer
+        If Not Blocker.ScheduleIsArmed() Then
+            Console.WriteLine("No schedule is armed.")
+            Console.WriteLine("Arm one with:  monkmode schedule --sites a.com,b.com --windows ""Mon-Fri 09:00-17:00""")
+            Return 0
+        End If
+        Dim windows As List(Of String) = Nothing, sites As List(Of String) = Nothing, apps As List(Of String) = Nothing
+        Blocker.DescribeScheduleSpec(Blocker.ArmedScheduleSpec(), windows, sites, apps)
+        Console.WriteLine("MonkMode schedule: ARMED")
+        If windows.Count > 0 Then
+            Console.WriteLine("  Windows:")
+            For Each w As String In windows
+                Console.WriteLine("    " & w)
+            Next
+        End If
+        If sites.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", sites))
+        If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
+        Console.WriteLine("Windows open automatically at their times; during a window the block holds until it closes.")
+        Console.WriteLine("Change it with 'monkmode schedule --sites ... --windows ...'; stop future windows with 'monkmode schedule --clear'.")
+        Return 0
+    End Function
+
+    ' C5b (c4): `schedule --validate --sites ... --windows "..."` - READ-ONLY dry-run. Reuses the SAME
+    ' Blocker.TryBuildScheduleSpec the arm path uses (no second parser), printing the canonical v1 Spec
+    ' on success or the EXACT grammar error on failure. WRITES NOTHING and never installs/starts the
+    ' service (so it needs no admin and can't touch a live block). Returns 0 valid / 1 invalid so it is
+    ' scriptable. NB (design gotcha #4): the builder requires >=1 site, so --validate takes --sites too.
+    Private Function DoScheduleValidate(ByVal args As String()) As Integer
+        Dim sites As New List(Of String)
+        sites.AddRange(SplitList(GetOption(args, "--sites")))
+        Dim apps As New List(Of String)
+        apps.AddRange(SplitList(GetOption(args, "--apps")))
+        Dim windowsArg As String = GetOption(args, "--windows")
+
+        Dim spec As String = "", err As String = ""
+        If Not Blocker.TryBuildScheduleSpec(windowsArg, sites, apps, spec, err) Then
+            Console.Error.WriteLine(err)
+            Return 1
+        End If
+        Console.WriteLine("Valid. This would arm:")
+        Dim windows As List(Of String) = Nothing, s2 As List(Of String) = Nothing, a2 As List(Of String) = Nothing
+        Blocker.DescribeScheduleSpec(spec, windows, s2, a2)
+        For Each w As String In windows
+            Console.WriteLine("    " & w)
+        Next
+        If s2.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", s2))
+        If a2.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", a2))
+        Console.WriteLine("  Spec:  " & spec)
+        Console.WriteLine("(Dry run - nothing was armed. Drop --validate to arm this schedule.)")
         Return 0
     End Function
 
@@ -546,6 +621,8 @@ Module Program
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")
         Console.WriteLine("  monkmode schedule --clear   (stop future windows; an open window still runs to its end)")
+        Console.WriteLine("  monkmode schedule --show    (print the armed schedule; read-only)")
+        Console.WriteLine("  monkmode schedule --validate --sites a.com --windows ""Mon-Fri 09:00-17:00""  (check a schedule without arming it)")
         Console.WriteLine("  monkmode unblock           (request cooling-off: the block lifts after ~1h of active machine time)")
         Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
         Console.WriteLine("  monkmode unblock --code <CODE>  (submit the partner accountability code; the service verifies it and lifts within ~10s)")

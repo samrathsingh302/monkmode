@@ -841,6 +841,119 @@ Module Blocker
         End If
     End Sub
 
+    ' ---- C5b (c4): read-only schedule DISPLAY helpers (schedule --show / status) ----
+    '
+    ' Render the stored compact v1 [Schedule] Spec back into a human form for DISPLAY only - a cosmetic
+    ' reverse of TryBuildScheduleSpec's serialiser, deliberately NOT a 4th Service1.ParseSchedule parity
+    ' copy (the live window-open / monotonic-remaining state folds into the richer `status`, D5; c4 shows
+    ' only the static rule). Fail-SOFT throughout: a display path must never throw or block a status read,
+    ' so an unrecognised token renders VERBATIM rather than erroring. In practice the CLI is the sole Spec
+    ' writer and always emits the canonical compact form, and ScheduleIsArmed gates these on a valid MAC
+    ' (a hand-tampered Spec reads as not-armed - frozen by the service, never shown) - so the fail-soft
+    ' branches only guard against defensive surprises, never normal input.
+
+    ' The raw stored compact [Schedule] Spec (for --show / status). "" on any read failure / no config /
+    ' absent Spec. Read-only; never throws. Callers pair it with ScheduleIsArmed (which also checks the
+    ' MAC), reading this only once the schedule is known armed.
+    Public Function ArmedScheduleSpec() As String
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            Return If(ini.GetKeyValue("Schedule", "Spec"), "")
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ' Compact dayMask chars ('1'..'7' = Mon..Sun) -> a human day phrase, compressing a run of >=3
+    ' CONSECUTIVE days into a range (e.g. "12345" -> "Mon-Fri", "67" -> "Sat,Sun", "1235" ->
+    ' "Mon-Wed,Fri"). Sorted + deduped; unknown chars are skipped. A wholly unrecognised mask renders
+    ' verbatim (fail-soft). Friend so the display round-trip is unit-tested.
+    Friend Function DayMaskToHuman(ByVal mask As String) As String
+        Dim names() As String = {"", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+        Dim present(7) As Boolean
+        For Each ch As Char In If(mask, "")
+            Dim code As Integer = AscW(ch)
+            If code >= AscW("1"c) AndAlso code <= AscW("7"c) Then present(code - AscW("0"c)) = True
+        Next
+        Dim days As New List(Of Integer)
+        For d As Integer = 1 To 7
+            If present(d) Then days.Add(d)
+        Next
+        If days.Count = 0 Then Return If(mask, "")   ' fail-soft: nothing recognised
+        Dim parts As New List(Of String)
+        Dim i As Integer = 0
+        While i < days.Count
+            Dim j As Integer = i
+            While j + 1 < days.Count AndAlso days(j + 1) = days(j) + 1
+                j += 1
+            End While
+            If j - i + 1 >= 3 Then
+                parts.Add(names(days(i)) & "-" & names(days(j)))   ' a run of >=3 -> a range
+            Else
+                For k As Integer = i To j
+                    parts.Add(names(days(k)))                       ' a run of 1-2 -> list each day
+                Next
+            End If
+            i = j + 1
+        End While
+        Return String.Join(",", parts)
+    End Function
+
+    ' Compact "HHMM" (4-digit) -> "HH:MM". Fail-soft: a non-4-digit / non-numeric token renders verbatim.
+    Private Function HhmmToHuman(ByVal hhmm As String) As String
+        Dim t As String = If(hhmm, "").Trim()
+        If t.Length <> 4 Then Return If(hhmm, "")
+        For Each ch As Char In t
+            If Not Char.IsDigit(ch) Then Return hhmm
+        Next
+        Return t.Substring(0, 2) & ":" & t.Substring(2, 2)
+    End Function
+
+    ' One compact window ("12345:0900-1700") -> "Mon-Fri 09:00-17:00". Fail-soft: an unparseable token
+    ' (no colon / no time dash) renders trimmed-verbatim (never throws). Friend for the round-trip test.
+    Friend Function CompactWindowToHuman(ByVal compactWindow As String) As String
+        Dim w As String = If(compactWindow, "").Trim()
+        Dim colon As Integer = w.IndexOf(":"c)
+        If colon <= 0 Then Return w
+        Dim times As String = w.Substring(colon + 1)
+        Dim dash As Integer = times.IndexOf("-"c)
+        If dash <= 0 Then Return w
+        Return DayMaskToHuman(w.Substring(0, colon)) & " " &
+               HhmmToHuman(times.Substring(0, dash)) & "-" & HhmmToHuman(times.Substring(dash + 1))
+    End Function
+
+    ' Split a stored compact Spec ("v1;<windows>;sites=a|b;apps=x|y") into its display parts: the human
+    ' window phrases, the site list, and the app list. Fail-soft: absent/garbled parts yield empty lists
+    ' (the three ByRef outs are ALWAYS initialised, never null; never throws). Reads NOTHING from disk -
+    ' the caller passes the Spec it already read, keeping the display pure + trivially testable. Friend
+    ' so --show/status render off the same tested split.
+    Friend Sub DescribeScheduleSpec(ByVal spec As String, ByRef windows As List(Of String), ByRef sites As List(Of String), ByRef apps As List(Of String))
+        windows = New List(Of String)
+        sites = New List(Of String)
+        apps = New List(Of String)
+        If spec Is Nothing Then Return
+        Dim parts() As String = spec.Split(";"c)
+        For i As Integer = 0 To parts.Length - 1
+            Dim p As String = parts(i)
+            If i = 0 Then
+                Continue For   ' the grammar-version tag (e.g. "v1") - not shown
+            ElseIf p.StartsWith("sites=", StringComparison.OrdinalIgnoreCase) Then
+                For Each s As String In p.Substring(6).Split("|"c)
+                    If s.Trim() <> "" Then sites.Add(s.Trim())
+                Next
+            ElseIf p.StartsWith("apps=", StringComparison.OrdinalIgnoreCase) Then
+                For Each a As String In p.Substring(5).Split("|"c)
+                    If a.Trim() <> "" Then apps.Add(a.Trim())
+                Next
+            ElseIf p.Trim() <> "" Then
+                For Each cw As String In p.Split(","c)   ' the windows CSV (the one part between v-tag and sites=)
+                    If cw.Trim() <> "" Then windows.Add(CompactWindowToHuman(cw))
+                Next
+            End If
+        Next
+    End Sub
+
     ' ---- C2b: cooling-off request channel (authority-free trigger files) ----
 
     ' Drop the cooling-off REQUEST trigger. Presence-only: the service polls for
