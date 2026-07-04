@@ -523,12 +523,12 @@ public class CoolOffEndToEndTests
         var honestDeadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
 
         var honest = MonkMode.ConfigIntegrity.BuildCanonical(
-            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, honestDeadline, "", "", "", "", "", "");
+            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, honestDeadline, "", "", "", "", "", "", "");
         var storedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(honest, key);
 
         var forgedDeadline = T0.AddHours(-1).ToString(EnCa); // "the wait is over"
         var forged = MonkMode.ConfigIntegrity.BuildCanonical(
-            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, forgedDeadline, "", "", "", "", "", "");
+            ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, forgedDeadline, "", "", "", "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(forged, storedMac, key);
         Assert.False(macValid);
 
@@ -634,6 +634,137 @@ public class CoolOffBackupCarryTests
         finally
         {
             dir.Delete(true);
+        }
+    }
+}
+
+// C6b: the CLI-configured cooling-off DURATION ([CoolOff] Duration, MAC-covered seconds).
+// ParseConfiguredCoolOffSeconds is the pure interpreter the service uses to turn the stored
+// field into a duration; end-to-end (parse + ComputeCoolOffDeadline) a configured value can
+// only ever EXTEND the wait, never shorten it below the compile-time floor - the whole point,
+// since an attacker running the CLI could set it to 0 under a valid MAC, so the floor clamp is
+// load-bearing. The MAC-coverage of the field itself is pinned in ConfigIntegrityTests (a
+// forged Duration fails the MAC -> freeze) and CanonicalParityTests (every reader carries it).
+public class ConfiguredCoolOffDurationTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
+    private const long Floor = 3600;
+
+    [Theory]
+    [InlineData("7200", 7200)]      // a plain positive value passes through (ComputeCoolOffDeadline then clamps)
+    [InlineData("5400", 5400)]
+    [InlineData("600", 600)]        // below the floor but positive: returned as-is here; the clamp is in ComputeCoolOffDeadline
+    [InlineData("  900  ", 900)]    // surrounding whitespace is trimmed
+    public void PositiveValue_PassesThrough(string raw, long expected)
+    {
+        Assert.Equal(expected, monkmode.Service1.ParseConfiguredCoolOffSeconds(raw, Floor));
+    }
+
+    [Theory]
+    [InlineData("")]         // absent key reads as ""
+    [InlineData("   ")]      // blank
+    [InlineData(null)]       // a bare/absent key can read back as Nothing
+    [InlineData("garbage")]
+    [InlineData("2h")]       // NOT a raw number - the CLI converts --cooloff to seconds before storing
+    [InlineData("0")]        // non-positive => default floor (an attacker-set 0 can't shorten)
+    [InlineData("-5")]
+    [InlineData("99999999999999999999999")]  // overflow => TryParse fails => floor
+    public void AbsentBlankOrUnusable_YieldsTheFloor(string? raw)
+    {
+        Assert.Equal(Floor, monkmode.Service1.ParseConfiguredCoolOffSeconds(raw!, Floor));
+    }
+
+    [Fact]
+    public void ConfiguredAboveFloor_ExtendsTheWait_EndToEnd()
+    {
+        // A configured 2h (> the 1h floor) produces a deadline exactly 2h out.
+        var seconds = monkmode.Service1.ParseConfiguredCoolOffSeconds("7200", Floor);
+        var deadline = monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), seconds, Floor);
+        Assert.Equal(Hw.AddSeconds(7200).ToString(EnCa), deadline);
+    }
+
+    [Fact]
+    public void ConfiguredBelowFloorOrTampered_ClampsToTheFloor_EndToEnd()
+    {
+        // A positive-but-below-floor value, and every unusable/tampered value (blank, 0,
+        // negative, garbage), all wait the full floor: the parser + max(configured, floor)
+        // clamp guarantee cooling-off is NEVER shorter than the floor. Fail-safe.
+        foreach (var raw in new[] { "600", "", "0", "-999", "garbage" })
+        {
+            var seconds = monkmode.Service1.ParseConfiguredCoolOffSeconds(raw, Floor);
+            var deadline = monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), seconds, Floor);
+            Assert.Equal(Hw.AddSeconds(Floor).ToString(EnCa), deadline);
+        }
+    }
+}
+
+// C6b: the CLI arm path (`block --cooloff`) writes [CoolOff] Duration MAC-covered from birth.
+// Uses the REAL Blocker.WriteConfig (into the test bin dir), then loads the ini back and checks
+// the field is stored + carried into every reader's canonical. DPAPI is NOT exercised (we
+// compare canonicals, which are DPAPI-free) - the same fence as CliWriteConfig_ProducesAnIni.
+// Serialised with the other CLI ini writers so it never races the shared monkmode_settings.ini.
+[Collection("CliIniWriters")]
+public class CoolOffWriteConfigTests
+{
+    [Fact]
+    public void WriteConfig_WithCoolOff_StoresTheDurationAndEveryReaderCarriesIt()
+    {
+        var iniPath = MonkMode.Blocker.IniPath();
+        try
+        {
+            var until = new DateTime(2026, 12, 31, 23, 59, 59);
+            MonkMode.Blocker.WriteConfig(new[] { "reddit.com" }, new[] { "chrome.exe" }, until, committed: false, coolOffSeconds: 7200);
+
+            var cliIni = new MonkMode.IniFile();
+            cliIni.Load(iniPath);
+            // Stored plaintext seconds under [CoolOff] Duration...
+            Assert.Equal("7200", cliIni.GetKeyValue("CoolOff", "Duration"));
+            // ...and inside the MAC-covered canonical, agreed by every reader (end-to-end
+            // through the real write path, so the service reads the SAME configured value).
+            var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
+            Assert.Contains("CoolOffDuration=7200\n", cli);
+
+            var srvIni = new monkmode.IniFile();
+            srvIni.Load(iniPath);
+            var guardIni = new mm_guard.IniFile();
+            guardIni.Load(iniPath);
+            var notifyIni = new mm_notify.IniFile();
+            notifyIni.Load(iniPath);
+            Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
+            Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
+            Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
+        }
+        finally
+        {
+            if (File.Exists(iniPath)) File.Delete(iniPath);
+            var backupPath = MonkMode.Blocker.IniBackupPath();
+            if (File.Exists(backupPath)) File.Delete(backupPath);
+        }
+    }
+
+    [Fact]
+    public void WriteConfig_WithoutCoolOff_LeavesTheDurationEmpty_TheFloorDefault()
+    {
+        var iniPath = MonkMode.Blocker.IniPath();
+        try
+        {
+            var until = new DateTime(2026, 12, 31, 23, 59, 59);
+            MonkMode.Blocker.WriteConfig(new[] { "reddit.com" }, new[] { "chrome.exe" }, until);
+
+            var cliIni = new MonkMode.IniFile();
+            cliIni.Load(iniPath);
+            // No --cooloff => no [CoolOff] Duration written (absent => "" => the service's
+            // compile-time floor default). Use IsNullOrEmpty (absent reads "", a blanked key
+            // reads Nothing - the recurring ini round-trip quirk).
+            Assert.True(string.IsNullOrEmpty(cliIni.GetKeyValue("CoolOff", "Duration")));
+            Assert.Contains("CoolOffDuration=\n", MonkMode.Blocker.CanonicalFromIni(cliIni));
+        }
+        finally
+        {
+            if (File.Exists(iniPath)) File.Delete(iniPath);
+            var backupPath = MonkMode.Blocker.IniBackupPath();
+            if (File.Exists(backupPath)) File.Delete(backupPath);
         }
     }
 }

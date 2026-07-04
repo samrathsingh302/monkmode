@@ -429,16 +429,21 @@ Public Class Service1
             ' which never has a pending deadline to clear).
             Select Case ClassifyCoolOffSignal(requestPresent, cancelPresent, currentCoolOffUntil <> "", committed, macValid)
                 Case CoolOffAction.Start
-                    ' The service is the SOLE deadline writer: trusted HighWater
-                    ' at the request + max(duration, floor). No configurable
-                    ' duration until C6, so duration = floor. An uncomputable
-                    ' deadline (unparseable HighWater) writes nothing and leaves
-                    ' the trigger for the next tick.
-                    Dim deadline As String = ComputeCoolOffDeadline(highWaterText, MinCoolOffFloorSeconds, MinCoolOffFloorSeconds)
-                    If deadline = "" Then Return currentCoolOffUntil
+                    ' The service is the SOLE deadline writer: trusted HighWater at the
+                    ' request + max(configured duration, floor). C6b: the configured
+                    ' duration is the MAC-covered [CoolOff] Duration field (CLI-written at
+                    ' arm). Read it off the RELOADED + MAC-validated ini below (never the
+                    ' pre-validation object) so a tampered value is caught by the freeze,
+                    ' and the floor clamp in ComputeCoolOffDeadline means it can only ever
+                    ' EXTEND, never shorten below the floor. An uncomputable deadline
+                    ' (unparseable HighWater) writes nothing and leaves the trigger for
+                    ' the next tick.
                     Dim iniFile = New IniFile
                     iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
                     If Not ConfigMacIsValidForIni(iniFile) Then Return currentCoolOffUntil
+                    Dim configuredSeconds As Long = ParseConfiguredCoolOffSeconds(iniFile.GetKeyValue("CoolOff", "Duration"), MinCoolOffFloorSeconds)
+                    Dim deadline As String = ComputeCoolOffDeadline(highWaterText, configuredSeconds, MinCoolOffFloorSeconds)
+                    If deadline = "" Then Return currentCoolOffUntil
                     iniFile.SetKeyValue("Time", "CoolOffUntil", encryptionW.EncryptData(deadline))
                     RestampMacWithExistingKey(iniFile)
                     iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
@@ -1344,12 +1349,12 @@ Public Class Service1
     ' The compile-time FLOOR: the shortest cooling-off the service will ever
     ' grant, in seconds - THE one new C2b security parameter, pinned by a unit
     ' test exactly like HighWaterJumpCeilingSeconds. Load-bearing because the
-    ' (future C6) configured duration is a CLI-written MAC-covered field, so an
-    ' attacker running the CLI could set it to 0 under a valid MAC; the service
-    ' clamps to this floor, and the floor is compile-time - not attacker-
-    ' settable. A configured duration can only ever EXTEND the wait. D1: 1 hour
-    ' (recommended default; 15 min = light, 3 h = strict); C2b ships floor =
-    ' default (no configurable field yet).
+    ' C6b configured duration ([CoolOff] Duration) is a CLI-written MAC-covered
+    ' field, so an attacker running the CLI could set it to 0 under a valid MAC;
+    ' the service clamps to this floor via max(configured, floor), and the floor
+    ' is compile-time - not attacker-settable. A configured duration can only ever
+    ' EXTEND the wait, never shorten below this floor. D1: 1 hour (recommended
+    ' default; 15 min = light, 3 h = strict).
     Friend Const MinCoolOffFloorSeconds As Long = 3600
 
     ' Has the pending cooling-off deadline been reached? coolOffUntilText is the
@@ -1375,7 +1380,7 @@ Public Class Service1
     ' HighWater at the request plus max(configured duration, floor). The deadline
     ' therefore lives in the HighWater frame - reached only after that much
     ' genuine ON-machine elapsed time - and can never be shorter than the
-    ' compile-time floor even if a (future C6) configured duration says 0.
+    ' compile-time floor even if the C6b configured duration says 0.
     ' Returns "" when the stored HighWater doesn't parse (fail-closed: no
     ' deadline computable => no write; the trigger stays for the next tick).
     ' Pure + Shared so it is unit tested.
@@ -1384,6 +1389,22 @@ Public Class Service1
         Dim highWater As DateTime
         If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return ""
         Return highWater.AddSeconds(Math.Max(configuredDurationSeconds, floorSeconds)).ToString(ca)
+    End Function
+
+    ' C6b: interpret the CLI-configured [CoolOff] Duration field (plaintext seconds,
+    ' MAC-covered) into a duration in seconds. A usable positive value is returned as
+    ' is (ComputeCoolOffDeadline then clamps it up to the floor if it is below);
+    ' absent/blank/unparseable/non-positive => the floor, so an unset or garbage field
+    ' simply yields the default floor wait. Under a valid MAC this value is authentic
+    ' (the CLI wrote it at arm and it never changes); a raw edit to shorten it fails
+    ' the MAC -> the block freezes, and even absent the freeze the floor clamp in
+    ' ComputeCoolOffDeadline means it can only ever EXTEND the wait. Pure + Shared so
+    ' it is unit tested (the caller reads the raw [CoolOff] Duration off a MAC-validated
+    ' ini and passes it here).
+    Friend Shared Function ParseConfiguredCoolOffSeconds(ByVal rawDuration As String, ByVal floorSeconds As Long) As Long
+        Dim seconds As Long
+        If Long.TryParse(If(rawDuration, "").Trim(), seconds) AndAlso seconds > 0 Then Return seconds
+        Return floorSeconds
     End Function
 
     ' What the per-tick trigger poll should do.
@@ -2459,6 +2480,10 @@ Public Class Service1
         ' config read under v7 code builds a different canonical and freezes, R9).
         Dim scheduleSpec As String = iniFile.GetKeyValue("Schedule", "Spec")
         Dim scheduleActiveEnc As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
+        ' C6b: the [CoolOff] Duration configured cooling-off wait in seconds, stored
+        ' PLAINTEXT (as-stored, like Committed - NOT decrypted); absent => "" (a v7 config
+        ' read under v8 code builds a different canonical and freezes, R9). MAC-covered.
+        Dim coolOffDuration As String = iniFile.GetKeyValue("CoolOff", "Duration")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
@@ -2470,7 +2495,7 @@ Public Class Service1
         ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
         Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", encryptionW.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads

@@ -374,7 +374,7 @@ public class PartnerCodeEndToEndTests
 
     // The armed config's canonical (UnlockedAt="", not committed) and its MAC.
     private static string ArmedCanonical() =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, "", "no", "", "");
+        MonkMode.ConfigIntegrity.BuildCanonical(Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, "", "no", "", "", "");
 
     [Fact]
     public void CorrectCode_SetsUnlockedAt_AndTheBlockLiftsAcrossServiceAndGuardian()
@@ -390,7 +390,7 @@ public class PartnerCodeEndToEndTests
         // 3. It sets the MAC-covered UnlockedAt and re-stamps (a NEW canonical + MAC).
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
         var unlockedCanonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "");
+            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "", "");
         var unlockedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key);
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(unlockedCanonical, unlockedMac, Key);
         Assert.True(macValid);
@@ -415,7 +415,7 @@ public class PartnerCodeEndToEndTests
         // the guardian must STAND DOWN, not SCM-restart the service in the stopMe() gap.
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
         var unlockedCanonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "");
+            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlockedCanonical, MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key), Key);
 
@@ -445,7 +445,7 @@ public class PartnerCodeEndToEndTests
         var attackerCode = "MYOWN-CODE1";
         var attackerHash = MonkMode.ConfigIntegrity.ComputePartnerHash(Salt, attackerCode);
         var swapped = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, attackerHash, "", "no", "", "");
+            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, attackerHash, "", "no", "", "", "");
 
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(swapped, armedMac, Key);
         Assert.False(macValid);   // the swap broke the MAC
@@ -465,7 +465,7 @@ public class PartnerCodeEndToEndTests
         // trusted UNDER a valid MAC (i.e. only if the service wrote it after a code).
         var armedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(ArmedCanonical(), Key);
         var forged = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, Hw.ToString(EnCa), "no", "", "");
+            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, Hw.ToString(EnCa), "no", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(forged, armedMac, Key);
         Assert.False(macValid);
         Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", Hw.ToString(EnCa), "", HwText, 5, macValid, scheduleArmed: false));
@@ -480,7 +480,7 @@ public class PartnerCodeEndToEndTests
         // required".
         var armedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(ArmedCanonical(), Key);
         var stripped = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", "", "", "", "no", "", "");
+            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", "", "", "", "no", "", "", "");
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(stripped, armedMac, Key));
     }
 
@@ -502,7 +502,7 @@ public class PartnerCodeEndToEndTests
         // code-unlock still lifts it (the exit a commit deliberately keeps).
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
         var unlockedCanonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "yes", "", "");
+            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "yes", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlockedCanonical, MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key), Key);
         Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));

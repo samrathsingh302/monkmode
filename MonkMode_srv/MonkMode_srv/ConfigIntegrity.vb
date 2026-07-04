@@ -54,11 +54,12 @@ Friend Module ConfigIntegrity
     ' (Section C accountability core) -> v4 (C2b: added CoolOffUntil, the
     ' cooling-off deadline) -> v5 (C3b: added the [Partner] Salt/Hash/UnlockedAt
     ' accountability-code fields) -> v6 (C4: added the [Commit] Committed flag) ->
-    ' v7 (C5b: added the [Schedule] Spec + ActiveUntil scheduled-window fields).
+    ' v7 (C5b: added the [Schedule] Spec + ActiveUntil scheduled-window fields) ->
+    ' v8 (C6b: added the [CoolOff] Duration configured-cooling-off-duration field).
     ' The four copies MUST share this value or the parties would stamp/verify
     ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v7"
+    Friend Const CurrentSchemaVersion As String = "v8"
 
     ' The canonical string the MAC is computed over: the schema version tag plus
     ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
@@ -113,14 +114,15 @@ Friend Module ConfigIntegrity
     ' -> the whole block FREEZES (cooling-off Ignored anyway), so an attacker can
     ' never un-commit. Set once at arm by the CLI, never mutated during the block.
     '
-    ' C3b/C4/C5b: partnerSalt/partnerHash/partnerUnlockedAt/committed/scheduleSpec/
-    ' scheduleActiveUntil are appended at the END of the PARAMETER list (after
-    ' coolOffUntil) and their LINES trail after Now= (the [Partner]/[Commit] group,
-    ' then the [Schedule] group last) - mind that the parameter order (until,
-    ' processList, customSites, now, highWater, coolOffUntil, partnerSalt, partnerHash,
-    ' partnerUnlockedAt, committed, scheduleSpec, scheduleActiveUntil) is NOT the line
-    ' order; every wrapper threads them positionally, so the four copies must stay
-    ' byte-identical (the parity tests fail loudly on drift).
+    ' C3b/C4/C5b/C6b: partnerSalt/partnerHash/partnerUnlockedAt/committed/scheduleSpec/
+    ' scheduleActiveUntil/coolOffDuration are appended at the END of the PARAMETER list
+    ' (after coolOffUntil) and their LINES trail after Now= (the [Partner]/[Commit]
+    ' group, the [Schedule] group, then the [CoolOff] Duration line last) - mind that
+    ' the parameter order (until, processList, customSites, now, highWater, coolOffUntil,
+    ' partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec,
+    ' scheduleActiveUntil, coolOffDuration) is NOT the line order; every wrapper threads
+    ' them positionally, so the four copies must stay byte-identical (the parity tests
+    ' fail loudly on drift).
     '
     ' C5b (schedules): the canonical also includes the two [Schedule] fields -
     ' ScheduleSpec (the plaintext, MAC-covered recurring-window rule + its site/app
@@ -133,7 +135,18 @@ Friend Module ConfigIntegrity
     ' canonical), and the SERVICE is the sole writer of ScheduleActiveUntil (the
     ' window->duration conversion, HighWater-anchored) exactly as it is of CoolOffUntil.
     ' They form a trailing [Schedule] group after Committed=.
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String) As String
+    '
+    ' C6b (configurable cooling-off duration): the canonical also includes CoolOffDuration
+    ' - the CLI-configured cooling-off wait in SECONDS (plaintext-as-stored like Committed/
+    ' [Partner], NOT encrypted - a duration is not a secret; the MAC is its protection).
+    ' The CLI writes it at arm time BEFORE the fresh MAC, so it is MAC-covered from birth,
+    ' and the SERVICE reads it to compute CoolOffUntil = HighWater_at_request +
+    ' max(configured, floor). It MUST be MAC-covered: a raw edit to shorten it fails the
+    ' MAC -> freeze (and even absent the freeze the compile-time floor clamps it up, so a
+    ' tampered/0 value can only ever EXTEND the wait, never shorten below the floor).
+    ' Absent/blank/unparseable -> the floor. It trails LAST, after ScheduleActiveUntil (the
+    ' append-at-end rule every bump follows, keeping each schema bump a uniform edit).
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal coolOffDuration As String) As String
         Return schemaVersion & vbLf &
                "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
@@ -146,7 +159,8 @@ Friend Module ConfigIntegrity
                "PartnerUnlockedAt=" & partnerUnlockedAt & vbLf &
                "Committed=" & committed & vbLf &
                "ScheduleSpec=" & scheduleSpec & vbLf &
-               "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf
+               "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf &
+               "CoolOffDuration=" & coolOffDuration & vbLf
     End Function
 
     ' HMAC-SHA256 of the canonical (Unicode bytes), Base64-encoded. The key is

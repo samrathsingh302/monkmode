@@ -229,6 +229,10 @@ Public Class Form1
         ' config read under v7 code builds a different canonical and freezes, R9).
         Dim scheduleSpec As String = ini.GetKeyValue("Schedule", "Spec")
         Dim scheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+        ' C6b: the [CoolOff] Duration configured cooling-off wait in seconds, stored
+        ' PLAINTEXT (as-stored, like Committed - NOT decrypted); absent => "" (a v7 config
+        ' read under v8 code builds a different canonical and freezes, R9). MAC-covered.
+        Dim coolOffDuration As String = ini.GetKeyValue("CoolOff", "Duration")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -240,7 +244,7 @@ Public Class Form1
         ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
         Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", enc.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration)
     End Function
 
     ' B7: recompute [Integrity] Mac over the current canonical with the already

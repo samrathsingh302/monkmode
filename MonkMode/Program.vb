@@ -3,7 +3,7 @@
 '    Usage:
 '      monkmode setup  [--partner "Alex (alex@example.com)"]  (required first-run onboarding)
 '      monkmode block  --sites a.com,b.com [--apps chrome.exe,foo.exe]
-'                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit]
+'                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
 '      monkmode status
 '      monkmode add    --sites c.com[,d.com]
 '      monkmode unblock                    (request cooling-off — lifts after ~1h active time)
@@ -155,6 +155,31 @@ Module Program
             Return 1
         End If
 
+        ' C6b: optional --cooloff sets THIS block's cooling-off DURATION - how long the
+        ' self-serve `unblock` exit takes to lift. Parsed up front so a bad value fails
+        ' BEFORE any hosts/service side effects. 0 = not given (the service uses its
+        ' compile-time floor, ~1h). A configured value below the floor is clamped up by
+        ' the service, so --cooloff can only ever EXTEND the wait, never shorten it.
+        Dim coolOffSeconds As Long = 0
+        Dim coolOffArg As String = GetOption(args, "--cooloff")
+        If coolOffArg <> "" Then
+            Dim coolSpan As TimeSpan
+            If Not TryParseDuration(coolOffArg, coolSpan) Then
+                Console.Error.WriteLine("Could not understand --cooloff '" & coolOffArg & "'. Try 2h, 90m, 1d.")
+                Return 1
+            End If
+            coolOffSeconds = CLng(Math.Round(coolSpan.TotalSeconds))
+            ' Sanity cap: cooling-off is a short friction wait before the self-serve exit,
+            ' not a second timer. Refuse an absurd value up front (fail-fast, no partial
+            ' state) - it would also risk a DateTime overflow when the service computes
+            ' HighWater + duration each tick. The ~1h floor bounds the low end; 365d the high.
+            Const MaxCoolOffSeconds As Long = 365L * 24L * 60L * 60L   ' 1 year
+            If coolOffSeconds > MaxCoolOffSeconds Then
+                Console.Error.WriteLine("--cooloff is too long (max ~365d). Cooling-off is a short wait before the self-serve exit, not a second timer.")
+                Return 1
+            End If
+        End If
+
         Dim serviceExe As String = Path.Combine(Blocker.AppDir(), Blocker.ServiceExeName)
         If Not File.Exists(serviceExe) Then
             Console.Error.WriteLine("Cannot find " & Blocker.ServiceExeName & " next to monkmode.exe (" & Blocker.AppDir() & ").")
@@ -196,7 +221,8 @@ Module Program
         Dim committed As Boolean = HasFlag(args, "--commit")
         ' C3b: WriteConfig mints a fresh partner code and returns the plaintext ONCE
         ' (stored only as a salted, MAC-covered hash). Shown once below; never logged.
-        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate, committed)
+        ' C6b: coolOffSeconds (0 = default floor) is written MAC-covered from birth.
+        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate, committed, coolOffSeconds)
         ' B5a: snapshot the user's current browser DoH policy BEFORE the service
         ' starts and forces it off, so teardown restores the pre-block state (no
         ' data loss). Must precede InstallAndStart - the service sets the policy in
@@ -211,6 +237,8 @@ Module Program
         Console.WriteLine("MonkMode is now active until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
+        ' C6b: confirm a custom cooling-off duration when set (the ~1h floor still applies if shorter).
+        If coolOffSeconds > 0 Then Console.WriteLine("  Cooling-off: " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & " (the self-serve 'unblock' wait; a ~1h minimum still applies if this is shorter).")
         Console.WriteLine("Close and reopen your browser to see the block. It cannot be removed until the timer ends.")
 
         ' C4: committed-block notice - a committed block surrenders the self-serve
@@ -677,7 +705,7 @@ Module Program
         Console.WriteLine("")
         Console.WriteLine("Usage:")
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""]   (first-run onboarding; required before the first block)")
-        Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit]")
+        Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")
@@ -697,6 +725,7 @@ Module Program
         Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")
         Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM, same-day only). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
+        Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")
     End Sub
 
 End Module
