@@ -28,6 +28,7 @@
 // smoke-tested seam (CV C-core smoke), exactly like the B1/B2/B4/C1b live wiring.
 
 using System.Globalization;
+using System.IO;
 
 namespace MonkMode.Tests;
 
@@ -766,5 +767,69 @@ public class CoolOffWriteConfigTests
             var backupPath = MonkMode.Blocker.IniBackupPath();
             if (File.Exists(backupPath)) File.Delete(backupPath);
         }
+    }
+}
+
+// C6c: the shared --cooloff argument parser (Program.TryParseCoolOffArg) that drives DoBlock's
+// override(>0)/inherit(0) decision and DoSetup's account-default store. Pins the contract both
+// verbs rely on: a valid value passes through as seconds (the OVERRIDE), an ABSENT --cooloff yields
+// (True, 0) so the caller applies its own default (block inherits the account default; setup stores
+// none), and an unparseable/too-long value returns False with seconds reset to 0 (the verb then
+// exits 1, no partial state). Pure arg parsing - no file I/O; the reject paths write a friendly
+// error to Console.Error, redirected here so the test output stays clean.
+public class CoolOffArgParseTests
+{
+    private static bool Parse(string[] args, out long seconds)
+    {
+        var prevErr = Console.Error;
+        Console.SetError(TextWriter.Null);
+        try
+        {
+            long s = -1;
+            var ok = MonkMode.Program.TryParseCoolOffArg(args, ref s);
+            seconds = s;
+            return ok;
+        }
+        finally { Console.SetError(prevErr); }
+    }
+
+    [Theory]
+    [InlineData("2h", 7200)]
+    [InlineData("90m", 5400)]
+    [InlineData("45", 2700)]          // bare number = minutes
+    [InlineData("365d", 31536000)]    // exactly MaxCoolOffSeconds is accepted (the cap boundary)
+    public void ValidValue_PassesThroughAsSeconds_TheOverride(string arg, long expected)
+    {
+        Assert.True(Parse(new[] { "--cooloff", arg }, out var s));
+        Assert.Equal(expected, s);    // >0 => DoBlock uses THIS, not the account default
+    }
+
+    [Fact]
+    public void AbsentCoolOff_YieldsTrueAndZero_SoTheCallerInherits()
+    {
+        // No --cooloff token at all => (True, 0): DoBlock then inherits the account default,
+        // DoSetup stores no default. 0 is the unambiguous "absent" signal (a valid value is always >0).
+        Assert.True(Parse(new[] { "block", "--sites", "reddit.com", "--for", "2h" }, out var s));
+        Assert.Equal(0L, s);
+    }
+
+    [Fact]
+    public void ValuelessCoolOff_ReadsAsAbsent_TrueAndZero()
+    {
+        // "--cooloff" as the trailing token (no value) reads as absent (GetOption => "") => (True, 0):
+        // treated as unset (the documented C6b behaviour), NOT an error.
+        Assert.True(Parse(new[] { "block", "--cooloff" }, out var s));
+        Assert.Equal(0L, s);
+    }
+
+    [Theory]
+    [InlineData("xyz")]     // unparseable
+    [InlineData("2x")]
+    [InlineData("366d")]    // above the 365d cap
+    [InlineData("400d")]
+    public void UnparseableOrTooLong_ReturnsFalseAndZero_TheVerbExits1(string arg)
+    {
+        Assert.False(Parse(new[] { "--cooloff", arg }, out var s));
+        Assert.Equal(0L, s);   // seconds reset to 0 on reject - never a partial value leaks through
     }
 }

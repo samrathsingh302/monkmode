@@ -1003,11 +1003,23 @@ Module Blocker
     ' The setup file's own canonical version tag (independent of the enforcement
     ' ConfigIntegrity.CurrentSchemaVersion). Bumping it invalidates older setup files so a
     ' schema change forces a one-off `setup` re-run (fail-closed), mirroring the "arm
-    ' blocks after upgrading" operational rule. s1 = C6a: Done + Partner.
-    Public Const SetupSchemaVersion As String = "s1"
+    ' blocks after upgrading" operational rule. s1 = C6a: Done + Partner. s2 = C6c: adds
+    ' the account-default cooling-off duration (CoolOffSeconds) - an s1 file's byte-exact
+    ' MAC can't validate the s2 canonical, so upgrading forces one `setup` re-run.
+    Public Const SetupSchemaVersion As String = "s2"
     Public Const SetupSection As String = "Setup"
     Public Const SetupDoneKey As String = "Done"
     Public Const SetupPartnerKey As String = "Partner"
+    ' C6c: the account-default cooling-off wait (seconds) every later `block` inherits when
+    ' it gives no --cooloff of its own. Stored PLAINTEXT + MAC-covered on the SETUP file
+    ' (like Partner), written only when > 0 (absent = "" = no default = the service floor).
+    Public Const SetupCoolOffKey As String = "CoolOffSeconds"
+    ' C6c: the shared sanity cap on any cooling-off duration (~365 days). Cooling-off is a short
+    ' friction wait before the self-serve exit, not a second timer; a value beyond this is refused
+    ' up front by the CLI parse (Program.TryParseCoolOffArg for --cooloff / setup --cooloff) AND
+    ' re-clamped fail-safe on READ (SetupDefaultCoolOffSeconds), so an over-cap value can never
+    ' reach the service's per-tick HighWater.AddSeconds (which would otherwise overflow).
+    Public Const MaxCoolOffSeconds As Long = 365L * 24L * 60L * 60L
 
     Public Function SetupIniPath() As String
         Return Path.Combine(AppDir(), SetupIniName)
@@ -1023,9 +1035,15 @@ Module Blocker
     Friend Function SetupCanonicalFromIni(ByVal ini As IniFile) As String
         Dim done As String = If(ini.GetKeyValue(SetupSection, SetupDoneKey), "")
         Dim partner As String = If(ini.GetKeyValue(SetupSection, SetupPartnerKey), "")
+        ' C6c: CoolOffSeconds is APPENDED LAST (the append-at-end rule every schema bump
+        ' follows), so an s1 stamp over "s1\nDone=..\nPartner=..\n" can't validate this s2
+        ' canonical -> the upgrade freeze. Absent => "" (written only when > 0), round-tripping
+        ' identically at stamp + verify, like the empty-Partner case.
+        Dim coolOff As String = If(ini.GetKeyValue(SetupSection, SetupCoolOffKey), "")
         Return SetupSchemaVersion & vbLf &
                "Done=" & done & vbLf &
-               "Partner=" & partner & vbLf
+               "Partner=" & partner & vbLf &
+               "CoolOffSeconds=" & coolOff & vbLf
     End Function
 
     ' Is the setup file's MAC valid over its canonical? DPAPI-unprotect [Integrity] Key +
@@ -1081,19 +1099,54 @@ Module Blocker
         End Try
     End Function
 
-    ' Write (or re-write) the first-run setup file: [Setup] Done="yes" + the optional
-    ' partner label, MAC-stamped from birth (fresh key + MAC over the setup canonical).
+    ' C6c: the account-DEFAULT cooling-off wait in seconds every later `block` inherits when it
+    ' gives no --cooloff of its own. 0 = none set / setup not complete / unusable. Gated on the
+    ' SAME fail-closed completeness as SetupPartnerLabel (valid MAC AND Done="yes"), so a
+    ' missing/incomplete/tampered setup file yields 0 -> DoBlock falls back to 0 = the service's
+    ' compile-time floor, NEVER a shorter value. THE load-bearing fail-safe: a forged/blanked
+    ' default can only lose the extension (fall back to the floor), never shorten cooling-off
+    ' below it - only the MAC-covered honest value can EXTEND. A non-positive, unparseable, or
+    ' above-cap (> MaxCoolOffSeconds) stored value also yields 0. Mirrors the service's
+    ' ParseConfiguredCoolOffSeconds fail-safe (Long.TryParse + > 0), plus the same 365d cap the
+    ' CLI parse enforces - re-clamped here so no future caller can smuggle an oversized duration
+    ' past it into the service's per-tick HighWater.AddSeconds. Read-only; never throws.
+    Public Function SetupDefaultCoolOffSeconds() As Long
+        Try
+            Dim path As String = SetupIniPath()
+            If Not File.Exists(path) Then Return 0
+            Dim ini As New IniFile
+            ini.Load(path)
+            If Not SetupMacIsValidForIni(ini) Then Return 0
+            If Not String.Equals(If(ini.GetKeyValue(SetupSection, SetupDoneKey), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase) Then Return 0
+            Dim seconds As Long
+            If Long.TryParse(If(ini.GetKeyValue(SetupSection, SetupCoolOffKey), "").Trim(), seconds) AndAlso seconds > 0 AndAlso seconds <= MaxCoolOffSeconds Then Return seconds
+            Return 0
+        Catch
+            Return 0
+        End Try
+    End Function
+
+    ' Write (or re-write) the first-run setup file: [Setup] Done="yes" + the optional partner
+    ' label + the optional account-default cooling-off duration, MAC-stamped from birth (fresh
+    ' key + MAC over the setup canonical).
     ' Idempotent - re-running just overwrites (a fresh key/MAC) and is safe while a block
     ' is active (it never touches the enforcement config). Returns True only if the fresh
     ' stamp is genuinely MAC-valid on disk; False if DPAPI stamping failed (the caller
     ' warns - an unstamped setup file reads as NOT complete, so the arm-gate keeps
     ' refusing rather than trust an unprotected marker). A file-write failure throws to the
     ' verb's outer Catch (reported as an error), never a half-written trusted state.
-    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "") As Boolean
+    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "", Optional ByVal coolOffSeconds As Long = 0) As Boolean
         Dim ini As New IniFile
         ini.AddSection(SetupSection)
         ini.SetKeyValue(SetupSection, SetupDoneKey, "yes")
         ini.SetKeyValue(SetupSection, SetupPartnerKey, If(partnerLabel, "").Trim())
+        ' C6c: the account-default cooling-off duration, MAC-covered from birth (set BEFORE
+        ' StampFreshSetupMac, like Partner). Written ONLY when > 0 (absent = "" = no default;
+        ' the absent case round-trips identically at stamp + verify). A plain integer ToString()
+        ' is culture-invariant, matching SetupDefaultCoolOffSeconds + the service's parse.
+        If coolOffSeconds > 0 Then
+            ini.SetKeyValue(SetupSection, SetupCoolOffKey, coolOffSeconds.ToString())
+        End If
         StampFreshSetupMac(ini)
         ini.Save(SetupIniPath())
         ' Re-read + verify: only report success if the file on disk is genuinely MAC-valid

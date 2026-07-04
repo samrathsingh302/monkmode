@@ -51,6 +51,16 @@ public class SetupConfigTests
             MonkMode.ConfigIntegrity.ComputeConfigMac(MonkMode.Blocker.SetupCanonicalFromIni(ini), key));
     }
 
+    // C6c: stamp [Integrity] Mac over an ARBITRARY canonical with the existing key - lets a test
+    // forge a MAC over the OLD s1 canonical (Done + Partner, no CoolOffSeconds line) to prove the
+    // s1->s2 upgrade freeze, exactly like the enforcement ForwardMigration test hand-builds the old
+    // canonical literal.
+    private static void StampSetupOverCanonical(MonkMode.IniFile ini, string canonical)
+    {
+        var key = MonkMode.ConfigIntegrity.UnprotectKey(ini.GetKeyValue("Integrity", "Key"));
+        ini.SetKeyValue("Integrity", "Mac", MonkMode.ConfigIntegrity.ComputeConfigMac(canonical, key));
+    }
+
     [Fact]
     public void FreshWrite_IsMacValidAndComplete_DoneStoredYes()
     {
@@ -265,6 +275,194 @@ public class SetupConfigTests
 
             Assert.True(MonkMode.Blocker.WriteSetupConfig());
             Assert.True(MonkMode.Blocker.SetupIsComplete());    // now setup is complete, block untouched
+        }
+        finally { WipeSetup(); WipeEnforcement(); }
+    }
+
+    // ---- C6c: the account-DEFAULT cooling-off duration ([Setup] CoolOffSeconds, s1->s2) ----
+    //
+    // C6c stores an account-level default cooling-off wait on the CLI-only setup file that every later
+    // `block` inherits when it gives no --cooloff of its own. It bumps the setup canonical s1->s2 (a new
+    // CoolOffSeconds field appended last), so an old s1 file freezes under s2 code and forces a `setup`
+    // re-run - the same fail-closed upgrade rule the enforcement v-bumps use. The load-bearing property:
+    // the stored default is MAC-covered, and SetupDefaultCoolOffSeconds fail-closes to 0 (= the service
+    // floor, never a shorter value) on any tamper / incomplete setup / non-positive / unparseable value -
+    // so a forged default can only ever LOSE the extension, never shorten cooling-off below the floor.
+    // (The DoBlock inherit + DoSetup --cooloff verb wiring is smoke-tested; the seam is pinned below.)
+
+    [Fact]
+    public void SetupSchemaVersion_IsS2_TheC6cBump()
+    {
+        // A loud pin on the setup-file schema tag: C6c bumped it s1->s2 (added CoolOffSeconds). A
+        // future bump is one deliberate edit here, and this stops the freeze test's "s1" literal
+        // silently matching an un-bumped constant.
+        Assert.Equal("s2", MonkMode.Blocker.SetupSchemaVersion);
+    }
+
+    [Fact]
+    public void FreshWrite_WithCoolOffDefault_RoundTripsMacCovered()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 7200));
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(7200L, MonkMode.Blocker.SetupDefaultCoolOffSeconds());
+
+            // Stored as plaintext seconds under [Setup] CoolOffSeconds (MAC-covered, like Partner).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            Assert.Equal("7200", ini.GetKeyValue("Setup", "CoolOffSeconds"));
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void NoCoolOffDefault_Yields0_AndStaysComplete()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex"));      // no --cooloff default given
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(0L, MonkMode.Blocker.SetupDefaultCoolOffSeconds());
+
+            // Written ONLY when > 0 => the key is absent (IsNullOrEmpty covers absent "" / bare Nothing).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            Assert.True(string.IsNullOrEmpty(ini.GetKeyValue("Setup", "CoolOffSeconds")));
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void TamperedCoolOffDefault_BreaksMac_FallsBackTo0_NeverTheShortenedValue()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 7200));
+            Assert.Equal(7200L, MonkMode.Blocker.SetupDefaultCoolOffSeconds());
+
+            // Raw-edit the stored default DOWN to 60s WITHOUT re-stamping: the MAC no longer covers the
+            // canonical => the whole setup file reads as incomplete => the inherited default is 0 (the
+            // service floor), NEVER the attacker's shortened 60. The tamper can only lose the extension.
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "CoolOffSeconds", "60");
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.False(MonkMode.Blocker.SetupIsComplete());               // tamper => fail-closed
+            Assert.Equal(0L, MonkMode.Blocker.SetupDefaultCoolOffSeconds()); // 0 = floor, NOT 60
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void CoolOffDefault_IsGatedOnCompleteness_IncompleteSetupYields0()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 7200));
+
+            // Flip Done to "no" and RE-STAMP a VALID MAC over it: the MAC is valid and CoolOffSeconds is
+            // intact (7200), but setup is NOT complete (Done<>"yes") => the default reads as 0. Proves
+            // SetupDefaultCoolOffSeconds gates on completeness (like SetupPartnerLabel) - an incomplete
+            // setup file never leaks an inheritable default.
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "Done", "no");
+            ReStampSetup(ini);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.False(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(0L, MonkMode.Blocker.SetupDefaultCoolOffSeconds());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Theory]
+    [InlineData("0")]         // non-positive: an attacker-set 0 can't shorten cooling-off
+    [InlineData("-5")]
+    [InlineData("garbage")]
+    [InlineData("2h")]        // NOT raw seconds - only a plain integer is ever stored/accepted
+    [InlineData("99999999999999999999999")]  // overflow => TryParse fails => 0
+    [InlineData("31536001")]  // 365d + 1s: above MaxCoolOffSeconds => re-clamped to 0 (fail-safe cap)
+    public void UnusableCoolOffDefault_UnderAValidMac_Yields0(string stored)
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 7200));
+
+            // A VALID-MAC, complete setup file whose CoolOffSeconds is non-positive / unparseable /
+            // above the 365d cap: none can shorten cooling-off, and the over-cap one can't overflow the
+            // service tick either - the reader returns 0 (=> the service floor). Re-stamp so the MAC
+            // stays valid + Done stays "yes", isolating the parse/cap fail-safe from the MAC/complete
+            // gates (SetupIsComplete True below is the positive control: a good value WOULD be returned).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "CoolOffSeconds", stored);
+            ReStampSetup(ini);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.True(MonkMode.Blocker.SetupIsComplete());                // MAC valid + Done=yes...
+            Assert.Equal(0L, MonkMode.Blocker.SetupDefaultCoolOffSeconds()); // ...yet the value yields 0
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void SchemaBump_S1MacUnderS2Code_FreezesSetup_ForcesReRun()
+    {
+        // The C6c instance of the setup-file upgrade freeze: a file stamped under s1 (C6a: Done + Partner,
+        // NO CoolOffSeconds) read under s2 code. The s2 SetupCanonicalFromIni tags "s2" and appends a
+        // "CoolOffSeconds=" line, so the byte-exact s1 stamp can't validate it - setup reads NOT complete
+        // (the arm-gate then makes the user re-run `setup`) and the inherited default is 0 (the floor).
+        // Mirrors the enforcement v7->v8 ForwardMigration freeze; "arm/setup after upgrading" carries over.
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex"));   // a real, DPAPI-stamped setup file
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+
+            // Forge the OLD s1 canonical (version "s1", Done + Partner only, no CoolOffSeconds line) and
+            // stamp the file's MAC over IT with the existing key - exactly what a pre-C6c CLI stored.
+            var s1Canonical = "s1\n" + "Done=yes\n" + "Partner=Alex\n";
+            StampSetupOverCanonical(ini, s1Canonical);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            // Sanity: the forged s1 MAC IS valid over the s1 canonical (a genuine "old but honest" file,
+            // not a corrupt one)...
+            var key = MonkMode.ConfigIntegrity.UnprotectKey(ini.GetKeyValue("Integrity", "Key"));
+            Assert.True(MonkMode.ConfigIntegrity.ConfigMacIsValid(
+                s1Canonical, ini.GetKeyValue("Integrity", "Mac"), key));
+            // ...yet under s2 code it does NOT validate the s2 canonical => frozen, forces re-run.
+            Assert.False(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(0L, MonkMode.Blocker.SetupDefaultCoolOffSeconds());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void SetupDefault_FlowsIntoBlockCoolOffDuration_TheInheritSeam()
+    {
+        // The DoBlock inherit path can't arm a live block in a unit test (fence), so pin its SEAM: the
+        // stored account default (SetupDefaultCoolOffSeconds) flows into WriteConfig's coolOffSeconds and
+        // lands MAC-covered in the enforcement [CoolOff] Duration - exactly what `block` (no --cooloff)
+        // does. An explicit `block --cooloff` instead passes its own value (CoolOffWriteConfigTests); here
+        // we prove the DEFAULT is what a no-`--cooloff` block would write into the enforcement canonical.
+        WipeSetup();
+        WipeEnforcement();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 5400));   // account default 90m
+            var inherited = MonkMode.Blocker.SetupDefaultCoolOffSeconds();
+            Assert.Equal(5400L, inherited);
+
+            // What DoBlock does when --cooloff is absent: coolOffSeconds = the inherited default.
+            MonkMode.Blocker.WriteConfig(new[] { "reddit.com" }, System.Array.Empty<string>(),
+                new System.DateTime(2027, 1, 1, 0, 0, 0), committed: false, coolOffSeconds: inherited);
+
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.IniPath());
+            Assert.Equal("5400", ini.GetKeyValue("CoolOff", "Duration"));
+            Assert.Contains("CoolOffDuration=5400\n", MonkMode.Blocker.CanonicalFromIni(ini));
         }
         finally { WipeSetup(); WipeEnforcement(); }
     }

@@ -1,7 +1,7 @@
 '    MonkMode - CLI entry point
 '
 '    Usage:
-'      monkmode setup  [--partner "Alex (alex@example.com)"]  (required first-run onboarding)
+'      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h]  (required first-run onboarding)
 '      monkmode block  --sites a.com,b.com [--apps chrome.exe,foo.exe]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
 '      monkmode status
@@ -76,7 +76,13 @@ Module Program
     ' + default blocklist/presets are deferred (C6b / D1).
     Private Function DoSetup(ByVal args As String()) As Integer
         Dim partner As String = GetOption(args, "--partner").Trim()
-        If Not Blocker.WriteSetupConfig(partner) Then
+        ' C6c: optional --cooloff sets the ACCOUNT-DEFAULT cooling-off duration that every later
+        ' `block` inherits when it gives no --cooloff of its own (an explicit block --cooloff still
+        ' overrides). Same grammar + 365d cap as block --cooloff; parsed BEFORE the write so a bad
+        ' value fails fast with no partial state. 0 = not given (no account default stored).
+        Dim coolOffSeconds As Long
+        If Not TryParseCoolOffArg(args, coolOffSeconds) Then Return 1
+        If Not Blocker.WriteSetupConfig(partner, coolOffSeconds) Then
             Console.Error.WriteLine("Could not secure the setup file (Windows DPAPI is unavailable on this machine).")
             Console.Error.WriteLine("MonkMode can't protect its config here, so it won't arm blocks safely. Resolve DPAPI, then re-run 'monkmode setup'.")
             Return 2
@@ -90,6 +96,8 @@ Module Program
         Console.WriteLine("  Cooling-off - without the code you can still leave, but not instantly: 'monkmode")
         Console.WriteLine("  unblock' starts a mandatory ~1 hour wait of active machine time; the block stays")
         Console.WriteLine("  fully enforced until it elapses, then lifts itself ('monkmode unblock --cancel' aborts it).")
+        ' C6c: confirm the account-default cooling-off when set (blocks without their own --cooloff inherit it).
+        If coolOffSeconds > 0 Then Console.WriteLine("  Your account-default cooling-off wait is " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & ", inherited by any block without its own --cooloff (the ~1h minimum still applies).")
         Console.WriteLine("")
         Console.WriteLine("  Committed blocks - 'monkmode block --commit' disables even the cooling-off exit, so")
         Console.WriteLine("  the accountability code is the ONLY early way out. Use it when you mean it.")
@@ -155,30 +163,18 @@ Module Program
             Return 1
         End If
 
-        ' C6b: optional --cooloff sets THIS block's cooling-off DURATION - how long the
-        ' self-serve `unblock` exit takes to lift. Parsed up front so a bad value fails
-        ' BEFORE any hosts/service side effects. 0 = not given (the service uses its
-        ' compile-time floor, ~1h). A configured value below the floor is clamped up by
-        ' the service, so --cooloff can only ever EXTEND the wait, never shorten it.
-        Dim coolOffSeconds As Long = 0
-        Dim coolOffArg As String = GetOption(args, "--cooloff")
-        If coolOffArg <> "" Then
-            Dim coolSpan As TimeSpan
-            If Not TryParseDuration(coolOffArg, coolSpan) Then
-                Console.Error.WriteLine("Could not understand --cooloff '" & coolOffArg & "'. Try 2h, 90m, 1d.")
-                Return 1
-            End If
-            coolOffSeconds = CLng(Math.Round(coolSpan.TotalSeconds))
-            ' Sanity cap: cooling-off is a short friction wait before the self-serve exit,
-            ' not a second timer. Refuse an absurd value up front (fail-fast, no partial
-            ' state) - it would also risk a DateTime overflow when the service computes
-            ' HighWater + duration each tick. The ~1h floor bounds the low end; 365d the high.
-            Const MaxCoolOffSeconds As Long = 365L * 24L * 60L * 60L   ' 1 year
-            If coolOffSeconds > MaxCoolOffSeconds Then
-                Console.Error.WriteLine("--cooloff is too long (max ~365d). Cooling-off is a short wait before the self-serve exit, not a second timer.")
-                Return 1
-            End If
-        End If
+        ' C6b/C6c: optional --cooloff sets THIS block's cooling-off DURATION - how long the
+        ' self-serve `unblock` exit takes to lift. Parsed up front (shared TryParseCoolOffArg:
+        ' grammar + 365d cap) so a bad value fails BEFORE any hosts/service side effects. When
+        ' --cooloff is ABSENT (seconds = 0), inherit the account default set at `setup --cooloff`
+        ' (C6c); still 0 there (no default / setup incomplete / tampered) => the service uses its
+        ' compile-time floor (~1h). SetupIsComplete was already required above, so the setup file
+        ' is present here; SetupDefaultCoolOffSeconds fail-closes to 0 on any read/tamper anyway.
+        ' A configured value below the floor is clamped up by the service, so --cooloff can only
+        ' ever EXTEND the wait, never shorten it.
+        Dim coolOffSeconds As Long
+        If Not TryParseCoolOffArg(args, coolOffSeconds) Then Return 1
+        If coolOffSeconds = 0 Then coolOffSeconds = Blocker.SetupDefaultCoolOffSeconds()
 
         Dim serviceExe As String = Path.Combine(Blocker.AppDir(), Blocker.ServiceExeName)
         If Not File.Exists(serviceExe) Then
@@ -690,6 +686,33 @@ Module Program
         Return span.TotalSeconds > 0
     End Function
 
+    ' C6c: parse an optional --cooloff argument (shared by `setup` and `block`) into seconds,
+    ' applying the same duration grammar (TryParseDuration) and the shared 365d sanity cap
+    ' (Blocker.MaxCoolOffSeconds). Returns True with seconds=0 when --cooloff is ABSENT (each
+    ' caller supplies its own default: the account default for `block`, none for `setup`); True
+    ' with seconds>0 for a valid value; False (after printing a friendly error) for an unparseable
+    ' or too-long value. The cap refuses an absurd value up front (fail-fast) - it would otherwise
+    ' risk a DateTime overflow when the service computes HighWater + duration each tick (the C6b
+    ' verifier's Low finding). Friend so the override(>0)/absent(0)/reject(False) contract DoBlock's
+    ' inherit relies on is unit-tested.
+    Friend Function TryParseCoolOffArg(ByVal args As String(), ByRef seconds As Long) As Boolean
+        seconds = 0
+        Dim arg As String = GetOption(args, "--cooloff")
+        If arg = "" Then Return True   ' absent => 0 (not given); the caller decides the default
+        Dim span As TimeSpan
+        If Not TryParseDuration(arg, span) Then
+            Console.Error.WriteLine("Could not understand --cooloff '" & arg & "'. Try 2h, 90m, 1d.")
+            Return False
+        End If
+        seconds = CLng(Math.Round(span.TotalSeconds))
+        If seconds > Blocker.MaxCoolOffSeconds Then
+            Console.Error.WriteLine("--cooloff is too long (max ~365d). Cooling-off is a short wait before the self-serve exit, not a second timer.")
+            seconds = 0
+            Return False
+        End If
+        Return True
+    End Function
+
     Private Function Humanize(ByVal ts As TimeSpan) As String
         If ts.TotalSeconds <= 0 Then Return "0 minutes"
         Dim parts As New List(Of String)
@@ -704,7 +727,7 @@ Module Program
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
-        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""]   (first-run onboarding; required before the first block)")
+        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h]   (first-run onboarding; required before the first block)")
         Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
@@ -726,6 +749,7 @@ Module Program
         Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM, same-day only). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
         Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")
+        Console.WriteLine("  - 'monkmode setup --cooloff 2h' sets an ACCOUNT DEFAULT cooling-off wait that every block without its own --cooloff inherits; a block's own --cooloff always overrides it. The ~1h minimum still applies.")
     End Sub
 
 End Module
