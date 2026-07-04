@@ -832,8 +832,11 @@ Public Class Service1
             prevTickWallNow = lastTickWallNow
             tickWallNow = DateTime.Now.ToString(culture)
             If StrComp("no", iniTimeChanging) = 0 Then lastTickWallNow = tickWallNow
-            Dim candidateHw As String = NextHighWater(storedHw, DateTime.Now.ToString(culture), HighWaterJumpCeilingSeconds)
-            newHw = CapHighWaterAdvance(storedHw, candidateHw, monoElapsedSeconds)
+            ' B1: advance on the REAL monotonic elapsed regardless of wall DIRECTION
+            ' (a backward roll or forward jump credits mono instead of freezing, so
+            ' the block ends at its real duration - the P2 fix). A Trusted tick is
+            ' byte-identical to the old NextHighWater+CapHighWaterAdvance composition.
+            newHw = AdvanceHighWater(storedHw, DateTime.Now.ToString(culture), monoElapsedSeconds, HighWaterJumpCeilingSeconds)
             Dim parsedHw As DateTime
             If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then
                 newHwAsOf = parsedHw
@@ -2203,6 +2206,52 @@ Public Class Service1
         If advance <= 0 OrElse advance <= budget Then Return candidateHwText
         ' Otherwise the wall ran ahead of real time (creep): credit only the budget.
         Return storedHw.AddSeconds(budget).ToString(ca)
+    End Function
+
+    ' B1 backward-clock fix. The next [Time] HighWater to persist, advancing on the
+    ' REAL monotonic elapsed (monoElapsedSeconds, from Environment.TickCount64, which
+    ' the wall clock cannot move) regardless of wall-clock DIRECTION. A Trusted tick
+    ' behaves EXACTLY as before - it reuses NextHighWater + CapHighWaterAdvance
+    ' verbatim, so the honest path is provably byte-identical (min(wallDelta, mono),
+    ' never past the honest wall 'now'). The change is the Else branch: on a BACKWARD
+    ' roll (DST fall-back / NTP / manual) or a FORWARD jump - where the wall gives no
+    ' trustworthy delta - the old composition FROZE the mark (credited 0), so an
+    ' active block over-ran by the rollback amount until the wall climbed back (fail-
+    ' CLOSED - it over-blocks, never lifts early - but a real correctness deviation,
+    ' the Codex residual P2). Here we instead credit the real monotonic elapsed, so
+    ' the mark keeps climbing at the real ~10s/tick rate and the block ends at its
+    ' REAL duration. The safety invariant is preserved exactly: per-tick credit <=
+    ' real monotonic elapsed this tick (Trusted: min(wallDelta, budget) <= budget <=
+    ' mono; non-Trusted: budget = min(mono, ceiling) <= mono) => cumulative advance <=
+    ' real-elapsed-since-arm => the block can NEVER lift before its real duration. We
+    ' only raise the non-Trusted credit from 0 up to <= mono, never above it.
+    ' Pure + Shared so B1b's regressions pin it (like its three sibling functions).
+    Friend Shared Function AdvanceHighWater(ByVal storedHwText As String, ByVal wallNowText As String, ByVal monoElapsedSeconds As Long, ByVal ceilingSeconds As Long) As String
+        Dim ca As New CultureInfo("en-CA")
+        Dim storedHw As DateTime
+        ' Fail-safe: an unparseable/tampered stored mark stays UNCHANGED - coupled to
+        ' the already-failing MAC, so newHwAsOf -> MinValue -> the block holds. We
+        ' never fabricate a fresh, MAC-shaped value here (mirrors NextHighWater /
+        ' CapHighWaterAdvance).
+        If Not DateTime.TryParse(storedHwText, ca, DateTimeStyles.None, storedHw) Then Return storedHwText
+
+        ' The real time we credit THIS tick, clamped [0, ceiling]. The ceiling clamp
+        ' (D1) makes the fix robust to whatever TickCount64 does across sleep/hibernate:
+        ' a single resume tick credits at most one ceiling - never an unbounded jump,
+        ' never a lift. A non-positive delta credits nothing.
+        Dim budget As Long = monoElapsedSeconds
+        If budget < 0 Then budget = 0
+        If budget > ceilingSeconds Then budget = ceilingSeconds
+
+        Select Case ClassifyTimeAdvance(storedHwText, wallNowText, ceilingSeconds)
+            Case TimeAdvanceTrusted
+                ' Honest wall: keep today's rule EXACTLY (reuse the shipped helpers).
+                Return CapHighWaterAdvance(storedHwText, NextHighWater(storedHwText, wallNowText, ceilingSeconds), budget)
+            Case Else   ' TimeAdvanceBackward or TimeAdvanceForwardJump
+                ' B1 FIX: wall untrustworthy -> credit the REAL monotonic elapsed,
+                ' don't freeze. budget <= ceiling <= any realistic value, so no overflow.
+                Return storedHw.AddSeconds(budget).ToString(ca)
+        End Select
     End Function
 
     ' Returns the hosts-file text with the MonkMode marker block (the marker

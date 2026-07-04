@@ -278,6 +278,91 @@ public class CapHighWaterAdvanceTests
     }
 }
 
+// B1 backward-clock fix: AdvanceHighWater credits the REAL monotonic elapsed on a
+// non-Trusted tick (backward roll / forward jump) instead of FREEZING the mark, so
+// an active block ends at its real duration rather than over-running by the rollback
+// (the Codex residual P2). The Trusted path is byte-identical to the old NextHighWater
+// -> CapHighWaterAdvance composition. The safety invariant is preserved exactly:
+// per-tick credit <= real monotonic elapsed, so the block can never lift early.
+public class AdvanceHighWaterTests
+{
+    private static readonly CultureInfo EnCa = new("en-CA");
+    private static string T(DateTime dt) => dt.ToString(EnCa);
+    private static readonly DateTime Base = new(2026, 6, 25, 12, 0, 0);
+    private const long Ceiling = 120; // mirrors Service1.HighWaterJumpCeilingSeconds
+
+    [Fact]
+    public void BackwardRoll_CreditsRealElapsed_NotFrozen()
+    {
+        // THE headline. A wall rolled back 30 min used to FREEZE the mark (credit 0),
+        // over-running the block by the rollback. Now it credits the real ~10s elapsed.
+        var wall = T(Base.AddMinutes(-30)); // backward roll
+        Assert.Equal(T(Base.AddSeconds(10)),
+            monkmode.Service1.AdvanceHighWater(T(Base), wall, 10, Ceiling));
+    }
+
+    [Fact]
+    public void ForwardJump_CreditsRealElapsed_NotTheJump()
+    {
+        // A +1h forward jump credits the real ~10s elapsed - NOT the hour (which would
+        // lift the block early) and NOT 0 (which would freeze/over-run). Just mono.
+        var wall = T(Base.AddHours(1)); // forward jump (> ceiling)
+        Assert.Equal(T(Base.AddSeconds(10)),
+            monkmode.Service1.AdvanceHighWater(T(Base), wall, 10, Ceiling));
+    }
+
+    [Fact]
+    public void Trusted_IsByteIdenticalToOldComposition()
+    {
+        // The honest path must be UNCHANGED: AdvanceHighWater must equal the exact old
+        // two-call composition NextHighWater -> CapHighWaterAdvance. Covers a normal
+        // +10s tick, a +119s within-ceiling creep step, AND the subtle case the design
+        // flagged - a Trusted tick with mono > ceiling, where AdvanceHighWater passes the
+        // CLAMPED budget (120) but the old code passed the raw mono: they must STILL
+        // agree, because a Trusted wall delta is <= ceiling so the mono term is always
+        // dominated by wallDelta (min(wallDelta, X) == min(wallDelta, 120) when X >= 120).
+        foreach (var (wallDelta, mono) in new[] { (10, 10L), (119, 10L), (119, 200L), (10, 500L) })
+        {
+            var now = T(Base.AddSeconds(wallDelta));
+            var expected = monkmode.Service1.CapHighWaterAdvance(
+                T(Base), monkmode.Service1.NextHighWater(T(Base), now, Ceiling), mono);
+            Assert.Equal(expected, monkmode.Service1.AdvanceHighWater(T(Base), now, mono, Ceiling));
+        }
+    }
+
+    [Fact]
+    public void MonoClampedToCeiling_SleepCannotOverCredit()
+    {
+        // D1: a pathological monotonic delta (e.g. TickCount64 counting a long sleep)
+        // credits AT MOST one ceiling per tick on a non-Trusted tick - never more, so a
+        // resume-from-sleep can neither lift the block nor jump the mark unbounded.
+        var wall = T(Base.AddMinutes(-30)); // non-Trusted (backward)
+        Assert.Equal(T(Base.AddSeconds(Ceiling)),
+            monkmode.Service1.AdvanceHighWater(T(Base), wall, 100000, Ceiling));
+    }
+
+    [Fact]
+    public void NegativeOrZeroMono_CreditsNothing()
+    {
+        // No real elapsed (mono <= 0) credits nothing even on a non-Trusted tick: the
+        // mark holds where it was. Covers a degenerate/defensive anchor read.
+        var wall = T(Base.AddMinutes(-30)); // backward
+        Assert.Equal(T(Base), monkmode.Service1.AdvanceHighWater(T(Base), wall, 0, Ceiling));
+        Assert.Equal(T(Base), monkmode.Service1.AdvanceHighWater(T(Base), wall, -5, Ceiling));
+    }
+
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("")]
+    public void UnparseableStored_ReturnsUnchanged_FailClosed(string stored)
+    {
+        // Fail-closed: an unreadable stored mark is returned UNCHANGED (never re-seeded
+        // to a fresh MAC-shaped value), so it stays coupled to the failing MAC and the
+        // block holds. Mirrors NextHighWater / CapHighWaterAdvance.
+        Assert.Equal(stored, monkmode.Service1.AdvanceHighWater(stored, T(Base), 10, Ceiling));
+    }
+}
+
 public class ClockRollbackRegressionTests
 {
     // THE headline B4 test: the clock-forward bypass, pinned shut. Drives the
@@ -353,6 +438,91 @@ public class ClockRollbackRegressionTests
         var highWater = until.AddMinutes(1);
         Assert.False(monkmode.Service1.EffectiveBlockHasExpired(until.ToString(EnCa), highWater, 5, macValid: false));
         Assert.False(mm_guard.Guardian.EffectiveBlockHasExpired(until.ToString(EnCa), highWater, 5, macValid: false));
+    }
+
+    [Fact]
+    public void BackwardRoll_MarkClimbsAtRealRate_EndsOnTime_NeverEarly()
+    {
+        // B1 (the P2 fix), driven end to end. A 10-min block; the wall is held 30 min
+        // BEHIND real time every tick (so every tick classifies Backward), with 10s of
+        // real monotonic elapsed per tick. The OLD code froze the mark on every backward
+        // tick, so the block over-ran by ~30 min; B1 credits the real elapsed, so the
+        // mark climbs ~10s/tick and the block ends at its REAL 600s duration - and NEVER
+        // before it (cumulative advance <= real elapsed so far: the safety invariant).
+        var arm = new DateTime(2026, 6, 25, 12, 0, 0);
+        var until = arm.AddMinutes(10);          // 600s block
+        var mark = arm.ToString(EnCa);           // HighWater seeded at arm
+        const int RealTick = 10;                 // real seconds elapsed per tick
+        int ticks = 600 / RealTick;              // 60 ticks == the real duration
+
+        var trueClock = arm;
+        for (int i = 1; i <= ticks; i++)
+        {
+            trueClock = trueClock.AddSeconds(RealTick);
+            var wall = trueClock.AddMinutes(-30).ToString(EnCa); // held 30 min behind => Backward
+            var before = DateTime.Parse(mark, EnCa);
+            mark = monkmode.Service1.AdvanceHighWater(mark, wall, RealTick, 120);
+            var after = DateTime.Parse(mark, EnCa);
+
+            // (a) not frozen: the mark advances every backward tick (old code stalled it).
+            Assert.True(after > before, $"tick {i}: mark must advance, was frozen at {before:O}");
+            // (c) never early: cumulative advance <= real elapsed so far (the invariant).
+            Assert.True((after - arm).TotalSeconds <= i * RealTick,
+                $"tick {i}: advance {(after - arm).TotalSeconds}s must be <= {i * RealTick}s real elapsed");
+        }
+
+        // (b) ends on real time: after exactly duration/tick ticks the mark reaches Until
+        // (no over-run), and expiry against the mark now reads TRUE (lifts on time),
+        // whereas the pre-B1 freeze would have left it ~30 min short here.
+        var final = DateTime.Parse(mark, EnCa);
+        Assert.Equal(until, final);
+        Assert.True(monkmode.Service1.EffectiveBlockHasExpired(until.ToString(EnCa), final, 5, macValid: true));
+    }
+
+    [Fact]
+    public void MixedWallDirections_CreditNeverExceedsRealElapsed()
+    {
+        // Adversarial interleave of backward, forward-jump and trusted ticks, 10s of
+        // real elapsed each. The safety invariant must hold at EVERY step: cumulative
+        // advance <= sum of real elapsed (so early-lift is impossible) - AND the mark
+        // must still advance on the non-Trusted ticks (B1: no freeze/over-block), so the
+        // total beats what the OLD freeze-on-non-Trusted code could reach.
+        var arm = new DateTime(2026, 6, 25, 12, 0, 0);
+        var mark = arm.ToString(EnCa);
+        const long Mono = 10;
+
+        // (kind label, wall delta from the CURRENT mark). Trusted deltas are within [0,120].
+        var steps = new (string kind, int delta)[]
+        {
+            ("trusted", 10),        // credit 10 (full mono)
+            ("backward", -1800),    // credit 10 (B1 fix; old froze)
+            ("forwardjump", 3600),  // credit 10 (B1 fix; old froze)
+            ("trusted", 5),         // credit 5  (honest wall ran slower than real)
+            ("backward", -1800),    // credit 10 (B1 fix)
+            ("trusted", 10),        // credit 10
+        };
+
+        long sumMono = 0;
+        for (int i = 0; i < steps.Length; i++)
+        {
+            sumMono += Mono;
+            var cur = DateTime.Parse(mark, EnCa);
+            var wall = cur.AddSeconds(steps[i].delta).ToString(EnCa);
+            mark = monkmode.Service1.AdvanceHighWater(mark, wall, Mono, 120);
+            var adv = (DateTime.Parse(mark, EnCa) - arm).TotalSeconds;
+            // Invariant: cumulative advance never exceeds the real elapsed so far.
+            Assert.True(adv <= sumMono, $"step {i} ({steps[i].kind}): advance {adv}s must be <= {sumMono}s real elapsed");
+        }
+
+        var total = (DateTime.Parse(mark, EnCa) - arm).TotalSeconds;
+        // Exact expected credit: 10+10+10+5+10+10 = 55 (the +5 trusted tick credits only
+        // the 5s the wall actually moved; every other tick credits the full 10s mono).
+        Assert.Equal(arm.AddSeconds(55), DateTime.Parse(mark, EnCa));
+        // Ceiling: never exceeds total real elapsed (60s). Floor: strictly beats the OLD
+        // freeze-on-non-Trusted behaviour (which credited only the 3 trusted ticks =
+        // 10+5+10 = 25s), proving the backward/forward ticks are now credited, not frozen.
+        Assert.True(total <= sumMono, $"total {total}s must be <= {sumMono}s real elapsed");
+        Assert.True(total > 25, $"total {total}s must beat the old freeze floor of 25s");
     }
 }
 
