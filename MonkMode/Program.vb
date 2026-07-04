@@ -43,6 +43,7 @@ Module Program
                 Case "block" : Return DoBlock(args)
                 Case "status" : Return DoStatus()
                 Case "add" : Return DoAdd(args)
+                Case "schedule" : Return DoSchedule(args)
                 Case "unblock" : Return DoUnblock(args)
                 Case "help", "-h", "--help", "/?" : PrintUsage() : Return 0
                 Case Else
@@ -112,6 +113,17 @@ Module Program
             Console.Error.WriteLine("Cannot find " & Blocker.ServiceExeName & " next to monkmode.exe (" & Blocker.AppDir() & ").")
             Console.Error.WriteLine("Deploy the service and notifier into the same folder as the CLI.")
             Return 2
+        End If
+
+        ' SD-c1: schedules and manual `--for` blocks are mutually exclusive in C5b (so the armed
+        ' config is always manual-only OR schedule-only and the past-Until sentinel + scheduleArmed
+        ' lifecycle stay unambiguous). Refuse a manual block while a schedule is armed - note a
+        ' schedule-only block reads as `BlockIsActive()`=False (its Until is the past sentinel), so
+        ' THIS guard, not the BlockIsActive check below, is what protects an armed schedule from
+        ' being overwritten by `block`.
+        If Blocker.ScheduleIsArmed() Then
+            Console.Error.WriteLine("A schedule is armed. Clear it first with 'monkmode schedule --clear', then start a manual block.")
+            Return 3
         End If
 
         If Blocker.BlockIsActive() Then
@@ -199,12 +211,94 @@ Module Program
             Console.Error.WriteLine("Provide sites to add with --sites a.com,b.com")
             Return 1
         End If
+        ' SD-c1: `add` targets a manual block. When a schedule is armed, edit the schedule instead
+        ' (re-run `monkmode schedule` with the full site list) - the schedule's sites live in its
+        ' MAC-covered Spec, not the manual snapshot `add` appends to.
+        If Blocker.ScheduleIsArmed() Then
+            Console.Error.WriteLine("A schedule is armed. To change its sites, re-run 'monkmode schedule --sites ... --windows ...' with the full list.")
+            Return 1
+        End If
         If Not Blocker.BlockIsActive() Then
             Console.Error.WriteLine("No active block to add to. Start one with 'monkmode block'.")
             Return 1
         End If
         Blocker.AppendAddToHosts(domains)
         Console.WriteLine("Added to the active block: " & String.Join(", ", domains))
+        Return 0
+    End Function
+
+    ' C5b (c3): `schedule` arms/edits/clears a SCHEDULE-ONLY block - a recurring wall-clock rule
+    ' ("Mon-Fri 09:00-17:00") the service opens/closes automatically at manual strength (SD1: an
+    ' open window holds until it closes). Unlike `block` it does NOT open a block now and does NOT
+    ' write the hosts snapshot (the service creates monkmode_hosts.block on window-open, c1); it
+    ' writes the MAC-covered [Schedule] Spec + the past-Until sentinel, then installs/starts the
+    ' service (+ notifier/guardian) so windows are evaluated. `--clear` blanks the Spec (future
+    ' windows vanish; a currently-open window still runs to its monotonic close, C5a §7). SD-c1:
+    ' refuses while a manual block is active (mutually exclusive with `block` in C5b).
+    Private Function DoSchedule(ByVal args As String()) As Integer
+        ' `--clear`: blank the Spec (only if a schedule is armed) -> the service tears down after any
+        ' open window closes. Never installs/starts anything; a no-op message if nothing is armed.
+        If HasFlag(args, "--clear") Then
+            If Not Blocker.ScheduleIsArmed() Then
+                Console.WriteLine("No schedule is armed. Nothing to clear.")
+                Return 0
+            End If
+            Blocker.WriteScheduleConfig("")
+            Console.WriteLine("Schedule cleared. No future windows will open.")
+            Console.WriteLine("If a window is open now it runs to its end; MonkMode then tears down within ~10s.")
+            Return 0
+        End If
+
+        ' SD-c1: a manual `--for` block and a schedule are mutually exclusive in C5b.
+        If Blocker.BlockIsActive() Then
+            Console.Error.WriteLine("A manual block is active. Finish or exit it before setting a schedule.")
+            Return 3
+        End If
+
+        ' Gather + validate the schedule args, serialising to the compact v1 Spec (a malformed/empty
+        ' window or an empty site list is rejected here - the CLI never stamps a garbage Spec).
+        Dim sites As New List(Of String)
+        sites.AddRange(SplitList(GetOption(args, "--sites")))
+        Dim apps As New List(Of String)
+        apps.AddRange(SplitList(GetOption(args, "--apps")))
+        Dim windowsArg As String = GetOption(args, "--windows")
+
+        Dim spec As String = "", err As String = ""
+        If Not Blocker.TryBuildScheduleSpec(windowsArg, sites, apps, spec, err) Then
+            Console.Error.WriteLine(err)
+            Return 1
+        End If
+
+        Dim serviceExe As String = Path.Combine(Blocker.AppDir(), Blocker.ServiceExeName)
+        If Not File.Exists(serviceExe) Then
+            Console.Error.WriteLine("Cannot find " & Blocker.ServiceExeName & " next to monkmode.exe (" & Blocker.AppDir() & ").")
+            Console.Error.WriteLine("Deploy the service and notifier into the same folder as the CLI.")
+            Return 2
+        End If
+
+        ' A FRESH arm (nothing armed yet) captures the browser DoH snapshot BEFORE the service forces
+        ' DoH off during windows (so teardown restores the user's prior policy - no data loss) and
+        ' clears any stale hosts snapshot left by a prior block (so the service's window-open union
+        ' starts clean). Neither runs on a re-arm: re-snapshotting DoH mid-open-window would capture
+        ' our own forced-off state as the "prior", and a live schedule snapshot must not be dropped.
+        Dim freshArm As Boolean = Not Blocker.ScheduleIsArmed()
+        If freshArm Then
+            If Not Blocker.WriteDohSnapshot() Then
+                Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at teardown rather than restore/remove it.")
+            End If
+            Blocker.DeleteSnapshot()
+        End If
+
+        Blocker.WriteScheduleConfig(spec)
+        ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
+        Blocker.RegisterAndLaunchNotifier()
+
+        Console.WriteLine("Schedule armed. Windows open automatically at their times.")
+        Console.WriteLine("  Windows: " & windowsArg.Trim())
+        Console.WriteLine("  Sites:   " & String.Join(", ", sites))
+        If apps.Count > 0 Then Console.WriteLine("  Apps:    " & String.Join(", ", apps))
+        Console.WriteLine("During a window the block holds at full strength until the window closes; it cannot be ended early.")
+        Console.WriteLine("Change it any time with 'monkmode schedule ...'; stop future windows with 'monkmode schedule --clear'.")
         Return 0
     End Function
 
@@ -450,6 +544,8 @@ Module Program
         Console.WriteLine("  monkmode block --sites a.com,b.com [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
+        Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")
+        Console.WriteLine("  monkmode schedule --clear   (stop future windows; an open window still runs to its end)")
         Console.WriteLine("  monkmode unblock           (request cooling-off: the block lifts after ~1h of active machine time)")
         Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
         Console.WriteLine("  monkmode unblock --code <CODE>  (submit the partner accountability code; the service verifies it and lifts within ~10s)")
@@ -460,6 +556,7 @@ Module Program
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
         Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
         Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")
+        Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM, same-day only). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
     End Sub
 

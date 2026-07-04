@@ -49,6 +49,17 @@ Module Blocker
     ' only submit a candidate; the service alone verifies and lifts. Parity-pinned
     ' with the service copy (Service1.PartnerCodeFileName).
     Public Const PartnerCodeFileName As String = "monkmode_partner.code"
+    ' C5b (c3): the schedule-only past-[Time] Until SENTINEL and the Spec grammar-version
+    ' tag - CLI copies of Service1.ScheduleOnlyExpiredUntil / ScheduleSpecGrammarVersion
+    ' (separate assemblies can't reference one another - the same duplication+parity pattern
+    ' as SnapshotName / CoolOff*FileName / the ConfigIntegrity copies; a CLI<->service parity
+    ' test pins each equal). A schedule-only block has NO manual duration, so `schedule` writes
+    ' this fixed, clearly-past, MAC-covered value as [Time] Until: BlockHasExpired(sentinel) is
+    ' then always True, so BlockHeld tracks ScheduleActive (self-heals idle between windows) and
+    ' the c2 scheduleArmed guard keeps the service+guardian alive between windows. The Spec always
+    ' leads with the grammar-version tag so the service parser accepts it.
+    Public Const ScheduleOnlyExpiredUntil As String = "1970-01-01 00:00:00"
+    Public Const ScheduleSpecGrammarVersion As String = "v1"
     Public Const Marker As String = "#### MonkMode Entries ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
@@ -563,6 +574,271 @@ Module Blocker
             RefreshBackup(ini)
         Catch
         End Try
+    End Sub
+
+    ' ---- C5b (c3): the `schedule` front-end (arm/clear a schedule-only block) ----
+    '
+    ' The CLI half of C5c: validate the human --windows/--sites/--apps args, serialise them to the
+    ' compact v1 [Schedule] Spec grammar the service parser (Service1.ParseSchedule) accepts, and
+    ' arm a MAC-covered schedule-only block. The arm MIRRORS AppendAddToHosts (edit-in-place +
+    ' RestampMacWithExistingKey) / WriteConfig (fresh scaffold), NOT DoBlock's hosts write - the
+    ' CLI does NOT write the hosts snapshot (the service creates monkmode_hosts.block on window-
+    ' open, c1). A schedule-only block has no manual duration, so [Time] Until = the past sentinel.
+
+    ' Map a human day token to 1..7 (Mon=1 .. Sun=7), matching the compact grammar's dayMask chars
+    ' ('1'..'7'). Case-insensitive; the WHOLE trimmed token must be a recognised day name/abbrev.
+    ' 0 = unrecognised. Matching the FULL token (not a 3-letter prefix) is deliberately fail-closed:
+    ' a garbage word ("monkey") or a space-separated day list ("Mon Tue Wed", which the comma-split
+    ' would hand over as one token) is REJECTED with a friendly error, never silently truncated to
+    ' its first weekday - under-blocking intent must never pass silently in a self-control tool.
+    Private Function DayNameToNumber(ByVal token As String) As Integer
+        Select Case token.Trim().ToLowerInvariant()
+            Case "mon", "monday" : Return 1
+            Case "tue", "tues", "tuesday" : Return 2
+            Case "wed", "weds", "wednesday" : Return 3
+            Case "thu", "thur", "thurs", "thursday" : Return 4
+            Case "fri", "friday" : Return 5
+            Case "sat", "saturday" : Return 6
+            Case "sun", "sunday" : Return 7
+            Case Else : Return 0
+        End Select
+    End Function
+
+    ' Parse a human day set ("Mon-Fri", "Sat,Sun", "Mon,Wed,Fri", "Tue") into the compact dayMask
+    ' chars (sorted, deduped, e.g. "12345"). Ranges A-B are inclusive and reject a reversed range
+    ' (start > end); a single unrecognised token fails. Fail-closed: any error returns False with a
+    ' friendly message and NO mask (never emit a partial/garbage mask).
+    Private Function TryParseDaySet(ByVal daysText As String, ByRef maskChars As String, ByRef errorMsg As String) As Boolean
+        maskChars = ""
+        Dim present(7) As Boolean   ' index 1..7 (0 unused)
+        Dim anyDay As Boolean = False
+        For Each rawTok As String In daysText.Split(","c)
+            Dim tok As String = rawTok.Trim()
+            If tok = "" Then Continue For
+            Dim dashParts() As String = tok.Split("-"c)
+            If dashParts.Length = 1 Then
+                Dim n As Integer = DayNameToNumber(tok)
+                If n = 0 Then
+                    errorMsg = "Could not understand the day '" & tok & "'. Use Mon, Tue, Wed, Thu, Fri, Sat, Sun (or a range like Mon-Fri)."
+                    Return False
+                End If
+                present(n) = True : anyDay = True
+            ElseIf dashParts.Length = 2 Then
+                Dim a As Integer = DayNameToNumber(dashParts(0))
+                Dim b As Integer = DayNameToNumber(dashParts(1))
+                If a = 0 OrElse b = 0 Then
+                    errorMsg = "Could not understand the day range '" & tok & "'. Use e.g. Mon-Fri."
+                    Return False
+                End If
+                If a > b Then
+                    errorMsg = "The day range '" & tok & "' runs backwards. Use e.g. Mon-Fri, or list the days: Fri,Sat,Sun,Mon."
+                    Return False
+                End If
+                For d As Integer = a To b
+                    present(d) = True
+                Next
+                anyDay = True
+            Else
+                errorMsg = "Could not understand the days '" & tok & "'. Use e.g. Mon-Fri or Sat,Sun."
+                Return False
+            End If
+        Next
+        If Not anyDay Then
+            errorMsg = "A window needs at least one day (e.g. Mon-Fri 09:00-17:00)."
+            Return False
+        End If
+        Dim sb As New System.Text.StringBuilder
+        For d As Integer = 1 To 7
+            If present(d) Then sb.Append(d.ToString(CultureInfo.InvariantCulture))
+        Next
+        maskChars = sb.ToString()
+        Return True
+    End Function
+
+    ' Parse a human "H:MM"/"HH:MM" time to minutes-of-day (0..1439). -1 = invalid (HH not 1-2
+    ' digits / MM not 2 digits / out of range HH 0-23, MM 0-59).
+    Private Function ParseHhmmToken(ByVal s As String) As Integer
+        Dim parts() As String = s.Trim().Split(":"c)
+        If parts.Length <> 2 Then Return -1
+        Dim hStr As String = parts(0).Trim(), mStr As String = parts(1).Trim()
+        If hStr.Length < 1 OrElse hStr.Length > 2 OrElse mStr.Length <> 2 Then Return -1
+        Dim hh As Integer, mm As Integer
+        If Not Integer.TryParse(hStr, NumberStyles.None, CultureInfo.InvariantCulture, hh) Then Return -1
+        If Not Integer.TryParse(mStr, NumberStyles.None, CultureInfo.InvariantCulture, mm) Then Return -1
+        If hh > 23 OrElse mm > 59 Then Return -1
+        Return hh * 60 + mm
+    End Function
+
+    ' Minutes-of-day (0..1439) -> compact "HHMM" (4-digit, zero-padded), the grammar's time form.
+    Private Function MinutesToHhmm(ByVal minutes As Integer) As String
+        Return (minutes \ 60).ToString("00", CultureInfo.InvariantCulture) & (minutes Mod 60).ToString("00", CultureInfo.InvariantCulture)
+    End Function
+
+    ' Parse one human window clause ("Mon-Fri 09:00-17:00", "Sat, Sun 10:00-14:00") into the compact
+    ' "dayMask:HHMM-HHMM" grammar token. Rejects overnight/zero-length (open >= close, SD3) and bad
+    ' days/times. Fail-closed: any error returns False + a friendly message.
+    Private Function TryParseWindowClause(ByVal clause As String, ByRef compactWindow As String, ByRef errorMsg As String) As Boolean
+        compactWindow = ""
+        Dim m As System.Text.RegularExpressions.Match =
+            System.Text.RegularExpressions.Regex.Match(clause.Trim(),
+                "^(?<days>[A-Za-z][A-Za-z,\s\-]*?)\s+(?<open>\d{1,2}:\d{2})\s*-\s*(?<close>\d{1,2}:\d{2})$")
+        If Not m.Success Then
+            errorMsg = "Could not understand the window '" & clause.Trim() & "'. Use e.g. ""Mon-Fri 09:00-17:00""."
+            Return False
+        End If
+        Dim maskChars As String = ""
+        If Not TryParseDaySet(m.Groups("days").Value, maskChars, errorMsg) Then Return False
+        Dim openMin As Integer = ParseHhmmToken(m.Groups("open").Value)
+        Dim closeMin As Integer = ParseHhmmToken(m.Groups("close").Value)
+        If openMin < 0 OrElse closeMin < 0 Then
+            errorMsg = "Could not understand the time in '" & clause.Trim() & "'. Use 24-hour HH:MM, e.g. 09:00-17:00."
+            Return False
+        End If
+        If openMin >= closeMin Then
+            errorMsg = "The window '" & clause.Trim() & "' must end after it starts (overnight windows aren't supported in this version - split it into two same-day windows)."
+            Return False
+        End If
+        compactWindow = maskChars & ":" & MinutesToHhmm(openMin) & "-" & MinutesToHhmm(closeMin)
+        Return True
+    End Function
+
+    ' Validate + serialise the human schedule args to the compact v1 [Schedule] Spec grammar
+    ' Service1.ParseSchedule round-trips. windowsArg = ";"-separated human window clauses
+    ' ("Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00"); sites/apps = the block lists. Every field is
+    ' validated - a malformed window/day/time, an empty window list, or an empty site list fails
+    ' with a friendly message and stamps NOTHING (the "never stamp a garbage Spec" fence, verifier
+    ' P3#1: a validated result always parses back to >=1 window). Sites are normalised like the
+    ' hosts entries (NormalizeDomain); apps get a .exe suffix; "|" separates entries. Friend so the
+    ' CLI<->service round-trip test can call it.
+    Friend Function TryBuildScheduleSpec(ByVal windowsArg As String, ByVal sites As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByRef spec As String, ByRef errorMsg As String) As Boolean
+        spec = "" : errorMsg = ""
+        If windowsArg Is Nothing OrElse windowsArg.Trim() = "" Then
+            errorMsg = "Provide at least one window with --windows ""Mon-Fri 09:00-17:00""."
+            Return False
+        End If
+        Dim compactWindows As New List(Of String)
+        For Each clause As String In windowsArg.Split(";"c)
+            If clause.Trim() = "" Then Continue For
+            Dim cw As String = ""
+            If Not TryParseWindowClause(clause, cw, errorMsg) Then Return False
+            compactWindows.Add(cw)
+        Next
+        If compactWindows.Count = 0 Then
+            errorMsg = "Provide at least one window with --windows ""Mon-Fri 09:00-17:00""."
+            Return False
+        End If
+        ' Sites (>=1; normalised like the hosts entries). "|"/";" can't appear in a domain.
+        Dim siteTokens As New List(Of String)
+        For Each raw As String In sites
+            Dim d As String = NormalizeDomain(raw)
+            If d = "" Then Continue For
+            If d.Contains("|") OrElse d.Contains(";") Then
+                errorMsg = "The site '" & raw & "' contains an unsupported character."
+                Return False
+            End If
+            siteTokens.Add(d)
+        Next
+        If siteTokens.Count = 0 Then
+            errorMsg = "Provide at least one site to block with --sites a.com,b.com."
+            Return False
+        End If
+        ' Apps (optional; .exe-suffixed like the manual block's [Process] List).
+        Dim appTokens As New List(Of String)
+        For Each raw As String In apps
+            Dim a As String = raw.Trim()
+            If a = "" Then Continue For
+            If Not a.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) Then a &= ".exe"
+            If a.Contains("|") OrElse a.Contains(";") Then
+                errorMsg = "The app '" & raw & "' contains an unsupported character."
+                Return False
+            End If
+            appTokens.Add(a)
+        Next
+        spec = ScheduleSpecGrammarVersion & ";" & String.Join(",", compactWindows) &
+               ";sites=" & String.Join("|", siteTokens) &
+               ";apps=" & String.Join("|", appTokens)
+        Return True
+    End Function
+
+    ' C5b (c3): is a schedule currently armed? MAC-valid AND a non-empty [Schedule] Spec (the cheap
+    ' over-approximation the guardian uses, NOT a 4th ParseSchedule copy - the CLI only ever writes a
+    ' validated Spec or "", so non-empty <=> has windows here). Used for the SD-c1 mutual exclusion
+    ' (`block`/`add` refuse while a schedule is armed) and to pick the arm path (edit-in-place vs
+    ' fresh scaffold) in WriteScheduleConfig. Fail-safe: any read failure / no config / invalid MAC
+    ' reads as NOT armed - a tampered running block is still caught by the manual path's own fail-
+    ' closed BlockIsActive (service running + bad MAC => active => refused). Never throws.
+    Public Function ScheduleIsArmed() As Boolean
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            If Not ConfigMacIsValidForIni(ini) Then Return False
+            Return Not String.IsNullOrWhiteSpace(ini.GetKeyValue("Schedule", "Spec"))
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' C5b (c3): arm / re-arm / clear a schedule-only block. `spec` = a validated compact Spec (>=1
+    ' window) to arm, or "" to clear. Mirrors WriteConfig's fresh scaffold when nothing is armed yet,
+    ' and AppendAddToHosts's edit-in-place (RestampMacWithExistingKey, preserve every other field)
+    ' when re-arming/clearing an armed one - so a re-arm/clear can NEVER reset the monotonic frame
+    ' ([Time] HighWater) or shorten a currently-open window ([Schedule] ActiveUntil is left
+    ' untouched; C5a §7). The CLI never writes the hosts snapshot (the service creates
+    ' monkmode_hosts.block on window-open, c1). Public so the CLI-writer end-to-end test drives it.
+    Public Sub WriteScheduleConfig(ByVal spec As String)
+        If ScheduleIsArmed() Then
+            ' Edit an existing armed schedule-only config in place: change only the Spec, keep the
+            ' monotonic frame + any open window. Re-stamp with the EXISTING key, and ONLY if the MAC
+            ' was valid before the edit (never re-bless a tampered/frozen config - the B7 `add` fix).
+            Try
+                Dim ini As New IniFile
+                ini.Load(IniPath())
+                Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
+                ini.SetKeyValue("Schedule", "Spec", spec)
+                ' Re-affirm the schedule-only sentinel (idempotent - an armed schedule-only config
+                ' already carries it; keeps the invariant explicit).
+                ini.SetKeyValue("Time", "Until", enc.EncryptData(ScheduleOnlyExpiredUntil))
+                If macValid Then RestampMacWithExistingKey(ini)
+                ini.Save(IniPath())
+                RefreshBackup(ini)
+            Catch
+            End Try
+        Else
+            ' Fresh schedule-only scaffold (WriteConfig's field set, minus the manual duration +
+            ' partner code): the past-Until sentinel, a seeded HighWater/Now, empty manual site/app
+            ' lists (the schedule's own live in the Spec), and the Spec. StampFreshMac mints the key
+            ' + MAC so the block is armed (macValid=True) from birth.
+            Dim ini As New IniFile
+            ini.AddSection("Process")
+            ini.SetKeyValue("Process", "List", "null")            ' no manual apps (schedule apps live in the Spec)
+
+            ini.AddSection("User")
+            ini.SetKeyValue("User", "CustomChecked", "")
+            ini.SetKeyValue("User", "CustomSites", "null")        ' no manual sites (schedule sites live in the Spec)
+            ini.SetKeyValue("User", "Done", "no")
+            ini.SetKeyValue("User", "NeedsAlerted", "yes")
+
+            ini.AddSection("Time")
+            ini.SetKeyValue("Time", "Until", enc.EncryptData(ScheduleOnlyExpiredUntil))
+            ini.SetKeyValue("Time", "TimeChanging", "no")
+            ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
+
+            ini.AddSection("CurrentTime")
+            ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
+
+            ' C4: NOT a committed MANUAL block (SD5: no [Schedule] Committed field). "no" is MAC-covered.
+            ini.AddSection("Commit")
+            ini.SetKeyValue("Commit", "Committed", "no")
+
+            ' C5b: the schedule rule (plaintext, MAC-covered). ActiveUntil is OMITTED (absent = "" =
+            ' no window open); the SERVICE is its sole writer (sets it on window-open, c1/c2).
+            ini.AddSection("Schedule")
+            ini.SetKeyValue("Schedule", "Spec", spec)
+
+            StampFreshMac(ini)
+            ini.Save(IniPath())
+            RefreshBackup(ini)
+        End If
     End Sub
 
     ' ---- C2b: cooling-off request channel (authority-free trigger files) ----

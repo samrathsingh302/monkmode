@@ -69,6 +69,7 @@ Public Class Form1
         AddHandler SystemEvents.TimeChanged, AddressOf SystemEvents_TimeChanged
 
         Dim done As String = "", needsAlerted As String = ""
+        Dim isScheduleArmed As Boolean = False
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
@@ -76,12 +77,15 @@ Public Class Form1
             needsAlerted = ini.GetKeyValue("User", "NeedsAlerted")
             iniProcessList = ini.GetKeyValue("Process", "List")
             If StrComp(iniProcessList, "null") <> 0 Then iniProcessList = enc.DecryptData(iniProcessList)
+            ' C5b (c3): don't announce "block ended" while a schedule is armed (design §6.4) - a
+            ' schedule-only block's past-Until sentinel + between-windows idle must not toast.
+            isScheduleArmed = ScheduleArmed(ConfigMacIsValidForIni(ini), ini.GetKeyValue("Schedule", "Spec"))
         Catch ex As Exception
             ExitNotifier()
             Return
         End Try
 
-        If StrComp("yes", done) = 0 Then
+        If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
             If StrComp(needsAlerted, "no") = 0 Then
                 ExitNotifier()
             Else
@@ -96,16 +100,20 @@ Public Class Form1
 
     Private Sub pollTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles pollTimer.Tick
         Dim done As String = "", needsAlerted As String = ""
+        Dim isScheduleArmed As Boolean = False
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
             done = ini.GetKeyValue("User", "Done")
             needsAlerted = ini.GetKeyValue("User", "NeedsAlerted")
+            ' C5b (c3): suppress the manual-expiry toast while a schedule is armed (design §6.4);
+            ' announce only once the schedule is genuinely cleared (not armed -> stopMe -> Done=yes).
+            isScheduleArmed = ScheduleArmed(ConfigMacIsValidForIni(ini), ini.GetKeyValue("Schedule", "Spec"))
         Catch ex As Exception
             Return
         End Try
 
-        If StrComp("yes", done) = 0 Then
+        If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
             pollTimer.Stop()
             If StrComp(needsAlerted, "no") = 0 Then
                 ExitNotifier()
@@ -276,10 +284,11 @@ Public Class Form1
     ' leaves it untouched), so leaving Until alone is both correct and simpler. We
     ' keep ONLY the TimeChanging cooperation flag (NOT a MAC-covered field): the
     ' service pauses its expiry/re-stamp decisions while the flag is "yes", so it
-    ' never acts on a half-updated config mid clock-change. NOTE: this leaves the
-    ' notifier's B7 comp helpers (ConfigMacIsValidForIni / RestampMacWithExistingKey
-    ' / CanonicalFromIni / ComputeCompensatedUntil) unused - retained for now, safe
-    ' to delete in a later cleanup.
+    ' never acts on a half-updated config mid clock-change. NOTE: ConfigMacIsValidForIni +
+    ' CanonicalFromIni are now LIVE again - the C5b (c3) ScheduleArmed toast gate (Form1_Load /
+    ' pollTimer_Tick) uses them to suppress the manual-expiry toast while a schedule is armed, so
+    ' do NOT delete them. Only RestampMacWithExistingKey + ComputeCompensatedUntil remain unused
+    ' here (the notifier no longer rewrites [Time] Until), safe to delete in a later cleanup.
     Private Sub SystemEvents_TimeChanged(ByVal sender As Object, ByVal e As EventArgs)
         Try
             Dim ini As New IniFile
@@ -391,6 +400,19 @@ Public Class Form1
             sb.Append(app)
         Next
         Return sb.ToString()
+    End Function
+
+    ' C5b (c3): is a schedule armed? macValid AND the Spec parses to >=1 window - the EXACT
+    ' derivation Service1.ScheduleArmed uses (parity-pinned). Used ONLY to SUPPRESS the manual-
+    ' expiry toast while a schedule is armed (design §6.4): a schedule-only block carries a PAST
+    ' [Time] Until sentinel, and between windows the service holds it alive (Done stays "no", c2),
+    ' but a defence-in-depth gate here means that even if [User] Done ever read "yes" while a
+    ' schedule is still armed, the notifier would NOT falsely announce the block ended - it
+    ' announces only once the schedule is genuinely cleared (Spec blanked -> not armed -> the
+    ' service's stopMe sets Done=yes). A manual block has an empty Spec => armed=False => the toast
+    ' fires byte-identically to today. Byte-for-byte Service1.ScheduleArmed.
+    Friend Shared Function ScheduleArmed(ByVal macValid As Boolean, ByVal specText As String) As Boolean
+        Return macValid AndAlso ParseSchedule(specText).Windows.Count > 0
     End Function
 
     ' One recurring window (parity copy of Service1.ScheduleWindow).
