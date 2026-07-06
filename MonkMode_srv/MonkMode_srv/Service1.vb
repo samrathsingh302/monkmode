@@ -270,11 +270,18 @@ Public Class Service1
         ' resolve to their real IPs again (e.g. after any ipconfig /flushdns).
         ' We enforce the lock via the read-only attribute, re-asserted by the
         ' timer, and append on demand (adder_Changed) instead.
-        Try
-            SetAttr(hostDirS, vbReadOnly)
-        Catch ex As Exception
-            stopMe()
-        End Try
+        ' O1 fail-closed (issue #1): the read-only attribute here is defence-in-
+        ' depth, NOT the enforcement itself - the 10s tick re-asserts it every
+        ' beat (best-effort, swallowed) and the B2 self-heal repairs the hosts
+        ' CONTENT independent of the attribute. The old code called stopMe() on
+        ' a SetAttr failure: the ONE remaining path where an ERROR lifted the
+        ' block (full teardown - hosts stripped, snapshot/backup deleted,
+        ' SafeBoot/DoH/deny-ACL undone, process Ended - off a transient or
+        ' attacker-induced FS error at boot). Now: a short bounded retry, then
+        ' DEGRADE with the block kept standing - the next successful tick
+        ' re-locks the attribute. TrySetHostsReadOnly never throws (an OnStart
+        ' throw would fail the service start, which is also fail-open).
+        TrySetHostsReadOnly(hostDirS, OnStartReadOnlyAttempts, OnStartReadOnlyRetryDelayMs)
 
         ' B3: register under SafeBoot so enforcement survives a Safe Mode reboot.
         ' Only reached on the active path - an expired/invalid block calls stopMe()
@@ -2804,6 +2811,58 @@ Public Class Service1
             End Try
         End Try
     End Sub
+
+    ' O1 (issue #1) retry bounds for OnStart's read-only assert: 3 quick attempts
+    ' (worst case adds ~400ms to OnStart - the SCM start budget is ~30s), then the
+    ' retry is handed off to the 10s tick's own best-effort re-assert.
+    Friend Const OnStartReadOnlyAttempts As Integer = 3
+    Friend Const OnStartReadOnlyRetryDelayMs As Integer = 200
+
+    ' Test seam (O1 fail-closed branch coverage, same pattern as
+    ' AtomicHosts.RenameHookForTests). When set, TrySetHostsReadOnly calls this
+    ' instead of the real SetAttr, so a unit test can force transient and
+    ' persistent attribute-set failures DETERMINISTICALLY - proving the retry
+    ' loop retries, the persistent path returns False without throwing, and no
+    ' failure shape can reach a teardown. <ThreadStatic> so the hook is confined
+    ' to the single test thread that sets it (parallel test classes unaffected);
+    ' PRODUCTION never assigns it - the field stays Nothing and the real SetAttr
+    ' path runs, behaviourally unchanged. Friend, so only the in-repo test
+    ' assembly (InternalsVisibleTo) can even see it.
+    <ThreadStatic>
+    Friend Shared SetAttrHookForTests As Action(Of String)
+
+    ' O1 fail-closed (issue #1): assert the read-only attribute on hosts with a
+    ' short bounded retry, and NEVER throw - the attribute is defence-in-depth
+    ' (the DNS-client lock), not the block itself, so its failure must degrade
+    ' (return False, keep the service and the block standing, let the 10s tick
+    ' keep re-asserting) rather than tear anything down. This replaced OnStart's
+    ' old Catch -> stopMe(), the one error->LIFT path in the service. Friend
+    ' Shared so the unit tests drive it against temp files, exactly like
+    ' ReassertHostsFailClosed - never the live hosts.
+    Friend Shared Function TrySetHostsReadOnly(ByVal hostsPath As String,
+                                               ByVal attempts As Integer,
+                                               ByVal retryDelayMs As Integer) As Boolean
+        For attempt As Integer = 1 To attempts
+            Try
+                ' SetAttrHookForTests is Nothing in production - this is the
+                ' plain SetAttr; the hook only diverts it under a unit test.
+                If SetAttrHookForTests IsNot Nothing Then
+                    SetAttrHookForTests(hostsPath)
+                Else
+                    SetAttr(hostsPath, vbReadOnly)
+                End If
+                Return True
+            Catch ex As Exception
+                ' Swallow EVERY failure shape (missing file, sharing violation,
+                ' ACL denial): pause briefly between attempts, and after the
+                ' last one degrade to False - never rethrow, never lift.
+                If attempt < attempts AndAlso retryDelayMs > 0 Then
+                    Thread.Sleep(retryDelayMs)
+                End If
+            End Try
+        Next
+        Return False
+    End Function
 
     Private Sub stopMe()
 
