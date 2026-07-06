@@ -603,10 +603,14 @@ Public Class Service1
     '
     ' macValid REQUIRED to act - a frozen config never has its schedule state modified or
     ' re-stamped (fail-closed: an invalid MAC is already enforcing). The service is the SOLE
-    ' writer of ActiveUntil (the guardian only reads it), so there is no write race. Persist
-    ' ONLY on change, via PersistScheduleActiveUntil (RELOAD + TOCTOU re-validate + re-stamp
-    ' with the existing key + Save + refresh the C1b backup) - the ProcessCoolOffSignals
-    ' discipline. Best-effort throughout; a throw never crashes the tick (it continues off
+    ' writer of ActiveUntil (the guardian only reads it), so ActiveUntil itself has no write
+    ' race - but the CLI owns the SPEC, and a `schedule --clear`/re-arm can land between this
+    ' tick's load and the persist below (issue #2). Persist ONLY on change, via
+    ' PersistScheduleActiveUntil (RELOAD + TOCTOU re-validate + Spec-unchanged re-check
+    ' against THIS tick's snapshot spec + re-stamp with the existing key + Save + refresh the
+    ' C1b backup) - the ProcessCoolOffSignals discipline; a changed Spec aborts the write and
+    ' the next tick re-evaluates off the fresh Spec (ScheduleSpecUnchangedSinceSnapshot).
+    ' Best-effort throughout; a throw never crashes the tick (it continues off
     ' the returned value). No CLI writes a Spec until sub-slice (c), so in production this
     ' fast-paths out (spec="" AND ActiveUntil="") on every block - (b2) ships the machinery
     ' + its e2e tests; the site/app UNION enforcement behind BlockHeld is (b3).
@@ -622,9 +626,11 @@ Public Class Service1
             If target <> currentScheduleActiveUntil Then
                 ' A window opened/extended, or an elapsed window cleared: persist it. If the
                 ' TOCTOU re-validate fails (the config went invalid in the read->reload
-                ' window) nothing is written and we keep the pre-read value (fail-closed; the
-                ' heartbeat's own reload re-validates and Holds).
-                If PersistScheduleActiveUntil(target) Then Return target
+                ' window) or the Spec changed under this tick (a CLI clear/re-arm landed -
+                ' issue #2), nothing is written and we keep the pre-read value (fail-closed;
+                ' the heartbeat's own reload re-validates and Holds, and the next tick
+                ' re-evaluates off the fresh Spec).
+                If PersistScheduleActiveUntil(target, spec) Then Return target
                 Return currentScheduleActiveUntil
             End If
             Return currentScheduleActiveUntil
@@ -635,17 +641,21 @@ Public Class Service1
 
     ' Persist [Schedule] ActiveUntil = newValue ("" clears it), the ProcessCoolOffSignals
     ' write discipline: RELOAD the ini, TOCTOU re-validate its MAC (only re-stamp bytes just
-    ' re-verified - never re-bless a swap in the read->reload window), set the field
-    ' (encrypted like CoolOffUntil; "" stored verbatim = no window), re-stamp with the
-    ' EXISTING key, Save, and refresh the C1b backup (guarded on the in-memory MAC, so a bad
-    ' primary can never overwrite a good backup - no data loss). Returns True iff the write
-    ' happened (a failed re-validate returns False; the caller keeps the old value). Best-
-    ' effort; never throws (the caller is inside a Try too).
-    Private Function PersistScheduleActiveUntil(ByVal newValue As String) As Boolean
+    ' re-verified - never re-bless a swap in the read->reload window), re-check the [Schedule]
+    ' Spec is still the one newValue was DERIVED from (issue #2: the CLI clearing/re-arming the
+    ' Spec mid-tick must not have a stale-spec ActiveUntil written over it - see
+    ' ScheduleSpecUnchangedSinceSnapshot), set the field (encrypted like CoolOffUntil; ""
+    ' stored verbatim = no window), re-stamp with the EXISTING key, Save, and refresh the C1b
+    ' backup (guarded on the in-memory MAC, so a bad primary can never overwrite a good backup
+    ' - no data loss). Returns True iff the write happened (a failed re-validate or a changed
+    ' Spec returns False; the caller keeps the old value and the next tick re-evaluates off
+    ' the fresh Spec). Best-effort; never throws (the caller is inside a Try too).
+    Private Function PersistScheduleActiveUntil(ByVal newValue As String, ByVal snapshotSpec As String) As Boolean
         Try
             Dim iniFile = New IniFile
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
             If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            If Not ScheduleSpecUnchangedSinceSnapshot(snapshotSpec, iniFile.GetKeyValue("Schedule", "Spec")) Then Return False
             iniFile.SetKeyValue("Schedule", "ActiveUntil", If(newValue = "", "", encryptionW.EncryptData(newValue)))
             RestampMacWithExistingKey(iniFile)
             iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
@@ -1674,6 +1684,27 @@ Public Class Service1
            AndAlso ScheduleElapsed(currentActiveUntil, highWaterText) Then Return ""
         ' Steady state: no change (no write).
         Return currentActiveUntil
+    End Function
+
+    ' C5b (c3 residual, issue #2): the `schedule --clear` lost-update guard - the pure decision
+    ' behind PersistScheduleActiveUntil's write-back gate. The tick SNAPSHOTS [Schedule] Spec at
+    ' load and derives the new ActiveUntil from it seconds later; the CLI (the sole Spec writer)
+    ' can clear/re-arm the Spec inside that window. Without this gate the persist's reload keeps
+    ' the CLI's new Spec but still writes an ActiveUntil derived from the STALE snapshot - a
+    ' window opens from a schedule the user just cleared (the service "reinstating" a clear the
+    ' CLI already reported). The persist may write ONLY when the reloaded Spec is BYTE-IDENTICAL
+    ' to the snapshot (ordinal, no trimming - the CLI emits canonical text, so any difference
+    ' means a write landed); otherwise it aborts and the next tick (<=10s) re-evaluates off the
+    ' fresh Spec. In effect the Spec text IS the write-version. Both abort outcomes are fail-
+    ' closed: an aborted OPEN leaves ActiveUntil="" (no hold minted from a dead rule - a fresh
+    ' arm's own windows open next tick), an aborted CLOSE keeps the stored hold <=1 tick (over-
+    ' block, never under). ABA (clear + re-arm the identical Spec within one tick) passes the
+    ' gate - safe, because the derived ActiveUntil depends only on the Spec CONTENT, which is
+    ' once again the armed content. Nothing/absent normalise to "" (IniFile.GetKeyValue returns
+    ' String.Empty for a missing key). Pure + Shared so the decision is unit-tested; the file-I/O
+    ' wrapper stays smoke-only (the ClassifyCoolOffSignal/ProcessCoolOffSignals discipline).
+    Friend Shared Function ScheduleSpecUnchangedSinceSnapshot(ByVal snapshotSpec As String, ByVal reloadedSpec As String) As Boolean
+        Return String.Equals(If(snapshotSpec, ""), If(reloadedSpec, ""), StringComparison.Ordinal)
     End Function
 
     ' The shared "is the effective block held this tick?" helper (design §6.3). The
