@@ -291,12 +291,12 @@ public class SetupConfigTests
     // (The DoBlock inherit + DoSetup --cooloff verb wiring is smoke-tested; the seam is pinned below.)
 
     [Fact]
-    public void SetupSchemaVersion_IsS3_TheD1bBump()
+    public void SetupSchemaVersion_IsS4_TheD2bBump()
     {
-        // A loud pin on the setup-file schema tag: C6c bumped it s1->s2 (CoolOffSeconds), D1b bumps
-        // it s2->s3 (DefaultSites). A future bump is one deliberate edit here, and this stops the
-        // freeze test's "s2" literal silently matching an un-bumped constant.
-        Assert.Equal("s3", MonkMode.Blocker.SetupSchemaVersion);
+        // A loud pin on the setup-file schema tag: C6c bumped it s1->s2 (CoolOffSeconds), D1b s2->s3
+        // (DefaultSites), D2b s3->s4 (DefaultApps). A future bump is one deliberate edit here, and this
+        // stops the freeze tests' "s2"/"s3" literals silently matching an un-bumped constant.
+        Assert.Equal("s4", MonkMode.Blocker.SetupSchemaVersion);
     }
 
     [Fact]
@@ -481,22 +481,23 @@ public class SetupConfigTests
     // TryBuildDefaultSites (SitePresetTests) + the reader/seam below - are pinned here.)
 
     [Fact]
-    public void SetupCanonical_S3_Format_IsExact_DefaultSitesAppendedLast()
+    public void SetupCanonical_S4_Format_IsExact_DefaultAppsAppendedLast()
     {
         // The setup canonical is a SINGLE, CLI-only function - the setup file is never read by the
         // service, so unlike the 4-copy enforcement canonical there are NO cross-assembly wrappers to
-        // hold parity with. The parity that matters here is FORMAT STABILITY: this literal pins the s3
-        // version tag, the exact field order, the key names, and that D1b's DefaultSites is APPENDED
-        // LAST, so any accidental reorder / rename / missed version bump breaks loudly (the analogue of
-        // the enforcement BuildCanonical format + parity tests).
+        // hold parity with. The parity that matters here is FORMAT STABILITY: this literal pins the s4
+        // version tag, the exact field order, the key names, and that D2b's DefaultApps is APPENDED
+        // LAST (after D1b's DefaultSites), so any accidental reorder / rename / missed version bump
+        // breaks loudly (the analogue of the enforcement BuildCanonical format + parity tests).
         var full = new MonkMode.IniFile();
         full.AddSection("Setup");
         full.SetKeyValue("Setup", "Done", "yes");
         full.SetKeyValue("Setup", "Partner", "Alex");
         full.SetKeyValue("Setup", "CoolOffSeconds", "7200");
         full.SetKeyValue("Setup", "DefaultSites", "reddit.com,x.com");
+        full.SetKeyValue("Setup", "DefaultApps", "discord.exe,steam.exe");
         Assert.Equal(
-            "s3\nDone=yes\nPartner=Alex\nCoolOffSeconds=7200\nDefaultSites=reddit.com,x.com\n",
+            "s4\nDone=yes\nPartner=Alex\nCoolOffSeconds=7200\nDefaultSites=reddit.com,x.com\nDefaultApps=discord.exe,steam.exe\n",
             MonkMode.Blocker.SetupCanonicalFromIni(full));
 
         // The all-absent-optionals shape (only Done set) still emits every field line, each "" - the
@@ -505,7 +506,7 @@ public class SetupConfigTests
         bare.AddSection("Setup");
         bare.SetKeyValue("Setup", "Done", "yes");
         Assert.Equal(
-            "s3\nDone=yes\nPartner=\nCoolOffSeconds=\nDefaultSites=\n",
+            "s4\nDone=yes\nPartner=\nCoolOffSeconds=\nDefaultSites=\nDefaultApps=\n",
             MonkMode.Blocker.SetupCanonicalFromIni(bare));
     }
 
@@ -667,6 +668,176 @@ public class SetupConfigTests
             // enforcement canonical - the default is now enforced identically to a hand-typed --sites list.
             Assert.Equal("reddit.com;x.com;", ini.GetKeyValue("User", "CustomSites"));
             Assert.Contains("reddit.com;x.com;", MonkMode.Blocker.CanonicalFromIni(ini));
+        }
+        finally { WipeSetup(); WipeEnforcement(); }
+    }
+
+    // ---- D2b: the account-DEFAULT app list ([Setup] DefaultApps, s3->s4) ----
+    //
+    // D2b is the app analogue of the D1b default blocklist: an account-level default app-kill list on
+    // the CLI-only setup file that every later `block` inherits when it names NO explicit app source
+    // (--apps/--app-preset). It bumps the setup canonical s3->s4 (a new DefaultApps field appended
+    // last), so an old s3 file freezes under s4 code and forces a `setup` re-run. Same PURE-INPUT-sugar
+    // posture as DefaultSites: the default only ever feeds a NEW arm (never lifts/shortens a live
+    // block); a forged/added default over-kills a new arm (visible, safe), a tampered/incomplete one
+    // fail-closes to NO default. The reader returns the raw stored tokens; .exe-normalisation happens
+    // downstream in PackApps at arm time (proven by the inherit-seam test).
+
+    [Fact]
+    public void FreshWrite_WithDefaultApps_RoundTripsMacCovered()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "", "discord.exe,steam.exe"));
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(new[] { "discord.exe", "steam.exe" }, MonkMode.Blocker.SetupDefaultApps());
+
+            // Stored as the raw comma-joined string under [Setup] DefaultApps (MAC-covered, like Partner).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            Assert.Equal("discord.exe,steam.exe", ini.GetKeyValue("Setup", "DefaultApps"));
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void NoDefaultApps_YieldsEmpty_AndStaysComplete()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex"));      // no default app list given
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Empty(MonkMode.Blocker.SetupDefaultApps());
+
+            // Written ONLY when non-empty => the key is absent.
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            Assert.True(string.IsNullOrEmpty(ini.GetKeyValue("Setup", "DefaultApps")));
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void DefaultApps_Reader_SplitsTrimsAndDedupes_UnderAValidMac()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex"));
+            // Hand-store a messy value (dupes, blanks, whitespace, ; separators) and RE-STAMP a valid
+            // MAC: the reader normalises it (split on , / ; , trim, drop empties, dedupe case-insensitive).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "DefaultApps", " discord.exe , ; steam.exe;discord.exe , DISCORD.EXE ");
+            ReStampSetup(ini);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(new[] { "discord.exe", "steam.exe" }, MonkMode.Blocker.SetupDefaultApps());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void TamperedDefaultApps_BreaksMac_FallsBackToEmpty()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "", "discord.exe,steam.exe"));
+            Assert.Equal(new[] { "discord.exe", "steam.exe" }, MonkMode.Blocker.SetupDefaultApps());
+
+            // Raw-edit the stored default (inject an extra app) WITHOUT re-stamping: the MAC no longer
+            // covers the canonical => the whole setup file reads as incomplete => the inherited default
+            // is EMPTY, not the tampered list. (Injecting apps would only over-kill a NEW arm anyway;
+            // this proves the tamper-evidence path fails closed to no-default.)
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "DefaultApps", "discord.exe,steam.exe,evil.exe");
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.False(MonkMode.Blocker.SetupIsComplete());               // tamper => fail-closed
+            Assert.Empty(MonkMode.Blocker.SetupDefaultApps());              // empty = no default, NOT the tampered list
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void DefaultApps_IsGatedOnCompleteness_IncompleteSetupYieldsEmpty()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "", "discord.exe,steam.exe"));
+
+            // Flip Done to "no" and RE-STAMP a VALID MAC over it: the MAC is valid and DefaultApps is
+            // intact, but setup is NOT complete (Done<>"yes") => the default reads as empty. Proves
+            // SetupDefaultApps gates on completeness (like SetupDefaultSites) - an incomplete setup file
+            // never leaks an inheritable default.
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "Done", "no");
+            ReStampSetup(ini);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.False(MonkMode.Blocker.SetupIsComplete());
+            Assert.Empty(MonkMode.Blocker.SetupDefaultApps());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void SchemaBump_S3MacUnderS4Code_FreezesSetup_ForcesReRun()
+    {
+        // The D2b instance of the setup-file upgrade freeze: a file stamped under s3 (D1b: Done +
+        // Partner + CoolOffSeconds + DefaultSites, NO DefaultApps) read under s4 code. The s4
+        // SetupCanonicalFromIni tags "s4" and appends a "DefaultApps=" line, so the byte-exact s3 stamp
+        // can't validate it - setup reads NOT complete (the arm-gate then makes the user re-run `setup`)
+        // and the inherited default is empty. Mirrors the s2->s3 freeze test above.
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 7200, "reddit.com,x.com"));   // a real, DPAPI-stamped s4 file
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+
+            // Forge the OLD s3 canonical (version "s3", through DefaultSites, NO DefaultApps line) and
+            // stamp the file's MAC over IT with the existing key - exactly what a pre-D2b CLI stored.
+            var s3Canonical = "s3\n" + "Done=yes\n" + "Partner=Alex\n" + "CoolOffSeconds=7200\n" + "DefaultSites=reddit.com,x.com\n";
+            StampSetupOverCanonical(ini, s3Canonical);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            // Sanity: the forged s3 MAC IS valid over the s3 canonical (a genuine "old but honest" file)...
+            var key = MonkMode.ConfigIntegrity.UnprotectKey(ini.GetKeyValue("Integrity", "Key"));
+            Assert.True(MonkMode.ConfigIntegrity.ConfigMacIsValid(
+                s3Canonical, ini.GetKeyValue("Integrity", "Mac"), key));
+            // ...yet under s4 code it does NOT validate the s4 canonical => frozen, forces re-run.
+            Assert.False(MonkMode.Blocker.SetupIsComplete());
+            Assert.Empty(MonkMode.Blocker.SetupDefaultApps());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void SetupDefaultApps_FlowsIntoBlock_TheAppsInheritSeam()
+    {
+        // The DoBlock inherit path can't arm a live block in a unit test (fence), so pin its SEAM: the
+        // stored account default (SetupDefaultApps) flows into the SAME `apps` list WriteConfig writes,
+        // landing in the enforcement [Process] List and round-tripping through BlockedApps - exactly
+        // what `block` (no app source) does. Stored WITHOUT .exe here to prove the documented claim that
+        // .exe-normalisation happens downstream in PackApps at arm time (the reader returns raw tokens).
+        WipeSetup();
+        WipeEnforcement();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "", "discord,steam"));
+            var inherited = MonkMode.Blocker.SetupDefaultApps();
+            Assert.Equal(new[] { "discord", "steam" }, inherited);          // reader returns RAW (no .exe)
+
+            // What DoBlock does when no --apps/--app-preset is given: apps = the inherited default.
+            MonkMode.Blocker.WriteConfig(System.Array.Empty<string>(), inherited,
+                new System.DateTime(2027, 1, 1, 0, 0, 0));
+
+            // [Process] List is encrypted; BlockedApps decrypts + strips the trailing ';'. PackApps
+            // .exe-normalised each name at arm time - the default is now enforced identically to a
+            // hand-typed --apps list.
+            Assert.Equal("discord.exe;steam.exe", MonkMode.Blocker.BlockedApps());
         }
         finally { WipeSetup(); WipeEnforcement(); }
     }

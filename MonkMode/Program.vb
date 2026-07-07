@@ -1,7 +1,7 @@
 '    MonkMode - CLI entry point
 '
 '    Usage:
-'      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social]  (required first-run onboarding)
+'      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps a.exe,b.exe] [--default-app-preset games]  (required first-run onboarding)
 '      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
 '      monkmode status
@@ -92,7 +92,17 @@ Module Program
             Console.Error.WriteLine(defaultSitesErr)
             Return 1
         End If
-        If Not Blocker.WriteSetupConfig(partner, coolOffSeconds, defaultSites) Then
+        ' D2b: optional --default-apps / --default-app-preset set the ACCOUNT-DEFAULT app-kill list
+        ' that every later `block` inherits when it names no app source of its own. Built (merged +
+        ' app-preset-expanded, FAIL-CLOSED on an unknown app-preset) BEFORE the write so a bad preset
+        ' fails fast with no partial state, exactly like --default-sites above. "" = no default stored.
+        Dim defaultApps As String = ""
+        Dim defaultAppsErr As String = ""
+        If Not Blocker.TryBuildDefaultApps(GetOption(args, "--default-apps"), GetOption(args, "--default-app-preset"), defaultApps, defaultAppsErr) Then
+            Console.Error.WriteLine(defaultAppsErr)
+            Return 1
+        End If
+        If Not Blocker.WriteSetupConfig(partner, coolOffSeconds, defaultSites, defaultApps) Then
             Console.Error.WriteLine("Could not secure the setup file (Windows DPAPI is unavailable on this machine).")
             Console.Error.WriteLine("MonkMode can't protect its config here, so it won't arm blocks safely. Resolve DPAPI, then re-run 'monkmode setup'.")
             Return 2
@@ -110,6 +120,8 @@ Module Program
         If coolOffSeconds > 0 Then Console.WriteLine("  Your account-default cooling-off wait is " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & ", inherited by any block without its own --cooloff (the ~1h minimum still applies).")
         ' D1b: confirm the account-default blocklist when set (a block naming no --sites/--preset/--file inherits it).
         If defaultSites <> "" Then Console.WriteLine("  Your account-default blocklist is: " & defaultSites.Replace(",", ", ") & " - inherited by any block you start without --sites/--preset/--file.")
+        ' D2b: confirm the account-default app list when set (a block naming no --apps/--app-preset inherits it).
+        If defaultApps <> "" Then Console.WriteLine("  Your account-default app list is: " & defaultApps.Replace(",", ", ") & " - inherited by any block you start without --apps/--app-preset.")
         Console.WriteLine("")
         Console.WriteLine("  Committed blocks - 'monkmode block --commit' disables even the cooling-off exit, so")
         Console.WriteLine("  the accountability code is the ONLY early way out. Use it when you mean it.")
@@ -184,6 +196,19 @@ Module Program
                 Return 1
             End If
             apps.AddRange(presetApps)
+        End If
+
+        ' D2b: inherit the account-default app list when this block names NO explicit app source
+        ' (--apps/--app-preset both produced nothing). Symmetric with the D1b default-sites inherit
+        ' above: an explicit --apps/--app-preset OVERRIDES the default; the default only fills in when
+        ' you named none. SetupIsComplete was required above and SetupDefaultApps fail-closes to empty
+        ' on any tamper, so this can only ADD apps to THIS new arm (never lift/shorten a live block).
+        ' The inherited names ride PackApps -> [Process] List, MAC-covered exactly like a hand-typed
+        ' --apps name. Site and app defaults inherit INDEPENDENTLY per dimension: `block --sites x.com`
+        ' with a default app list still picks up the default apps, mirroring how the D1b default sites
+        ' fill in for an --apps-only block. Over-block-safe; the armed apps are printed at Sites/Apps.
+        If apps.Count = 0 Then
+            apps.AddRange(Blocker.SetupDefaultApps())
         End If
 
         If domains.Count = 0 AndAlso apps.Count = 0 Then
@@ -781,7 +806,7 @@ Module Program
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
-        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social]   (first-run onboarding; required before the first block)")
+        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
         Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
@@ -807,6 +832,7 @@ Module Program
         Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")
         Console.WriteLine("  - 'monkmode setup --cooloff 2h' sets an ACCOUNT DEFAULT cooling-off wait that every block without its own --cooloff inherits; a block's own --cooloff always overrides it. The ~1h minimum still applies.")
         Console.WriteLine("  - 'monkmode setup --default-sites a.com,b.com [--default-preset social]' sets an ACCOUNT DEFAULT blocklist that 'monkmode block' inherits when you give it no --sites/--preset/--file; naming any of those overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
+        Console.WriteLine("  - 'monkmode setup --default-apps chrome.exe,foo.exe [--default-app-preset games]' sets an ACCOUNT DEFAULT app-kill list that 'monkmode block' inherits when you give it no --apps/--app-preset; naming either overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
     End Sub
 
 End Module

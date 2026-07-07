@@ -509,6 +509,38 @@ Module Blocker
         Return True
     End Function
 
+    ' ---- D2b: build the account-default app-kill list string to persist on the setup file ----
+    '
+    ' The app analogue of TryBuildDefaultSites: merges `setup --default-apps a.exe,b.exe` raw names
+    ' with any `setup --default-app-preset games,chat` categories (expanded via the SAME D2a
+    ' TryExpandAppPresets), into the comma-joined packed string SetupDefaultApps reads back. Union,
+    ' deduped case-insensitively, order preserved (--default-apps first, then the preset apps). FAIL-
+    ' CLOSED on an unknown app-preset: returns False + TryExpandAppPresets' error and packs NOTHING, so
+    ' the setup verb aborts BEFORE the write (fail-fast, no partial state) - the preset is validated
+    ' ONCE here at setup time rather than at every future block. An empty/Nothing arg on either side
+    ' contributes nothing; both empty => packed = "" (no default). .exe-normalisation happens downstream
+    ' in PackApps at arm time (as for a hand-typed --apps name), exactly as TryBuildDefaultSites leaves
+    ' domain normalisation to WriteHostsBlock. Friend so the merge is unit-tested directly.
+    Friend Function TryBuildDefaultApps(ByVal appsArg As String, ByVal appPresetArg As String, ByRef packed As String, ByRef errorMsg As String) As Boolean
+        packed = ""
+        errorMsg = ""
+        Dim apps As New List(Of String)
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If appsArg IsNot Nothing Then
+            For Each rawTok As String In appsArg.Split(New Char() {","c, ";"c})
+                Dim tok As String = rawTok.Trim()
+                If tok <> "" AndAlso seen.Add(tok) Then apps.Add(tok)
+            Next
+        End If
+        Dim presetApps As New List(Of String)
+        If Not TryExpandAppPresets(appPresetArg, presetApps, errorMsg) Then Return False   ' fail-closed: unknown app preset
+        For Each a As String In presetApps
+            If seen.Add(a) Then apps.Add(a)
+        Next
+        packed = String.Join(",", apps)
+        Return True
+    End Function
+
     ' ---- config (ini) ----
 
     Private Function PackList(ByVal items As IEnumerable(Of String)) As String
@@ -1162,9 +1194,10 @@ Module Blocker
     ' schema change forces a one-off `setup` re-run (fail-closed), mirroring the "arm
     ' blocks after upgrading" operational rule. s1 = C6a: Done + Partner. s2 = C6c: adds
     ' the account-default cooling-off duration (CoolOffSeconds). s3 = D1b: adds the account-
-    ' default blocklist (DefaultSites) - an older file's byte-exact MAC can't validate the
-    ' newer canonical (new version tag + an appended field), so upgrading forces one `setup` re-run.
-    Public Const SetupSchemaVersion As String = "s3"
+    ' default blocklist (DefaultSites). s4 = D2b: adds the account-default app list (DefaultApps)
+    ' - an older file's byte-exact MAC can't validate the newer canonical (new version tag + an
+    ' appended field), so upgrading forces one `setup` re-run.
+    Public Const SetupSchemaVersion As String = "s4"
     Public Const SetupSection As String = "Setup"
     Public Const SetupDoneKey As String = "Done"
     Public Const SetupPartnerKey As String = "Partner"
@@ -1187,6 +1220,15 @@ Module Blocker
     ' sugar only: it can only ever ADD sites to a NEW arm, never lift/shorten a live block, so a
     ' fail-closed (empty) read on any tamper/incomplete setup is safe (see SetupDefaultSites).
     Public Const SetupDefaultSitesKey As String = "DefaultSites"
+    ' D2b: the account-DEFAULT app-kill list every later `block` inherits when it names NO explicit
+    ' app source (--apps/--app-preset). Stored PLAINTEXT + MAC-covered on the SETUP file (like
+    ' DefaultSites), written only when non-empty (absent = "" = no default). A comma-joined list of
+    ' bare .exe process-image names (the same raw tokens `--apps` takes, merged + app-preset-expanded
+    ' at setup time by TryBuildDefaultApps); on inherit they flow into the SAME `apps` list -> PackApps
+    ' -> [Process] List, so they are .exe-normalised + enforcement-MAC-covered identically to a hand-
+    ' typed --apps name. INPUT sugar only: it can only ever ADD apps to a NEW arm, never lift/shorten a
+    ' live block, so a fail-closed (empty) read on any tamper/incomplete setup is safe (see SetupDefaultApps).
+    Public Const SetupDefaultAppsKey As String = "DefaultApps"
 
     Public Function SetupIniPath() As String
         Return Path.Combine(AppDir(), SetupIniName)
@@ -1202,17 +1244,20 @@ Module Blocker
     Friend Function SetupCanonicalFromIni(ByVal ini As IniFile) As String
         Dim done As String = If(ini.GetKeyValue(SetupSection, SetupDoneKey), "")
         Dim partner As String = If(ini.GetKeyValue(SetupSection, SetupPartnerKey), "")
-        ' C6c CoolOffSeconds, then D1b DefaultSites, are each APPENDED LAST in turn (the append-at-end
-        ' rule every schema bump follows), so an older stamp can't validate a newer canonical (new
-        ' version tag + an extra field line) -> the upgrade freeze. Each absent field => "" (written
-        ' only when set), round-tripping identically at stamp + verify, like the empty-Partner case.
+        ' C6c CoolOffSeconds, then D1b DefaultSites, then D2b DefaultApps, are each APPENDED LAST in
+        ' turn (the append-at-end rule every schema bump follows), so an older stamp can't validate a
+        ' newer canonical (new version tag + an extra field line) -> the upgrade freeze. Each absent
+        ' field => "" (written only when set), round-tripping identically at stamp + verify, like the
+        ' empty-Partner case.
         Dim coolOff As String = If(ini.GetKeyValue(SetupSection, SetupCoolOffKey), "")
         Dim defaultSites As String = If(ini.GetKeyValue(SetupSection, SetupDefaultSitesKey), "")
+        Dim defaultApps As String = If(ini.GetKeyValue(SetupSection, SetupDefaultAppsKey), "")
         Return SetupSchemaVersion & vbLf &
                "Done=" & done & vbLf &
                "Partner=" & partner & vbLf &
                "CoolOffSeconds=" & coolOff & vbLf &
-               "DefaultSites=" & defaultSites & vbLf
+               "DefaultSites=" & defaultSites & vbLf &
+               "DefaultApps=" & defaultApps & vbLf
     End Function
 
     ' Is the setup file's MAC valid over its canonical? DPAPI-unprotect [Integrity] Key +
@@ -1326,6 +1371,36 @@ Module Blocker
         End Try
     End Function
 
+    ' D2b: the account-DEFAULT app-kill list (bare .exe names) every later `block` inherits when it
+    ' names NO explicit app source. Empty array = none set / setup not complete / unusable. Gated on
+    ' the SAME fail-closed completeness as SetupDefaultSites (valid MAC AND Done="yes"), so a missing/
+    ' incomplete/tampered setup file yields NO default -> DoBlock simply has no apps to inherit. Safe
+    ' by construction: the default only ever feeds a NEW arm (exactly like --apps), never a live block,
+    ' so it can neither lift nor shorten an active block. A forged/added default is over-block-safe
+    ' (kills MORE, never less) and the user sees the armed apps printed; a blanked/tampered one merely
+    ' loses the default. Split on , / ; , trimmed, deduped case-insensitively (.exe-normalisation is left
+    ' to PackApps at arm time, as for a hand-typed --apps name). Read-only; never throws.
+    Public Function SetupDefaultApps() As String()
+        Try
+            Dim path As String = SetupIniPath()
+            If Not File.Exists(path) Then Return New String() {}
+            Dim ini As New IniFile
+            ini.Load(path)
+            If Not SetupMacIsValidForIni(ini) Then Return New String() {}
+            If Not String.Equals(If(ini.GetKeyValue(SetupSection, SetupDoneKey), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase) Then Return New String() {}
+            Dim raw As String = If(ini.GetKeyValue(SetupSection, SetupDefaultAppsKey), "")
+            Dim apps As New List(Of String)
+            Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            For Each rawTok As String In raw.Split(New Char() {","c, ";"c})
+                Dim tok As String = rawTok.Trim()
+                If tok <> "" AndAlso seen.Add(tok) Then apps.Add(tok)
+            Next
+            Return apps.ToArray()
+        Catch
+            Return New String() {}
+        End Try
+    End Function
+
     ' Write (or re-write) the first-run setup file: [Setup] Done="yes" + the optional partner
     ' label + the optional account-default cooling-off duration, MAC-stamped from birth (fresh
     ' key + MAC over the setup canonical).
@@ -1335,7 +1410,7 @@ Module Blocker
     ' warns - an unstamped setup file reads as NOT complete, so the arm-gate keeps
     ' refusing rather than trust an unprotected marker). A file-write failure throws to the
     ' verb's outer Catch (reported as an error), never a half-written trusted state.
-    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "", Optional ByVal coolOffSeconds As Long = 0, Optional ByVal defaultSites As String = "") As Boolean
+    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "", Optional ByVal coolOffSeconds As Long = 0, Optional ByVal defaultSites As String = "", Optional ByVal defaultApps As String = "") As Boolean
         Dim ini As New IniFile
         ini.AddSection(SetupSection)
         ini.SetKeyValue(SetupSection, SetupDoneKey, "yes")
@@ -1354,6 +1429,14 @@ Module Blocker
         Dim trimmedDefault As String = If(defaultSites, "").Trim()
         If trimmedDefault <> "" Then
             ini.SetKeyValue(SetupSection, SetupDefaultSitesKey, trimmedDefault)
+        End If
+        ' D2b: the account-default app list, MAC-covered from birth (set BEFORE StampFreshSetupMac,
+        ' like DefaultSites). Written ONLY when non-empty (absent = "" = no default; the absent case
+        ' round-trips identically). A comma-joined bare-.exe list, already merged + deduped by
+        ' TryBuildDefaultApps at the setup verb.
+        Dim trimmedDefaultApps As String = If(defaultApps, "").Trim()
+        If trimmedDefaultApps <> "" Then
+            ini.SetKeyValue(SetupSection, SetupDefaultAppsKey, trimmedDefaultApps)
         End If
         StampFreshSetupMac(ini)
         ini.Save(SetupIniPath())
