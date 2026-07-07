@@ -5,6 +5,7 @@
 '      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
 '      monkmode status
+'      monkmode stats                      (read-only summary of your block history)
 '      monkmode add    --sites c.com[,d.com]
 '      monkmode unblock                    (request cooling-off — lifts after ~1h active time)
 '      monkmode unblock --cancel           (cancel a pending cooling-off; stay blocked)
@@ -44,6 +45,7 @@ Module Program
                 Case "setup" : Return DoSetup(args)
                 Case "block" : Return DoBlock(args)
                 Case "status" : Return DoStatus()
+                Case "stats" : Return DoStats()
                 Case "add" : Return DoAdd(args)
                 Case "schedule" : Return DoSchedule(args)
                 Case "unblock" : Return DoUnblock(args)
@@ -309,6 +311,12 @@ Module Program
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
         Blocker.RegisterAndLaunchNotifier()
 
+        ' D3b: record this arm to the separate, non-MAC stats history (best-effort - Stats.RecordBlockStart
+        ' swallows every error and never throws, so a stats failure can't perturb the block just armed
+        ' above). COUNTS only (no site/app names) land in the plaintext file; the block is already fully
+        ' armed, so this has ZERO enforcement authority - it is pure telemetry for `monkmode stats`.
+        Stats.RecordBlockStart(DateTime.Now, untilDate, domains.Count, apps.Count, committed, coolOffSeconds)
+
         Console.WriteLine("MonkMode is now active until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
@@ -364,6 +372,25 @@ Module Program
         Else
             Console.WriteLine("MonkMode: no active block (service installed but idle).")
         End If
+        Return 0
+    End Function
+
+    ' D3b: `monkmode stats` - a read-only summary of block history from the separate non-MAC stats file
+    ' (Stats.vb). Display-only: ZERO enforcement authority, never touches a block. A missing/corrupt file
+    ' simply reads as no/less history (Stats.ReadRecords is tolerant), so stats can never error a user out.
+    Private Function DoStats() As Integer
+        Dim s As Stats.StatsSummary = Stats.SummarizeAsOf(Stats.ReadRecords(), DateTime.Now)
+        If Not s.HasAny Then
+            Console.WriteLine("No blocks recorded yet. Start one with, e.g.:  monkmode block --sites reddit.com --for 2h")
+            Return 0
+        End If
+        Console.WriteLine("MonkMode stats")
+        Console.WriteLine("  Blocks started:   " & s.TotalBlocks & "  (" & s.CompletedBlocks & " completed, " & s.ActiveOrUpcomingBlocks & " active/upcoming)")
+        Console.WriteLine("  Committed blocks: " & s.CommittedBlocks)
+        Console.WriteLine("  Total focus time: " & Humanize(s.TotalPlannedTime) & " (planned)")
+        Console.WriteLine("  Longest block:    " & Humanize(s.LongestPlannedBlock))
+        Console.WriteLine("  First block:      " & s.FirstStart.ToString("yyyy-MM-dd"))
+        Console.WriteLine("  Latest block:     " & s.LastStart.ToString("yyyy-MM-dd"))
         Return 0
     End Function
 
@@ -809,6 +836,7 @@ Module Program
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
         Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
         Console.WriteLine("  monkmode status")
+        Console.WriteLine("  monkmode stats   (read-only summary of your block history: counts, total focus time, longest block)")
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")
         Console.WriteLine("  monkmode schedule --clear   (stop future windows; an open window still runs to its end)")
