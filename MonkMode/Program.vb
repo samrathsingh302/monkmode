@@ -2,7 +2,7 @@
 '
 '    Usage:
 '      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social]  (required first-run onboarding)
-'      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe]
+'      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
 '      monkmode status
 '      monkmode add    --sites c.com[,d.com]
@@ -172,8 +172,22 @@ Module Program
         Dim apps As New List(Of String)
         apps.AddRange(SplitList(GetOption(args, "--apps")))
 
+        ' D2a: expand --app-preset categories (games, chat) into the SAME app-kill list. Pure input
+        ' sugar - the expanded .exe names are enforced + MAC-covered exactly like --apps (combinable
+        ' with --apps, both merge into `apps`). Fail-closed: an unknown category aborts the block up
+        ' front (before any hosts/service side effect) with a friendly error, never a silent under-kill.
+        Dim appPresetArg As String = GetOption(args, "--app-preset")
+        If appPresetArg <> "" Then
+            Dim presetApps As New List(Of String), appPresetErr As String = ""
+            If Not Blocker.TryExpandAppPresets(appPresetArg, presetApps, appPresetErr) Then
+                Console.Error.WriteLine(appPresetErr)
+                Return 1
+            End If
+            apps.AddRange(presetApps)
+        End If
+
         If domains.Count = 0 AndAlso apps.Count = 0 Then
-            Console.Error.WriteLine("Nothing to block. Provide --sites, --preset, and/or --apps.")
+            Console.Error.WriteLine("Nothing to block. Provide --sites, --preset, --apps, and/or --app-preset.")
             Return 1
         End If
 
@@ -768,7 +782,7 @@ Module Program
         Console.WriteLine("")
         Console.WriteLine("Usage:")
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social]   (first-run onboarding; required before the first block)")
-        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
+        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")
@@ -789,6 +803,7 @@ Module Program
         Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM, same-day only). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")
+        Console.WriteLine("  - --app-preset kills a whole category of well-known apps at once (comma-separate several): " & String.Join(", ", Blocker.KnownAppPresetNames()) & ". Combine it with --apps to add your own.")
         Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")
         Console.WriteLine("  - 'monkmode setup --cooloff 2h' sets an ACCOUNT DEFAULT cooling-off wait that every block without its own --cooloff inherits; a block's own --cooloff always overrides it. The ~1h minimum still applies.")
         Console.WriteLine("  - 'monkmode setup --default-sites a.com,b.com [--default-preset social]' sets an ACCOUNT DEFAULT blocklist that 'monkmode block' inherits when you give it no --sites/--preset/--file; naming any of those overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")

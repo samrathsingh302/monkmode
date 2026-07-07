@@ -418,6 +418,66 @@ Module Blocker
         Return True
     End Function
 
+    ' ---- D2a: APP presets (named category -> executable names, INPUT sugar only) ----
+    '
+    ' The app analogue of the D1a site PresetTable: a FIXED, compile-time bundle of well-known
+    ' distraction executables the user opts into with `block --app-preset games,chat`. The expanded
+    ' .exe names flow into the SAME apps list --apps feeds -> [Process] List, enforced + MAC-covered
+    ' downstream by the enforcement canonical (B7) exactly like a hand-typed --apps name, with NO new
+    ' canonical surface and NO schema bump (a code constant, not stored config - nothing extra to
+    ' protect). The categories are FIXED (an EDITABLE user *default* app list is the separate D2b
+    ' slice, stored MAC-covered on the setup ini, mirroring D1b). Entries are the bare process-image
+    ' names BlockedApps/the notifier compare on (lowercase, .exe); the exact bundle membership is
+    ' refinable product content, NOT a correctness surface (an absent process name simply never
+    ' matches - over-listing is harmless, it just tries to kill a name that isn't running).
+    Private ReadOnly AppPresetTable As New Dictionary(Of String, String())(StringComparer.OrdinalIgnoreCase) From {
+        {"games", New String() {"steam.exe", "epicgameslauncher.exe", "battle.net.exe", "riotclientservices.exe", "leagueclient.exe", "valorant.exe", "robloxplayerbeta.exe"}},
+        {"chat", New String() {"discord.exe", "telegram.exe", "whatsapp.exe", "signal.exe", "slack.exe"}}
+    }
+
+    ' The sorted known app-preset category names (usage/help + the unknown-category error hint). A
+    ' read-only snapshot; the table is never mutated. Public so help lists the live categories rather
+    ' than a hand-maintained copy that could drift.
+    Public Function KnownAppPresetNames() As String()
+        Dim names As New List(Of String)(AppPresetTable.Keys)
+        names.Sort(StringComparer.OrdinalIgnoreCase)
+        Return names.ToArray()
+    End Function
+
+    ' Expand a comma/semicolon app-preset argument ("games,chat") into the union of those categories'
+    ' executables, deduped case-insensitively with order preserved (category order, then entry order).
+    ' FAIL-CLOSED on an unknown category exactly like TryExpandPresets: collect EVERY unknown token,
+    ' return False with a friendly error naming them + the valid names, and emit NOTHING - a typo must
+    ' never silently UNDER-kill. An empty/whitespace/Nothing arg returns True with an empty list (the
+    ' caller's --apps still applies). Friend so the contract is unit-tested without arming a block.
+    Friend Function TryExpandAppPresets(ByVal appPresetArg As String, ByRef apps As List(Of String), ByRef errorMsg As String) As Boolean
+        apps = New List(Of String)
+        errorMsg = ""
+        If appPresetArg Is Nothing OrElse appPresetArg.Trim() = "" Then Return True
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim unknown As New List(Of String)
+        For Each rawTok As String In appPresetArg.Split(New Char() {","c, ";"c})
+            Dim tok As String = rawTok.Trim()
+            If tok = "" Then Continue For
+            Dim entries() As String = Nothing
+            If Not AppPresetTable.TryGetValue(tok, entries) Then
+                unknown.Add(tok)
+                Continue For
+            End If
+            For Each a As String In entries
+                If seen.Add(a) Then apps.Add(a)
+            Next
+        Next
+        If unknown.Count > 0 Then
+            apps = New List(Of String)   ' fail-closed: emit NOTHING when any category is unknown
+            errorMsg = If(unknown.Count > 1, "Unknown app presets: ", "Unknown app preset: ") &
+                       String.Join(", ", unknown) &
+                       ". Available app presets: " & String.Join(", ", KnownAppPresetNames()) & "."
+            Return False
+        End If
+        Return True
+    End Function
+
     ' ---- D1b: build the account-default blocklist string to persist on the setup file ----
     '
     ' Merges `setup --default-sites a.com,b.com` raw domains with any `setup --default-preset
