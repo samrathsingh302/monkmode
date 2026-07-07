@@ -204,4 +204,82 @@ public class SitePresetTests
         Assert.Contains("127.0.0.1 facebook.com", block);
         Assert.Contains("127.0.0.1 www.facebook.com", block);   // single-dot domain => www. auto-added
     }
+
+    // ---- D1b: TryBuildDefaultSites - the pure setup-time merge of --default-sites + --default-preset
+    // into the comma-joined string persisted on the setup file (no DPAPI, no files - the hard fence).
+    // It reuses TryExpandPresets (so it inherits the same fail-closed-on-unknown-preset behaviour) and
+    // is the one pure step the `setup` verb's console wiring leans on. ----
+
+    private static bool BuildDefaults(string sitesArg, string presetArg, out string packed, out string err)
+    {
+        string p = "";
+        string e = "";
+        var ok = MonkMode.Blocker.TryBuildDefaultSites(sitesArg, presetArg, ref p, ref e);
+        packed = p;
+        err = e;
+        return ok;
+    }
+
+    [Fact]
+    public void BuildDefaults_SitesOnly_PacksTrimmedCommaJoined()
+    {
+        Assert.True(BuildDefaults("reddit.com, x.com ;news.ycombinator.com", null!, out var packed, out var err));
+        Assert.Equal("", err);
+        // Split on , / ; , each token trimmed, order preserved.
+        Assert.Equal("reddit.com,x.com,news.ycombinator.com", packed);
+    }
+
+    [Fact]
+    public void BuildDefaults_PresetOnly_PacksExpandedDomains()
+    {
+        Assert.True(BuildDefaults(null!, "video", out var packed, out var err));
+        Assert.Equal("", err);
+        // Exactly the expander's domains, comma-joined (the video category, in table order).
+        Expand("video", out var vid, out _);
+        Assert.Equal(string.Join(",", vid), packed);
+    }
+
+    [Fact]
+    public void BuildDefaults_SitesAndPreset_Union_SitesFirst_DedupedCaseInsensitive()
+    {
+        // reddit.com appears in BOTH the explicit sites and the `social` preset: it must appear ONCE,
+        // in its FIRST position (the explicit --default-sites slot), with the rest of social appended.
+        Assert.True(BuildDefaults("mysite.com,REDDIT.COM", "social", out var packed, out _));
+        var parts = packed.Split(',');
+        Assert.Equal("mysite.com", parts[0]);
+        Assert.Equal("REDDIT.COM", parts[1]);              // the explicit token's own casing is preserved
+        // deduped case-insensitively: the preset's lowercase "reddit.com" is NOT re-added.
+        Assert.Single(parts, p => string.Equals(p, "reddit.com", System.StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(parts.Length, parts.Distinct(System.StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Contains("facebook.com", parts);            // the rest of social still present
+    }
+
+    [Fact]
+    public void BuildDefaults_UnknownPreset_FailsClosed_PacksNothing()
+    {
+        // Inherits TryExpandPresets' fail-closed contract: an unknown category returns False + a naming
+        // error and packs NOTHING, so the setup verb aborts before writing (no partial/typo'd default).
+        Assert.False(BuildDefaults("reddit.com", "socail", out var packed, out var err));
+        Assert.Equal("", packed);
+        Assert.Contains("Unknown preset", err);
+        Assert.Contains("socail", err);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", "")]
+    [InlineData("  ", " ; , ")]     // whitespace / separators-only on both sides => nothing
+    public void BuildDefaults_EmptyInputs_SucceedWithEmptyPacked(string sitesArg, string presetArg)
+    {
+        Assert.True(BuildDefaults(sitesArg, presetArg, out var packed, out var err));
+        Assert.Equal("", packed);
+        Assert.Equal("", err);
+    }
+
+    [Fact]
+    public void BuildDefaults_DuplicateAndBlankSiteTokens_AreDedupedAndDropped()
+    {
+        Assert.True(BuildDefaults("a.com,,a.com, b.com ,A.COM", null!, out var packed, out _));
+        Assert.Equal("a.com,b.com", packed);   // blanks dropped, a.com deduped case-insensitively
+    }
 }

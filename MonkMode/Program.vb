@@ -1,7 +1,7 @@
 '    MonkMode - CLI entry point
 '
 '    Usage:
-'      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h]  (required first-run onboarding)
+'      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social]  (required first-run onboarding)
 '      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
 '      monkmode status
@@ -82,7 +82,17 @@ Module Program
         ' value fails fast with no partial state. 0 = not given (no account default stored).
         Dim coolOffSeconds As Long
         If Not TryParseCoolOffArg(args, coolOffSeconds) Then Return 1
-        If Not Blocker.WriteSetupConfig(partner, coolOffSeconds) Then
+        ' D1b: optional --default-sites / --default-preset set the ACCOUNT-DEFAULT blocklist that every
+        ' later `block` inherits when it names no site source of its own. Built (merged + preset-expanded,
+        ' FAIL-CLOSED on an unknown preset) BEFORE the write so a bad preset fails fast with no partial
+        ' state, exactly like the --cooloff parse above. "" = no default stored.
+        Dim defaultSites As String = ""
+        Dim defaultSitesErr As String = ""
+        If Not Blocker.TryBuildDefaultSites(GetOption(args, "--default-sites"), GetOption(args, "--default-preset"), defaultSites, defaultSitesErr) Then
+            Console.Error.WriteLine(defaultSitesErr)
+            Return 1
+        End If
+        If Not Blocker.WriteSetupConfig(partner, coolOffSeconds, defaultSites) Then
             Console.Error.WriteLine("Could not secure the setup file (Windows DPAPI is unavailable on this machine).")
             Console.Error.WriteLine("MonkMode can't protect its config here, so it won't arm blocks safely. Resolve DPAPI, then re-run 'monkmode setup'.")
             Return 2
@@ -98,6 +108,8 @@ Module Program
         Console.WriteLine("  fully enforced until it elapses, then lifts itself ('monkmode unblock --cancel' aborts it).")
         ' C6c: confirm the account-default cooling-off when set (blocks without their own --cooloff inherit it).
         If coolOffSeconds > 0 Then Console.WriteLine("  Your account-default cooling-off wait is " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & ", inherited by any block without its own --cooloff (the ~1h minimum still applies).")
+        ' D1b: confirm the account-default blocklist when set (a block naming no --sites/--preset/--file inherits it).
+        If defaultSites <> "" Then Console.WriteLine("  Your account-default blocklist is: " & defaultSites.Replace(",", ", ") & " - inherited by any block you start without --sites/--preset/--file.")
         Console.WriteLine("")
         Console.WriteLine("  Committed blocks - 'monkmode block --commit' disables even the cooling-off exit, so")
         Console.WriteLine("  the accountability code is the ONLY early way out. Use it when you mean it.")
@@ -142,6 +154,19 @@ Module Program
                 Dim t As String = line.Trim()
                 If t <> "" AndAlso Not t.StartsWith("#") Then domains.Add(t)
             Next
+        End If
+
+        ' D1b: inherit the account-default blocklist when this block names NO explicit site source
+        ' (--sites/--preset/--file all produced nothing). An explicit source OVERRIDES the default
+        ' (you get exactly the sites you asked for); the default only fills in when you named none -
+        ' the direct analogue of the C6c cooling-off inheritance below. SetupIsComplete was already
+        ' required above, and SetupDefaultSites fail-closes to empty on any tamper, so this can only
+        ' ADD sites to THIS new arm (never lift/shorten a live block). A block naming only --apps (no
+        ' site source) likewise picks up the standing default sites - that is the point of a default
+        ' blocklist. The expanded defaults then ride WriteHostsBlock + [User] CustomSites, MAC-covered
+        ' exactly like a hand-typed --sites domain.
+        If domains.Count = 0 Then
+            domains.AddRange(Blocker.SetupDefaultSites())
         End If
 
         Dim apps As New List(Of String)
@@ -742,7 +767,7 @@ Module Program
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
-        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h]   (first-run onboarding; required before the first block)")
+        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social]   (first-run onboarding; required before the first block)")
         Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
         Console.WriteLine("  monkmode status")
         Console.WriteLine("  monkmode add --sites c.com")
@@ -766,6 +791,7 @@ Module Program
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")
         Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")
         Console.WriteLine("  - 'monkmode setup --cooloff 2h' sets an ACCOUNT DEFAULT cooling-off wait that every block without its own --cooloff inherits; a block's own --cooloff always overrides it. The ~1h minimum still applies.")
+        Console.WriteLine("  - 'monkmode setup --default-sites a.com,b.com [--default-preset social]' sets an ACCOUNT DEFAULT blocklist that 'monkmode block' inherits when you give it no --sites/--preset/--file; naming any of those overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
     End Sub
 
 End Module

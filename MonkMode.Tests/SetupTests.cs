@@ -291,12 +291,12 @@ public class SetupConfigTests
     // (The DoBlock inherit + DoSetup --cooloff verb wiring is smoke-tested; the seam is pinned below.)
 
     [Fact]
-    public void SetupSchemaVersion_IsS2_TheC6cBump()
+    public void SetupSchemaVersion_IsS3_TheD1bBump()
     {
-        // A loud pin on the setup-file schema tag: C6c bumped it s1->s2 (added CoolOffSeconds). A
-        // future bump is one deliberate edit here, and this stops the freeze test's "s1" literal
-        // silently matching an un-bumped constant.
-        Assert.Equal("s2", MonkMode.Blocker.SetupSchemaVersion);
+        // A loud pin on the setup-file schema tag: C6c bumped it s1->s2 (CoolOffSeconds), D1b bumps
+        // it s2->s3 (DefaultSites). A future bump is one deliberate edit here, and this stops the
+        // freeze test's "s2" literal silently matching an un-bumped constant.
+        Assert.Equal("s3", MonkMode.Blocker.SetupSchemaVersion);
     }
 
     [Fact]
@@ -463,6 +463,210 @@ public class SetupConfigTests
             var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.IniPath());
             Assert.Equal("5400", ini.GetKeyValue("CoolOff", "Duration"));
             Assert.Contains("CoolOffDuration=5400\n", MonkMode.Blocker.CanonicalFromIni(ini));
+        }
+        finally { WipeSetup(); WipeEnforcement(); }
+    }
+
+    // ---- D1b: the account-DEFAULT blocklist ([Setup] DefaultSites, s2->s3) ----
+    //
+    // D1b stores an account-level default site list on the CLI-only setup file that every later `block`
+    // inherits when it names NO explicit site source (--sites/--preset/--file). It bumps the setup
+    // canonical s2->s3 (a new DefaultSites field appended last), so an old s2 file freezes under s3 code
+    // and forces a `setup` re-run - the same fail-closed upgrade rule C6c/the enforcement v-bumps use.
+    // Security posture (like D1a presets): PURE INPUT sugar. The default only ever feeds a NEW arm - it
+    // can neither lift nor shorten a live block - so a forged/added default just over-blocks a new arm
+    // (the user sees the armed sites), and a tampered/incomplete one fail-closes to NO default. The
+    // active block's sites remain MAC-covered by the v8 enforcement canonical once armed. (The DoBlock
+    // inherit + DoSetup --default-sites/--default-preset verb wiring is smoke-tested; the pure steps -
+    // TryBuildDefaultSites (SitePresetTests) + the reader/seam below - are pinned here.)
+
+    [Fact]
+    public void SetupCanonical_S3_Format_IsExact_DefaultSitesAppendedLast()
+    {
+        // The setup canonical is a SINGLE, CLI-only function - the setup file is never read by the
+        // service, so unlike the 4-copy enforcement canonical there are NO cross-assembly wrappers to
+        // hold parity with. The parity that matters here is FORMAT STABILITY: this literal pins the s3
+        // version tag, the exact field order, the key names, and that D1b's DefaultSites is APPENDED
+        // LAST, so any accidental reorder / rename / missed version bump breaks loudly (the analogue of
+        // the enforcement BuildCanonical format + parity tests).
+        var full = new MonkMode.IniFile();
+        full.AddSection("Setup");
+        full.SetKeyValue("Setup", "Done", "yes");
+        full.SetKeyValue("Setup", "Partner", "Alex");
+        full.SetKeyValue("Setup", "CoolOffSeconds", "7200");
+        full.SetKeyValue("Setup", "DefaultSites", "reddit.com,x.com");
+        Assert.Equal(
+            "s3\nDone=yes\nPartner=Alex\nCoolOffSeconds=7200\nDefaultSites=reddit.com,x.com\n",
+            MonkMode.Blocker.SetupCanonicalFromIni(full));
+
+        // The all-absent-optionals shape (only Done set) still emits every field line, each "" - the
+        // round-trip pattern that lets a no-preferences setup file stay MAC-valid.
+        var bare = new MonkMode.IniFile();
+        bare.AddSection("Setup");
+        bare.SetKeyValue("Setup", "Done", "yes");
+        Assert.Equal(
+            "s3\nDone=yes\nPartner=\nCoolOffSeconds=\nDefaultSites=\n",
+            MonkMode.Blocker.SetupCanonicalFromIni(bare));
+    }
+
+    [Fact]
+    public void FreshWrite_WithDefaultSites_RoundTripsMacCovered()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "reddit.com,x.com"));
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(new[] { "reddit.com", "x.com" }, MonkMode.Blocker.SetupDefaultSites());
+
+            // Stored as the raw comma-joined string under [Setup] DefaultSites (MAC-covered, like Partner).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            Assert.Equal("reddit.com,x.com", ini.GetKeyValue("Setup", "DefaultSites"));
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void NoDefaultSites_YieldsEmpty_AndStaysComplete()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex"));      // no default blocklist given
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Empty(MonkMode.Blocker.SetupDefaultSites());
+
+            // Written ONLY when non-empty => the key is absent.
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            Assert.True(string.IsNullOrEmpty(ini.GetKeyValue("Setup", "DefaultSites")));
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void DefaultSites_Reader_SplitsTrimsAndDedupes_UnderAValidMac()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex"));
+            // Hand-store a messy value (dupes, blanks, whitespace, ; separators) and RE-STAMP a valid
+            // MAC: the reader normalises it (split on , / ; , trim, drop empties, dedupe case-insensitive).
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "DefaultSites", " a.com , ; b.com;a.com , A.COM ");
+            ReStampSetup(ini);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.True(MonkMode.Blocker.SetupIsComplete());
+            Assert.Equal(new[] { "a.com", "b.com" }, MonkMode.Blocker.SetupDefaultSites());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void TamperedDefaultSites_BreaksMac_FallsBackToEmpty()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "reddit.com,x.com"));
+            Assert.Equal(new[] { "reddit.com", "x.com" }, MonkMode.Blocker.SetupDefaultSites());
+
+            // Raw-edit the stored default (inject an extra site) WITHOUT re-stamping: the MAC no longer
+            // covers the canonical => the whole setup file reads as incomplete => the inherited default
+            // is EMPTY, not the tampered list. (Injecting sites would only ever over-block a NEW arm
+            // anyway; this proves the tamper-evidence path fails closed to no-default.)
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "DefaultSites", "reddit.com,x.com,evil.com");
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.False(MonkMode.Blocker.SetupIsComplete());               // tamper => fail-closed
+            Assert.Empty(MonkMode.Blocker.SetupDefaultSites());             // empty = no default, NOT the tampered list
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void DefaultSites_IsGatedOnCompleteness_IncompleteSetupYieldsEmpty()
+    {
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "reddit.com,x.com"));
+
+            // Flip Done to "no" and RE-STAMP a VALID MAC over it: the MAC is valid and DefaultSites is
+            // intact, but setup is NOT complete (Done<>"yes") => the default reads as empty. Proves
+            // SetupDefaultSites gates on completeness (like SetupPartnerLabel/SetupDefaultCoolOffSeconds)
+            // - an incomplete setup file never leaks an inheritable default.
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+            ini.SetKeyValue("Setup", "Done", "no");
+            ReStampSetup(ini);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            Assert.False(MonkMode.Blocker.SetupIsComplete());
+            Assert.Empty(MonkMode.Blocker.SetupDefaultSites());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void SchemaBump_S2MacUnderS3Code_FreezesSetup_ForcesReRun()
+    {
+        // The D1b instance of the setup-file upgrade freeze: a file stamped under s2 (C6c: Done +
+        // Partner + CoolOffSeconds, NO DefaultSites) read under s3 code. The s3 SetupCanonicalFromIni
+        // tags "s3" and appends a "DefaultSites=" line, so the byte-exact s2 stamp can't validate it -
+        // setup reads NOT complete (the arm-gate then makes the user re-run `setup`) and the inherited
+        // default is empty. Mirrors the enforcement v-bump ForwardMigration freeze + the s1->s2 test
+        // above; "arm/setup after upgrading" carries over.
+        WipeSetup();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 7200));   // a real, DPAPI-stamped s3 file
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.SetupIniPath());
+
+            // Forge the OLD s2 canonical (version "s2", Done + Partner + CoolOffSeconds, NO DefaultSites
+            // line) and stamp the file's MAC over IT with the existing key - exactly what a pre-D1b CLI stored.
+            var s2Canonical = "s2\n" + "Done=yes\n" + "Partner=Alex\n" + "CoolOffSeconds=7200\n";
+            StampSetupOverCanonical(ini, s2Canonical);
+            ini.Save(MonkMode.Blocker.SetupIniPath());
+
+            // Sanity: the forged s2 MAC IS valid over the s2 canonical (a genuine "old but honest" file,
+            // not a corrupt one)...
+            var key = MonkMode.ConfigIntegrity.UnprotectKey(ini.GetKeyValue("Integrity", "Key"));
+            Assert.True(MonkMode.ConfigIntegrity.ConfigMacIsValid(
+                s2Canonical, ini.GetKeyValue("Integrity", "Mac"), key));
+            // ...yet under s3 code it does NOT validate the s3 canonical => frozen, forces re-run.
+            Assert.False(MonkMode.Blocker.SetupIsComplete());
+            Assert.Empty(MonkMode.Blocker.SetupDefaultSites());
+        }
+        finally { WipeSetup(); }
+    }
+
+    [Fact]
+    public void SetupDefault_FlowsIntoBlock_TheSitesInheritSeam()
+    {
+        // The DoBlock inherit path can't arm a live block in a unit test (fence), so pin its SEAM: the
+        // stored account default (SetupDefaultSites) flows into the SAME `domains` list WriteConfig
+        // writes, landing MAC-covered in the enforcement [User] CustomSites - exactly what `block` (no
+        // site source) does. An explicit `block --sites` instead passes its own list; here we prove the
+        // DEFAULT is what a no-site block would enforce, identical to a hand-typed --sites list.
+        WipeSetup();
+        WipeEnforcement();
+        try
+        {
+            Assert.True(MonkMode.Blocker.WriteSetupConfig("Alex", 0, "reddit.com,x.com"));
+            var inherited = MonkMode.Blocker.SetupDefaultSites();
+            Assert.Equal(new[] { "reddit.com", "x.com" }, inherited);
+
+            // What DoBlock does when no --sites/--preset/--file is given: domains = the inherited default.
+            MonkMode.Blocker.WriteConfig(inherited, System.Array.Empty<string>(),
+                new System.DateTime(2027, 1, 1, 0, 0, 0));
+
+            var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.IniPath());
+            // [User] CustomSites is the PackList form (";"-joined + trailing ";"), MAC-covered by the v8
+            // enforcement canonical - the default is now enforced identically to a hand-typed --sites list.
+            Assert.Equal("reddit.com;x.com;", ini.GetKeyValue("User", "CustomSites"));
+            Assert.Contains("reddit.com;x.com;", MonkMode.Blocker.CanonicalFromIni(ini));
         }
         finally { WipeSetup(); WipeEnforcement(); }
     }

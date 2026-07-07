@@ -418,6 +418,37 @@ Module Blocker
         Return True
     End Function
 
+    ' ---- D1b: build the account-default blocklist string to persist on the setup file ----
+    '
+    ' Merges `setup --default-sites a.com,b.com` raw domains with any `setup --default-preset
+    ' social,video` categories (expanded via the SAME D1a TryExpandPresets), into the comma-joined
+    ' packed string SetupDefaultSites reads back. Union, deduped case-insensitively, order preserved
+    ' (--default-sites first, then the preset domains). FAIL-CLOSED on an unknown preset: it returns
+    ' False + TryExpandPresets' error and packs NOTHING, so the setup verb aborts BEFORE the write
+    ' (fail-fast, no partial state) - the preset is validated ONCE here at setup time rather than at
+    ' every future block, so a stored default can never make a later `block` fail to arm. An empty/
+    ' Nothing arg on either side contributes nothing; both empty => packed = "" (no default). Friend
+    ' so the merge is unit-tested directly without running the console setup verb.
+    Friend Function TryBuildDefaultSites(ByVal sitesArg As String, ByVal presetArg As String, ByRef packed As String, ByRef errorMsg As String) As Boolean
+        packed = ""
+        errorMsg = ""
+        Dim domains As New List(Of String)
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If sitesArg IsNot Nothing Then
+            For Each rawTok As String In sitesArg.Split(New Char() {","c, ";"c})
+                Dim tok As String = rawTok.Trim()
+                If tok <> "" AndAlso seen.Add(tok) Then domains.Add(tok)
+            Next
+        End If
+        Dim presetDomains As New List(Of String)
+        If Not TryExpandPresets(presetArg, presetDomains, errorMsg) Then Return False   ' fail-closed: unknown preset
+        For Each d As String In presetDomains
+            If seen.Add(d) Then domains.Add(d)
+        Next
+        packed = String.Join(",", domains)
+        Return True
+    End Function
+
     ' ---- config (ini) ----
 
     Private Function PackList(ByVal items As IEnumerable(Of String)) As String
@@ -1070,9 +1101,10 @@ Module Blocker
     ' ConfigIntegrity.CurrentSchemaVersion). Bumping it invalidates older setup files so a
     ' schema change forces a one-off `setup` re-run (fail-closed), mirroring the "arm
     ' blocks after upgrading" operational rule. s1 = C6a: Done + Partner. s2 = C6c: adds
-    ' the account-default cooling-off duration (CoolOffSeconds) - an s1 file's byte-exact
-    ' MAC can't validate the s2 canonical, so upgrading forces one `setup` re-run.
-    Public Const SetupSchemaVersion As String = "s2"
+    ' the account-default cooling-off duration (CoolOffSeconds). s3 = D1b: adds the account-
+    ' default blocklist (DefaultSites) - an older file's byte-exact MAC can't validate the
+    ' newer canonical (new version tag + an appended field), so upgrading forces one `setup` re-run.
+    Public Const SetupSchemaVersion As String = "s3"
     Public Const SetupSection As String = "Setup"
     Public Const SetupDoneKey As String = "Done"
     Public Const SetupPartnerKey As String = "Partner"
@@ -1086,6 +1118,15 @@ Module Blocker
     ' re-clamped fail-safe on READ (SetupDefaultCoolOffSeconds), so an over-cap value can never
     ' reach the service's per-tick HighWater.AddSeconds (which would otherwise overflow).
     Public Const MaxCoolOffSeconds As Long = 365L * 24L * 60L * 60L
+    ' D1b: the account-DEFAULT blocklist every later `block` inherits when it names NO explicit site
+    ' source (--sites/--preset/--file). Stored PLAINTEXT + MAC-covered on the SETUP file (like Partner/
+    ' CoolOffSeconds), written only when non-empty (absent = "" = no default). A comma-joined list of
+    ' bare domains (the same raw tokens `--sites` takes, merged + preset-expanded at setup time by
+    ' TryBuildDefaultSites); on inherit they flow into the SAME `domains` list -> WriteHostsBlock, so
+    ' they are normalised + enforcement-MAC-covered identically to a hand-typed --sites domain. INPUT
+    ' sugar only: it can only ever ADD sites to a NEW arm, never lift/shorten a live block, so a
+    ' fail-closed (empty) read on any tamper/incomplete setup is safe (see SetupDefaultSites).
+    Public Const SetupDefaultSitesKey As String = "DefaultSites"
 
     Public Function SetupIniPath() As String
         Return Path.Combine(AppDir(), SetupIniName)
@@ -1101,15 +1142,17 @@ Module Blocker
     Friend Function SetupCanonicalFromIni(ByVal ini As IniFile) As String
         Dim done As String = If(ini.GetKeyValue(SetupSection, SetupDoneKey), "")
         Dim partner As String = If(ini.GetKeyValue(SetupSection, SetupPartnerKey), "")
-        ' C6c: CoolOffSeconds is APPENDED LAST (the append-at-end rule every schema bump
-        ' follows), so an s1 stamp over "s1\nDone=..\nPartner=..\n" can't validate this s2
-        ' canonical -> the upgrade freeze. Absent => "" (written only when > 0), round-tripping
-        ' identically at stamp + verify, like the empty-Partner case.
+        ' C6c CoolOffSeconds, then D1b DefaultSites, are each APPENDED LAST in turn (the append-at-end
+        ' rule every schema bump follows), so an older stamp can't validate a newer canonical (new
+        ' version tag + an extra field line) -> the upgrade freeze. Each absent field => "" (written
+        ' only when set), round-tripping identically at stamp + verify, like the empty-Partner case.
         Dim coolOff As String = If(ini.GetKeyValue(SetupSection, SetupCoolOffKey), "")
+        Dim defaultSites As String = If(ini.GetKeyValue(SetupSection, SetupDefaultSitesKey), "")
         Return SetupSchemaVersion & vbLf &
                "Done=" & done & vbLf &
                "Partner=" & partner & vbLf &
-               "CoolOffSeconds=" & coolOff & vbLf
+               "CoolOffSeconds=" & coolOff & vbLf &
+               "DefaultSites=" & defaultSites & vbLf
     End Function
 
     ' Is the setup file's MAC valid over its canonical? DPAPI-unprotect [Integrity] Key +
@@ -1192,6 +1235,37 @@ Module Blocker
         End Try
     End Function
 
+    ' D1b: the account-DEFAULT blocklist (bare domains) every later `block` inherits when it names NO
+    ' explicit site source. Empty array = none set / setup not complete / unusable. Gated on the SAME
+    ' fail-closed completeness as SetupPartnerLabel + SetupDefaultCoolOffSeconds (valid MAC AND
+    ' Done="yes"), so a missing/incomplete/tampered setup file yields NO default -> DoBlock simply has
+    ' no sites to inherit. This is safe by construction: the default only ever feeds a NEW arm (exactly
+    ' like --sites), never a live block, so it can neither lift nor shorten an active block. A forged/
+    ' added default is over-block-safe (blocks MORE, never less) and the user sees the armed sites
+    ' printed; a blanked/tampered one merely loses the default (the user then names sites explicitly or
+    ' gets "nothing to block"). Split on , / ; , trimmed, deduped case-insensitively (defensive - the
+    ' stored value is already clean). Read-only; never throws.
+    Public Function SetupDefaultSites() As String()
+        Try
+            Dim path As String = SetupIniPath()
+            If Not File.Exists(path) Then Return New String() {}
+            Dim ini As New IniFile
+            ini.Load(path)
+            If Not SetupMacIsValidForIni(ini) Then Return New String() {}
+            If Not String.Equals(If(ini.GetKeyValue(SetupSection, SetupDoneKey), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase) Then Return New String() {}
+            Dim raw As String = If(ini.GetKeyValue(SetupSection, SetupDefaultSitesKey), "")
+            Dim domains As New List(Of String)
+            Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            For Each rawTok As String In raw.Split(New Char() {","c, ";"c})
+                Dim tok As String = rawTok.Trim()
+                If tok <> "" AndAlso seen.Add(tok) Then domains.Add(tok)
+            Next
+            Return domains.ToArray()
+        Catch
+            Return New String() {}
+        End Try
+    End Function
+
     ' Write (or re-write) the first-run setup file: [Setup] Done="yes" + the optional partner
     ' label + the optional account-default cooling-off duration, MAC-stamped from birth (fresh
     ' key + MAC over the setup canonical).
@@ -1201,7 +1275,7 @@ Module Blocker
     ' warns - an unstamped setup file reads as NOT complete, so the arm-gate keeps
     ' refusing rather than trust an unprotected marker). A file-write failure throws to the
     ' verb's outer Catch (reported as an error), never a half-written trusted state.
-    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "", Optional ByVal coolOffSeconds As Long = 0) As Boolean
+    Public Function WriteSetupConfig(Optional ByVal partnerLabel As String = "", Optional ByVal coolOffSeconds As Long = 0, Optional ByVal defaultSites As String = "") As Boolean
         Dim ini As New IniFile
         ini.AddSection(SetupSection)
         ini.SetKeyValue(SetupSection, SetupDoneKey, "yes")
@@ -1212,6 +1286,14 @@ Module Blocker
         ' is culture-invariant, matching SetupDefaultCoolOffSeconds + the service's parse.
         If coolOffSeconds > 0 Then
             ini.SetKeyValue(SetupSection, SetupCoolOffKey, coolOffSeconds.ToString())
+        End If
+        ' D1b: the account-default blocklist, MAC-covered from birth (set BEFORE StampFreshSetupMac,
+        ' like Partner/CoolOffSeconds). Written ONLY when non-empty (absent = "" = no default; the
+        ' absent case round-trips identically at stamp + verify). A comma-joined bare-domain list,
+        ' already merged + deduped by TryBuildDefaultSites at the setup verb.
+        Dim trimmedDefault As String = If(defaultSites, "").Trim()
+        If trimmedDefault <> "" Then
+            ini.SetKeyValue(SetupSection, SetupDefaultSitesKey, trimmedDefault)
         End If
         StampFreshSetupMac(ini)
         ini.Save(SetupIniPath())
