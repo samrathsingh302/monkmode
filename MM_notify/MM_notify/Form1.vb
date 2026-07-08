@@ -40,6 +40,21 @@ Public Class Form1
     Private WithEvents closeTimer As New Timer()
     Private iniProcessList As String = ""
 
+    ' D4 notification state (all in-memory; the notifier persists NOTHING new - no
+    ' MAC field, no write that could race the service):
+    '   coolOffAnnounced - latches the "cooling-off started" toast so the 5s poll
+    '     shows it once per cooling-off, not every tick; reset when CoolOffUntil
+    '     clears so a cancel+re-request announces afresh.
+    '   reminderAnchorTick - the Environment.TickCount64 of block-start (seeded at
+    '     Load) or of the last periodic reminder; the pure ShouldFirePeriodicReminder
+    '     gate spaces the "still blocked" nudge off monotonic time.
+    Private coolOffAnnounced As Boolean = False
+    Private reminderAnchorTick As Long = 0
+    ' The periodic block-active reminder cadence. 2h keeps a long block gently in
+    ' view without nagging; a short block simply ends before the first one fires.
+    ' Tunable in one place (wants eyeballing at the CV/E3 elevated smoke sitting).
+    Private Const ReminderIntervalMs As Long = 2L * 60L * 60L * 1000L
+
     Private Function IniPath() As String
         Return Path.Combine(Application.StartupPath, "monkmode_settings.ini")
     End Function
@@ -70,16 +85,25 @@ Public Class Form1
 
         Dim done As String = "", needsAlerted As String = ""
         Dim isScheduleArmed As Boolean = False
+        Dim launchMsg As String = ""
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
+            Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
             done = ini.GetKeyValue("User", "Done")
             needsAlerted = ini.GetKeyValue("User", "NeedsAlerted")
             iniProcessList = ini.GetKeyValue("Process", "List")
             If StrComp(iniProcessList, "null") <> 0 Then iniProcessList = enc.DecryptData(iniProcessList)
             ' C5b (c3): don't announce "block ended" while a schedule is armed (design §6.4) - a
             ' schedule-only block's past-Until sentinel + between-windows idle must not toast.
-            isScheduleArmed = ScheduleArmed(ConfigMacIsValidForIni(ini), ini.GetKeyValue("Schedule", "Spec"))
+            isScheduleArmed = ScheduleArmed(macValid, ini.GetKeyValue("Schedule", "Spec"))
+            ' D4: build the launch toast for an ACTIVE MANUAL block (shown once below, after we
+            ' decide to run). MAC-valid + not-a-schedule + not-already-ended only: a tampered/garbage
+            ' config must announce nothing, a schedule's per-window toast is deferred, and an ended
+            ' block falls through to AnnounceBlockEnded. Fail-soft: an unparseable Until yields "".
+            If macValid AndAlso Not isScheduleArmed AndAlso StrComp("yes", done) <> 0 Then
+                launchMsg = BuildManualLaunchToast(ini)
+            End If
         Catch ex As Exception
             ExitNotifier()
             Return
@@ -96,22 +120,43 @@ Public Class Form1
 
         pollTimer.Start()
         appKillTimer.Start()
+        ' D4: seed the periodic-reminder anchor so the first "still blocked" nudge waits a full
+        ' interval after this launch, then announce the active manual block once (best-effort).
+        reminderAnchorTick = Environment.TickCount64
+        If launchMsg <> "" Then ShowToast(launchMsg)
     End Sub
 
     Private Sub pollTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles pollTimer.Tick
         Dim done As String = "", needsAlerted As String = ""
         Dim isScheduleArmed As Boolean = False
+        Dim coolOffToast As String = ""
+        Dim reminderToast As String = ""
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
+            Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
             done = ini.GetKeyValue("User", "Done")
             needsAlerted = ini.GetKeyValue("User", "NeedsAlerted")
             ' C5b (c3): suppress the manual-expiry toast while a schedule is armed (design §6.4);
             ' announce only once the schedule is genuinely cleared (not armed -> stopMe -> Done=yes).
-            isScheduleArmed = ScheduleArmed(ConfigMacIsValidForIni(ini), ini.GetKeyValue("Schedule", "Spec"))
+            isScheduleArmed = ScheduleArmed(macValid, ini.GetKeyValue("Schedule", "Spec"))
+            ' D4: manual-block notifications (cooling-off started + the periodic active reminder).
+            ' MAC-valid + not-a-schedule + not-already-ended only. Built here inside the single ini
+            ' load, but SHOWN below AFTER the Catch so a toast can never disturb the expiry logic.
+            If macValid AndAlso Not isScheduleArmed AndAlso StrComp("yes", done) <> 0 Then
+                coolOffToast = BuildCoolOffToast(ini)
+                reminderToast = BuildReminderToast(ini)
+            End If
         Catch ex As Exception
             Return
         End Try
+
+        ' D4: fire the manual-block notifications (best-effort; each self-latches so it can't spam
+        ' every 5s poll). Shown before the expiry branch below so an early ExitNotifier /
+        ' AnnounceBlockEnded return can never drop a notification (both stay "" on an ended tick
+        ' anyway - they are gated off Done<>"yes" above - so this ordering is simply the safe one).
+        If coolOffToast <> "" Then ShowToast(coolOffToast)
+        If reminderToast <> "" Then ShowToast(reminderToast)
 
         If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
             pollTimer.Stop()
@@ -121,6 +166,73 @@ Public Class Form1
                 AnnounceBlockEnded()
             End If
         End If
+    End Sub
+
+    ' D4 (best-effort, fail-soft): build the launch toast for an ACTIVE MANUAL block from an
+    ' already-loaded, MAC-valid ini. "" (no toast) if [Time] Until is unreadable/unparseable - a
+    ' launch announcement must never print a bogus deadline. remaining is the monotonic Until -
+    ' HighWater (Nothing => the "(about X left)" clause is dropped). Reuses iniProcessList (already
+    ' decrypted in Form1_Load) for the app count. Never throws.
+    Private Function BuildManualLaunchToast(ByVal ini As IniFile) As String
+        Try
+            Dim untilStr As String = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
+            Dim untilDt As DateTime
+            If Not DateTime.TryParse(untilStr, CA, DateTimeStyles.None, untilDt) Then Return ""
+            Dim remaining As TimeSpan? = Notifications.RemainingFromMark(untilStr, enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+            Dim siteCount As Integer = Notifications.CountPackedList(ini.GetKeyValue("User", "CustomSites"))
+            Dim appCount As Integer = Notifications.CountPackedList(iniProcessList)
+            Dim committed As Boolean = String.Equals(If(ini.GetKeyValue("Commit", "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+            Return Notifications.BlockActiveMessage(siteCount, appCount, untilDt, committed, remaining)
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    ' D4 (best-effort, fail-soft): the "cooling-off started" toast, latched. "" unless a cooling-off
+    ' is newly pending: an empty [Time] CoolOffUntil resets the latch (so a cancel + re-request
+    ' announces again); a set-and-already-announced deadline is silent; a set-but-unreadable/elapsed
+    ' remaining shows nothing. remaining is the monotonic CoolOffUntil - HighWater. Never throws.
+    Private Function BuildCoolOffToast(ByVal ini As IniFile) As String
+        Try
+            Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
+            If coolOffEnc = "" Then
+                coolOffAnnounced = False
+                Return ""
+            End If
+            If coolOffAnnounced Then Return ""
+            Dim remaining As TimeSpan? = Notifications.RemainingFromMark(enc.DecryptData(coolOffEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+            If remaining Is Nothing OrElse remaining.Value.TotalSeconds <= 0 Then Return ""
+            coolOffAnnounced = True
+            Return Notifications.CoolOffStartedMessage(remaining.Value)
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    ' D4 (best-effort, fail-soft): the periodic "still blocked" reminder, gated on the monotonic
+    ' ShouldFirePeriodicReminder interval. The anchor is reset whenever the interval elapses (even
+    ' if the remaining span is unreadable and no toast is shown) so a bad tick still spaces out the
+    ' next attempt. "" when it is not yet time or the remaining span is unreadable/elapsed.
+    Private Function BuildReminderToast(ByVal ini As IniFile) As String
+        Try
+            Dim nowTick As Long = Environment.TickCount64
+            If Not Notifications.ShouldFirePeriodicReminder(nowTick, reminderAnchorTick, ReminderIntervalMs) Then Return ""
+            reminderAnchorTick = nowTick
+            Dim remaining As TimeSpan? = Notifications.RemainingFromMark(enc.DecryptData(ini.GetKeyValue("Time", "Until")), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+            If remaining Is Nothing OrElse remaining.Value.TotalSeconds <= 0 Then Return ""
+            Return Notifications.BlockActiveReminderMessage(remaining.Value)
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    ' D4: build + show a tray balloon, fail-soft (a toast is cosmetic; it must never bubble an
+    ' exception into the poll/load path). All D4 toasts + the block-ended toast route through here.
+    Private Sub ShowToast(ByVal body As String)
+        Try
+            tray.ShowBalloonTip(8000, Notifications.ToastTitle, body, ToolTipIcon.Info)
+        Catch ex As Exception
+        End Try
     End Sub
 
     Private Sub appKillTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles appKillTimer.Tick
@@ -321,10 +433,9 @@ Public Class Form1
 
         RemoveRunEntry()
 
-        Try
-            tray.ShowBalloonTip(8000, "MonkMode", "Your block has ended. You're free — stay strong.", ToolTipIcon.Info)
-        Catch ex As Exception
-        End Try
+        ' D4: the block-ended toast, now routed through the centralised builder (same
+        ' wording, pinned by a test) + the shared fail-soft ShowToast.
+        ShowToast(Notifications.BlockEndedMessage())
 
         ' give the balloon a moment to display before exiting
         closeTimer.Start()

@@ -1,0 +1,152 @@
+// MonkMode.Tests - D4: richer notifier notifications (MM_notify\Notifications.vb).
+//
+// The D4 notification vocabulary is a set of PURE, fail-soft message builders + derivations in the
+// notifier assembly (mm_notify.Notifications, reachable via InternalsVisibleTo). Form1 owns the live
+// wiring (when to toast + the latches); this file pins the STRINGS + the derivations they rest on:
+//   - HumanizeShort / CountPackedList / RemainingFromMark / ShouldFirePeriodicReminder - the pure
+//     helpers, each fail-soft (never throws, "0m"/0/null on garbage);
+//   - the four message builders (block active on launch, cooling-off started, active reminder, block
+//     ended), asserted by literal so a future wording change is deliberate - including the exact
+//     historical block-ended text now that it is centralised.
+// No disk / DPAPI / UI is touched (mirrors ScheduleDisplayRenderTests): these are string functions.
+
+using System;
+using System.Globalization;
+
+namespace MonkMode.Tests;
+
+public class NotificationsTests
+{
+    private static readonly CultureInfo CA = new("en-CA");
+
+    // ---- HumanizeShort: the short d/h/m remaining dialect the toasts speak ----
+
+    [Theory]
+    [InlineData(9000, "2h 30m")]    // 2h30m
+    [InlineData(2700, "45m")]       // 45m
+    [InlineData(3600, "1h")]        // exactly 1h -> no minutes part
+    [InlineData(90000, "1d 1h")]    // 25h -> days + remainder hours
+    [InlineData(86400, "1d")]       // exactly 1d
+    [InlineData(90, "1m")]          // 90s -> 1m
+    [InlineData(30, "<1m")]         // positive but sub-minute
+    [InlineData(0, "0m")]           // zero -> already elapsed
+    [InlineData(-300, "0m")]        // negative -> clamped, never a bogus "-5m"
+    public void HumanizeShort_RendersShortDurations(int seconds, string expected)
+        => Assert.Equal(expected, mm_notify.Notifications.HumanizeShort(TimeSpan.FromSeconds(seconds)));
+
+    // ---- CountPackedList: the "N sites / M apps" count from a PackList/PackApps field ----
+
+    [Theory]
+    [InlineData("reddit.com;news.com;", 2)]            // trailing ';' the packers append is not miscounted
+    [InlineData("chrome.exe;foo.exe;bar.exe;", 3)]
+    [InlineData("x.com;", 1)]
+    [InlineData("  a.com ; b.com ;", 2)]               // trims each token
+    [InlineData("a; ;b;", 2)]                          // a stray blank token is dropped
+    [InlineData("null", 0)]                            // the packers' empty sentinel
+    [InlineData("", 0)]
+    public void CountPackedList_CountsNonEmptyTokens(string packed, int expected)
+        => Assert.Equal(expected, mm_notify.Notifications.CountPackedList(packed));
+
+    [Fact]
+    public void CountPackedList_Null_IsZero_NeverThrows()
+        => Assert.Equal(0, mm_notify.Notifications.CountPackedList(null!));
+
+    // ---- RemainingFromMark: monotonic deadline - HighWater, fail-soft to null ----
+
+    [Fact]
+    public void RemainingFromMark_ValidPair_IsTheDifference()
+    {
+        var rem = mm_notify.Notifications.RemainingFromMark(
+            new DateTime(2026, 7, 8, 17, 0, 0).ToString(CA),
+            new DateTime(2026, 7, 8, 15, 0, 0).ToString(CA));
+        Assert.Equal(TimeSpan.FromHours(2), rem);
+    }
+
+    [Fact]
+    public void RemainingFromMark_DeadlineBehindMark_IsNegative()
+    {
+        // The service can advance HighWater past a cooling-off/expiry deadline; the raw span goes
+        // negative and the callers gate on > 0 (they don't print a bogus "0m").
+        var rem = mm_notify.Notifications.RemainingFromMark(
+            new DateTime(2026, 7, 8, 15, 0, 0).ToString(CA),
+            new DateTime(2026, 7, 8, 17, 0, 0).ToString(CA));
+        Assert.NotNull(rem);
+        Assert.Equal(-2, rem!.Value.TotalHours);
+    }
+
+    [Theory]
+    [InlineData("garbage", "2026-07-08 15:00")]   // unparseable deadline
+    [InlineData("2026-07-08 17:00", "garbage")]   // unparseable mark
+    [InlineData("", "2026-07-08 15:00")]          // absent deadline (no cooling-off)
+    [InlineData("2026-07-08 17:00", "")]          // absent mark
+    public void RemainingFromMark_Unparseable_IsNull(string deadline, string mark)
+        => Assert.Null(mm_notify.Notifications.RemainingFromMark(deadline, mark));
+
+    // ---- ShouldFirePeriodicReminder: the pure monotonic interval gate ----
+
+    [Theory]
+    [InlineData(10000, 0, 5000, true)]    // 10s elapsed >= 5s interval
+    [InlineData(5000, 0, 5000, true)]     // exactly at the boundary fires
+    [InlineData(4000, 0, 5000, false)]    // not yet
+    [InlineData(1000, 2000, 5000, false)] // negative delta (clock stall) never fires
+    public void ShouldFirePeriodicReminder_FiresOnlyAfterInterval(long nowTick, long lastTick, long intervalMs, bool expected)
+        => Assert.Equal(expected, mm_notify.Notifications.ShouldFirePeriodicReminder(nowTick, lastTick, intervalMs));
+
+    // ---- BlockActiveMessage: the launch toast, across the subject + committed + remaining branches ----
+
+    private static readonly DateTime Until = new(2026, 7, 8, 17, 0, 0);
+
+    [Fact]
+    public void BlockActiveMessage_SitesAndApps_WithRemaining()
+        => Assert.Equal(
+            "MonkMode is active - 3 sites and 2 apps blocked until 2026-07-08 17:00 (about 2h 30m left).",
+            mm_notify.Notifications.BlockActiveMessage(3, 2, Until, false, TimeSpan.FromMinutes(150)));
+
+    [Fact]
+    public void BlockActiveMessage_SitesOnly_NoRemaining_OmitsTheLeftClause()
+        => Assert.Equal(
+            "MonkMode is active - 1 site blocked until 2026-07-08 17:00.",
+            mm_notify.Notifications.BlockActiveMessage(1, 0, Until, false, null));
+
+    [Fact]
+    public void BlockActiveMessage_AppsOnly_Singular_And_Plural()
+        => Assert.Equal(
+            "MonkMode is active - 2 apps blocked until 2026-07-08 17:00 (about 45m left).",
+            mm_notify.Notifications.BlockActiveMessage(0, 2, Until, false, TimeSpan.FromMinutes(45)));
+
+    [Fact]
+    public void BlockActiveMessage_Committed_AppendsCodeOnlyNote_AndPluralisesSingletons()
+        => Assert.Equal(
+            "MonkMode is active - 1 site and 1 app blocked until 2026-07-08 17:00 (about 1h left). Committed block - the accountability code is the only early exit.",
+            mm_notify.Notifications.BlockActiveMessage(1, 1, Until, true, TimeSpan.FromHours(1)));
+
+    [Fact]
+    public void BlockActiveMessage_NonPositiveRemaining_OmitsTheLeftClause()
+        => Assert.Equal(
+            "MonkMode is active - 2 sites blocked until 2026-07-08 17:00.",
+            mm_notify.Notifications.BlockActiveMessage(2, 0, Until, false, TimeSpan.Zero));
+
+    [Fact]
+    public void BlockActiveMessage_BothCountsZero_FailsSoftToGenericSubject()
+        => Assert.Equal(
+            "MonkMode is active - Your block blocked until 2026-07-08 17:00.",
+            mm_notify.Notifications.BlockActiveMessage(0, 0, Until, false, null));
+
+    // ---- The remaining three toasts, pinned by literal ----
+
+    [Fact]
+    public void CoolOffStartedMessage_StatesTheWaitAndTheCancel()
+        => Assert.Equal(
+            "Cooling-off started - the block lifts in about 1h of active machine time. Run 'monkmode unblock --cancel' to stay blocked.",
+            mm_notify.Notifications.CoolOffStartedMessage(TimeSpan.FromHours(1)));
+
+    [Fact]
+    public void BlockActiveReminderMessage_IsTheGentleNudge()
+        => Assert.Equal(
+            "Still in the zone - about 45m left on your block. Stay strong.",
+            mm_notify.Notifications.BlockActiveReminderMessage(TimeSpan.FromMinutes(45)));
+
+    [Fact]
+    public void BlockEndedMessage_PinsTheExactHistoricalText()
+        => Assert.Equal("Your block has ended. You're free — stay strong.", mm_notify.Notifications.BlockEndedMessage());
+}
