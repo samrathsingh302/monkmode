@@ -144,6 +144,14 @@ Module Program
         ' set up -> re-run `setup`.
         If Not Blocker.SetupIsComplete() Then Return SetupRequired()
 
+        ' D5 (friendly validation): warn on unrecognised --flags (likely typos, e.g. --site for
+        ' --sites) WITHOUT failing - an over-strict reject could refuse a valid command. The block
+        ' proceeds with whatever valid flags were given.
+        Dim unknownOpts As List(Of String) = UnknownOptions(args, BlockOptionNames())
+        If unknownOpts.Count > 0 Then
+            Console.Error.WriteLine("Note: ignoring unrecognised option(s): " & String.Join(", ", unknownOpts) & ". Run 'monkmode help' for the flags 'block' accepts.")
+        End If
+
         Dim domains As New List(Of String)
         domains.AddRange(SplitList(GetOption(args, "--sites")))
 
@@ -358,6 +366,12 @@ Module Program
             If windows.Count > 0 Then Console.WriteLine("  Windows: " & String.Join("; ", windows))
             If sites.Count > 0 Then Console.WriteLine("  Sites:   " & String.Join(", ", sites))
             If apps.Count > 0 Then Console.WriteLine("  Apps:    " & String.Join(", ", apps))
+            ' D5: the LIVE window state (open now vs waiting), from the service-maintained ActiveUntil.
+            If Blocker.ScheduleWindowIsOpen() Then
+                Console.WriteLine("  Now:     a window is OPEN - sites/apps are blocked until it closes (it can't be ended early).")
+            Else
+                Console.WriteLine("  Now:     no window open right now - the next one opens automatically at its time.")
+            End If
             Console.WriteLine("  Windows open automatically at their times; run 'monkmode schedule --show' for detail.")
             Return 0
         End If
@@ -369,6 +383,9 @@ Module Program
             Dim apps As String = Blocker.BlockedApps()
             If sites <> "" Then Console.WriteLine("  Sites: " & sites.Replace(";", " "))
             If apps <> "" Then Console.WriteLine("  Apps:  " & apps.Replace(";", " "))
+            ' D5: the exit story - committed (code-only), cooling-off pending (monotonic remaining), or
+            ' the self-serve wait + code. A read-only, MAC-gated, best-effort view (never mutates state).
+            Console.WriteLine("  " & FormatCoolOffStatusLine(Blocker.BlockIsCommitted(), Blocker.CoolOffPendingRemaining()))
         Else
             Console.WriteLine("MonkMode: no active block (service installed but idle).")
         End If
@@ -829,13 +846,62 @@ Module Program
         Return String.Join(" ", parts)
     End Function
 
+    ' D5 (rich status, pure): the exit/cooling-off line for an ACTIVE manual block. A committed block
+    ' shows the code-only exit; a pending cooling-off shows the monotonic remaining + the cancel;
+    ' otherwise the self-serve wait + the code are offered. Always returns a non-empty line (an
+    ' active block always has SOME exit story). Friend so it is unit-tested by literal - the branch
+    ' selection is display logic worth pinning. coolOffRemaining is Blocker.CoolOffPendingRemaining()
+    ' (Nothing = none pending); a committed block ignores it (self-serve cooling-off is disabled).
+    Friend Function FormatCoolOffStatusLine(ByVal committed As Boolean, ByVal coolOffRemaining As TimeSpan?) As String
+        If committed Then
+            Return "Exit:  committed block - the accountability code (shown at block start) is the only early exit, or wait for the timer."
+        End If
+        If coolOffRemaining IsNot Nothing Then
+            Return "Exit:  cooling-off pending - lifts in about " & Humanize(coolOffRemaining.Value) & " of active time. Run 'monkmode unblock --cancel' to stay blocked."
+        End If
+        Return "Exit:  run 'monkmode unblock' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now."
+    End Function
+
+    ' D5 (friendly validation, pure): the "--flags" in args NOT in the known set (case-insensitive) -
+    ' i.e. likely typos ("--site" for "--sites"). Only "--"-prefixed tokens are considered (a value
+    ' like a domain never is); a "--flag=value" form is matched on its "--flag" head, so the reported
+    ' token is the bare flag. Used to WARN + continue (never to fail: an over-strict reject could
+    ' refuse a valid command). Null-safe; Friend so it is unit-tested.
+    Friend Function UnknownOptions(ByVal args As String(), ByVal known As String()) As List(Of String)
+        Dim result As New List(Of String)
+        If args Is Nothing Then Return result
+        For Each a As String In args
+            If a Is Nothing OrElse Not a.StartsWith("--", StringComparison.Ordinal) Then Continue For
+            Dim head As String = a
+            Dim eq As Integer = head.IndexOf("="c)
+            If eq >= 0 Then head = head.Substring(0, eq)
+            Dim isKnown As Boolean = False
+            If known IsNot Nothing Then
+                For Each k As String In known
+                    If String.Equals(head, k, StringComparison.OrdinalIgnoreCase) Then
+                        isKnown = True
+                        Exit For
+                    End If
+                Next
+            End If
+            If Not isKnown Then result.Add(head)
+        Next
+        Return result
+    End Function
+
+    ' D5: the flags `block` accepts (for the UnknownOptions typo warning). One list, so a new block
+    ' flag is added in exactly one place alongside its DoBlock handling.
+    Friend Function BlockOptionNames() As String()
+        Return New String() {"--sites", "--preset", "--apps", "--app-preset", "--for", "--until", "--file", "--commit", "--cooloff"}
+    End Function
+
     Private Sub PrintUsage()
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
         Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
-        Console.WriteLine("  monkmode status")
+        Console.WriteLine("  monkmode status  (an active block + time left + how to exit / a pending cooling-off, or the armed schedule's live window state)")
         Console.WriteLine("  monkmode stats   (read-only summary of your block history: counts, total focus time, longest block)")
         Console.WriteLine("  monkmode add --sites c.com")
         Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")

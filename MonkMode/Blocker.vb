@@ -244,6 +244,38 @@ Module Blocker
         End Try
     End Function
 
+    ' D5 (rich status): the MONOTONIC cooling-off remaining for `status` - CoolOffUntil - HighWater
+    ' (the SAME active-time countdown the service enforces via the B4 mark; NOT the wall clock).
+    ' Nothing when no cooling-off is pending ([Time] CoolOffUntil empty), the MAC is invalid
+    ' (tampered/frozen - never a misleading countdown, like BlockIsCommitted), the deadline has
+    ' already passed (about to lift), or anything is unreadable. Display-only: ZERO enforcement
+    ' authority. Best-effort; never throws.
+    Public Function CoolOffPendingRemaining() As TimeSpan?
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            If Not ConfigMacIsValidForIni(ini) Then Return Nothing
+            Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
+            If coolOffEnc = "" Then Return Nothing
+            Return CoolOffRemainingFrom(enc.DecryptData(coolOffEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    ' Pure: cooling-off remaining from a deadline vs the HighWater mark, both en-CA plaintext.
+    ' Nothing if either is empty/unparseable OR the remaining is non-positive (a passed/at-deadline
+    ' cooling-off is "not pending" - the block is about to lift, so `status` shows no countdown).
+    ' Friend so the parse + positivity contract is unit-tested without arming a real cooling-off.
+    Friend Function CoolOffRemainingFrom(ByVal deadlineText As String, ByVal highWaterText As String) As TimeSpan?
+        Dim deadline As DateTime, mark As DateTime
+        If Not DateTime.TryParse(deadlineText, CA, DateTimeStyles.None, deadline) Then Return Nothing
+        If Not DateTime.TryParse(highWaterText, CA, DateTimeStyles.None, mark) Then Return Nothing
+        Dim remaining As TimeSpan = deadline - mark
+        If remaining.TotalSeconds <= 0 Then Return Nothing
+        Return remaining
+    End Function
+
     ' ---- hosts helpers ----
 
     Private Function NormalizeDomain(ByVal d As String) As String
@@ -1069,6 +1101,38 @@ Module Blocker
         Catch
             Return ""
         End Try
+    End Function
+
+    ' D5 (rich status): is a scheduled window OPEN right now? Reads the service-maintained
+    ' [Schedule] ActiveUntil (encrypted datetime; "" between windows - the service is its sole
+    ' writer, set on window-open) vs the monotonic [Time] HighWater, macValid-gated. Display-only:
+    ' ZERO enforcement authority (like BlockIsCommitted). Fail-CLOSED to match the service (an
+    ' unreadable/tampered config or a set-but-unparseable deadline reads as NOT elapsed = held/open),
+    ' so `status` never claims "no window" while the service is in fact still holding one. False on
+    ' no config / absent ActiveUntil / any read failure.
+    Public Function ScheduleWindowIsOpen() As Boolean
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            If Not ConfigMacIsValidForIni(ini) Then Return False
+            Dim activeEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+            If activeEnc = "" Then Return False
+            Return Not ScheduleWindowElapsed(enc.DecryptData(activeEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' Pure: has the open scheduled window reached its monotonic close (ActiveUntil <= HighWater)?
+    ' Byte-for-byte Service1.ScheduleElapsed / Form1.ScheduleElapsed (parity-pinned): "" or any
+    ' unparseable input reads as NOT elapsed (fail-closed hold), so this CLI copy agrees with the
+    ' service that decides the actual enforcement. Friend so the parity is unit-tested.
+    Friend Function ScheduleWindowElapsed(ByVal activeUntilText As String, ByVal highWaterText As String) As Boolean
+        If activeUntilText = "" Then Return False
+        Dim activeUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(activeUntilText, CA, DateTimeStyles.None, activeUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, CA, DateTimeStyles.None, highWater) Then Return False
+        Return activeUntil <= highWater
     End Function
 
     ' Compact dayMask chars ('1'..'7' = Mon..Sun) -> a human day phrase, compressing a run of >=3
