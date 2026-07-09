@@ -1,6 +1,25 @@
 '  Programmer: Ludvik Jerabek
 '        Date: 08\23\2010
 '     Purpose: Allow INI manipulation in .NET
+'
+'  Third-party INI helper bundled with the original Cold Turkey sources and
+'  redistributed here as part of MonkMode (GPLv3). Copyright remains with the
+'  author named above.
+'  Modified by Samrath Singh, 2026 -- namespaced and adapted for the MonkMode
+'  fork (fork: MonkMode). Source: https://github.com/samrathsingh302/monkmode
+'
+'  This program is free software: you can redistribute it and/or modify
+'  it under the terms of the GNU General Public License as published by
+'  the Free Software Foundation, either version 3 of the License, or
+'  (at your option) any later version.
+'
+'  This program is distributed in the hope that it will be useful,
+'  but WITHOUT ANY WARRANTY; without even the implied warranty of
+'  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+'  GNU General Public License for more details.
+'
+'  You should have received a copy of the GNU General Public License
+'  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Imports System.IO
 Imports System.Text.RegularExpressions
