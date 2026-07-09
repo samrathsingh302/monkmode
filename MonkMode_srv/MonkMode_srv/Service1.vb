@@ -318,7 +318,10 @@ Public Class Service1
     ' not get a liftable block); the trade-off is a corrupted-at-expiry ini must
     ' be re-armed by hand instead of timing out.
     Private Sub WriteDefaultBlock()
-        My.Computer.FileSystem.WriteAllText(Application.StartupPath + "\monkmode_settings.ini", "", False)
+        ' O2: no pre-blanking of the target here. The IniFile below is built
+        ' purely in memory and Save() is an atomic temp-file + rename replace
+        ' (creates the target if missing), so a blank-first WriteAllText would
+        ' only open a needless 0-byte window between the blank and the rename.
         Dim iniFile = New IniFile
         iniFile.AddSection("User")
         iniFile.SetKeyValue("User", "CustomChecked", "abcdefghijk")
