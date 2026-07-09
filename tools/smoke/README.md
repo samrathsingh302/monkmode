@@ -1,0 +1,27 @@
+# tools\smoke — elevated live smoke tests
+
+Live-path verification for MonkMode's enforcement core. These exercise the REAL
+hosts file, registry, SCM service and system clock, so they must be run from an
+**elevated** PowerShell, one at a time, on a machine with **no active block**.
+
+Always rebuild `dist\` first (a block armed on stale binaries can freeze after a
+canonical bump):
+
+```
+powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
+```
+
+Each script defaults `-Dist` to `repo\dist` (derived from its own location); pass
+`-Dist <path>` to point elsewhere. Ephemeral run outputs (transcripts, hosts
+backups) are written to `C:\Users\samra\monkmode-smoketest\` and are NOT
+versioned.
+
+| Script | What it proves | Time | Self-cleaning |
+|---|---|---|---|
+| `run-smoketest.ps1` | Full stack B1–B7 + B5a: install, block, hosts self-heal, watchdog kill drills, SafeBoot, sc-delete resistance, DoH-off policy, auto-lift + clean teardown. `-IncludeClockTest` adds the B4 forward-clock-jump drill (moves the system clock, restored in a `finally`). Baseline **71/0** (with clock test). | ~7 min | yes (+ `cleanup.ps1` fallback) |
+| `b7-failclosed-test.ps1` | B7 fail-closed: a tampered `[Integrity] Mac` is NOT re-stamped and the block HOLDS (never lifts). Standalone. Baseline **10/0**. | ~1 min | yes (exits via `unblock --force`) |
+| `cleanup.ps1` | Emergency teardown: disarm SCM recovery, kill guardian+service, strip B6 deny-DELETE ACE, delete the service, restore hosts, remove SafeBoot keys + DoH snapshot. Run if any script hangs or leaves the box blocked. | — | n/a |
+| `dns-diag.ps1` / `dns-diag2.ps1` / `dns-diag3.ps1` | Isolated hosts-reload timing diagnostics (no MonkMode). Kept for DNS-cache debugging. | — | yes |
+
+If a block ever jams, the unconditional escapes (in order): `dist\monkmode.exe
+unblock --force`, then `tools\smoke\cleanup.ps1` (elevated).
