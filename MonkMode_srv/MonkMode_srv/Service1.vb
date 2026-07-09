@@ -1,6 +1,10 @@
 '    Copyright (c) 2011, 2012 Felix Belzile
-'    Official software website: http://monkmode.local
-'    Contact: felixbelzile@rogers.com  Web: http://felixbelzile.com
+'    Source: https://github.com/samrathsingh302/monkmode
+'
+'    Modified by Samrath Singh, 2026 — hardened enforcement core of the MonkMode
+'    fork: fail-closed gates (hosts self-heal, guardian spawn, SafeBoot/DoH
+'    self-register, monotonic clock, cooling-off / partner-code / commit /
+'    schedules) (fork: MonkMode).
 
 '    This file is part of MonkMode
 '
