@@ -79,6 +79,10 @@ public class CanonicalParityTests
     // stored (MAC-covered, NOT encrypted, like Committed/[Schedule] Spec). A distinct value
     // so a wrapper reading the wrong field, or one that (wrongly) decrypted it, would diverge.
     private const string CoolOffDurationPlain = "5400";
+    // D2c: [Process] AllSession is the all-session-app-kill flag, plaintext-as-stored (MAC-covered,
+    // NOT encrypted, like Committed/[Schedule] Spec). A distinct value ("yes") so a wrapper reading
+    // the wrong field, or one that (wrongly) decrypted it, would diverge.
+    private const string AllSessionKillPlain = "yes";
 
     // A fixed raw 32-byte test key (the production key is random + DPAPI-
     // protected; the pure MAC layer takes the raw key, so inject a known one and
@@ -123,6 +127,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
         ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
         ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
+        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
         return ini;
     }
 
@@ -142,6 +147,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
         ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
         ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
+        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
         return ini;
     }
 
@@ -161,6 +167,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
         ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
         ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
+        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
         return ini;
     }
 
@@ -180,6 +187,7 @@ public class CanonicalParityTests
         ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
         ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
         ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
+        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
         return ini;
     }
 
@@ -230,7 +238,8 @@ public class CanonicalParityTests
             "Committed=" + CommittedPlain + "\n" +
             "ScheduleSpec=" + ScheduleSpecPlain + "\n" +
             "ScheduleActiveUntil=" + ScheduleActiveUntilPlain + "\n" +
-            "CoolOffDuration=" + CoolOffDurationPlain + "\n",
+            "CoolOffDuration=" + CoolOffDurationPlain + "\n" +
+            "AllSessionKill=" + AllSessionKillPlain + "\n",
             CliCanonical());
     }
 
@@ -267,9 +276,9 @@ public class CanonicalParityTests
         var encryptedSites = new MonkMode.Simple3Des(Passphrase).EncryptData("decrypted-sites;");
 
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain);  // CustomSites VERBATIM (correct)
+            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // CustomSites VERBATIM (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain);  // CustomSites DECRYPTED (the bug)
+            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // CustomSites DECRYPTED (the bug)
 
         Assert.NotEqual(correct, buggy);
 
@@ -286,9 +295,9 @@ public class CanonicalParityTests
         // would put the ciphertext into the canonical instead of the plaintext,
         // diverging from every other party. Pin that this breaks MAC agreement.
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain);  // ProcessList DECRYPTED (correct)
+            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // ProcessList DECRYPTED (correct)
         var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain);  // ProcessList CIPHERTEXT (the bug)
+            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // ProcessList CIPHERTEXT (the bug)
 
         Assert.NotEqual(correct, buggy);
         var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
@@ -317,6 +326,7 @@ public class CanonicalParityTests
             set("Schedule", "Spec", ScheduleSpecPlain);
             set("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
             set("CoolOff", "Duration", CoolOffDurationPlain);
+            set("Process", "AllSession", AllSessionKillPlain);
         }
 
         var cliIni = new MonkMode.IniFile();

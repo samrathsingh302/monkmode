@@ -55,11 +55,12 @@ Friend Module ConfigIntegrity
     ' cooling-off deadline) -> v5 (C3b: added the [Partner] Salt/Hash/UnlockedAt
     ' accountability-code fields) -> v6 (C4: added the [Commit] Committed flag) ->
     ' v7 (C5b: added the [Schedule] Spec + ActiveUntil scheduled-window fields) ->
-    ' v8 (C6b: added the [CoolOff] Duration configured-cooling-off-duration field).
+    ' v8 (C6b: added the [CoolOff] Duration configured-cooling-off-duration field) ->
+    ' v9 (D2c: added the [Process] AllSession all-session-app-kill flag).
     ' The four copies MUST share this value or the parties would stamp/verify
     ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v8"
+    Friend Const CurrentSchemaVersion As String = "v9"
 
     ' The canonical string the MAC is computed over: the schema version tag plus
     ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
@@ -120,7 +121,7 @@ Friend Module ConfigIntegrity
     ' group, the [Schedule] group, then the [CoolOff] Duration line last) - mind that
     ' the parameter order (until, processList, customSites, now, highWater, coolOffUntil,
     ' partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec,
-    ' scheduleActiveUntil, coolOffDuration) is NOT the line order; every wrapper threads
+    ' scheduleActiveUntil, coolOffDuration, allSessionKill) is NOT the line order; every wrapper threads
     ' them positionally, so the four copies must stay byte-identical (the parity tests
     ' fail loudly on drift).
     '
@@ -144,9 +145,19 @@ Friend Module ConfigIntegrity
     ' max(configured, floor). It MUST be MAC-covered: a raw edit to shorten it fails the
     ' MAC -> freeze (and even absent the freeze the compile-time floor clamps it up, so a
     ' tampered/0 value can only ever EXTEND the wait, never shorten below the floor).
-    ' Absent/blank/unparseable -> the floor. It trails LAST, after ScheduleActiveUntil (the
+    ' Absent/blank/unparseable -> the floor. It trails after ScheduleActiveUntil (the
     ' append-at-end rule every bump follows, keeping each schema bump a uniform edit).
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal coolOffDuration As String) As String
+    '
+    ' D2c (all-session app-kill): the canonical also includes AllSessionKill - the [Process]
+    ' AllSession policy flag ("yes" = the LocalSystem service kills blocked apps in EVERY session,
+    ' not just session 0; absent/"no" = today's session-0-only service kill, the notifier still
+    ' covering its own interactive session). Stored PLAINTEXT-as-stored (a boolean policy is not a
+    ' secret; the MAC is its protection), like Committed. It MUST be MAC-covered or a raw edit could
+    ' flip an armed all-session block back to session-0-only to run a blocked app in a second
+    ' logged-in session; instead flipping it fails the MAC -> freeze. The service reads it UN-gated
+    ' by macValid (a widen-only union that can never REMOVE a kill, matching the schedule app-kill
+    ' union), so a tampered "yes" only ever ADDS kills. It trails LAST, after CoolOffDuration.
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal coolOffDuration As String, ByVal allSessionKill As String) As String
         Return schemaVersion & vbLf &
                "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
@@ -160,7 +171,8 @@ Friend Module ConfigIntegrity
                "Committed=" & committed & vbLf &
                "ScheduleSpec=" & scheduleSpec & vbLf &
                "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf &
-               "CoolOffDuration=" & coolOffDuration & vbLf
+               "CoolOffDuration=" & coolOffDuration & vbLf &
+               "AllSessionKill=" & allSessionKill & vbLf
     End Function
 
     ' HMAC-SHA256 of the canonical (Unicode bytes), Base64-encoded. The key is

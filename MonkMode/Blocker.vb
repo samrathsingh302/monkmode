@@ -604,13 +604,23 @@ Module Blocker
     ' the C1b backup, the snapshot, or any log). Rotate-on-use: each arm mints a
     ' FRESH code (a used code dies with its block at stopMe()), so a code the user
     ' saw themselves entering can't be banked for the next block.
-    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime, Optional ByVal committed As Boolean = False, Optional ByVal coolOffSeconds As Long = 0) As String
+    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime, Optional ByVal committed As Boolean = False, Optional ByVal coolOffSeconds As Long = 0, Optional ByVal allSessionKill As Boolean = False) As String
         Dim ini As New IniFile
         Dim appList As String = PackApps(apps)
         Dim siteList As String = PackList(domains)
 
         ini.AddSection("Process")
         ini.SetKeyValue("Process", "List", If(appList = "", "null", enc.EncryptData(appList)))
+        ' D2c: the all-session app-kill policy flag, MAC-covered from birth (written BEFORE
+        ' StampFreshMac, like [Commit]/[CoolOff]). Written "yes" ONLY when the user gave
+        ' --all-session-kill; absent otherwise (canonical reads absent as "", so a default block
+        ' is byte-identical to today). Stored PLAINTEXT (a boolean policy is not a secret); the MAC
+        ' protects it - a raw edit to flip it fails verification -> the readers fail closed -> freeze.
+        ' The service reads it to widen its kill loop from session 0 to EVERY session; a widen-only
+        ' union that can never remove a kill.
+        If allSessionKill Then
+            ini.SetKeyValue("Process", "AllSession", "yes")
+        End If
 
         ini.AddSection("User")
         ini.SetKeyValue("User", "CustomChecked", "")
@@ -719,6 +729,10 @@ Module Blocker
         ' PLAINTEXT (as-stored, like Committed - NOT decrypted); absent => "" (a v7 config
         ' read under v8 code builds a different canonical and freezes, R9). MAC-covered.
         Dim coolOffDuration As String = ini.GetKeyValue("CoolOff", "Duration")
+        ' D2c: the [Process] AllSession all-session-app-kill flag, plaintext-as-stored (like
+        ' Committed - NOT decrypted); absent => "" (a v8 config read under v9 code builds a
+        ' different canonical and freezes, R9). MAC-covered.
+        Dim allSessionKill As String = ini.GetKeyValue("Process", "AllSession")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -731,7 +745,7 @@ Module Blocker
         ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
         Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", enc.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration, allSessionKill)
     End Function
 
     ' B7: generate a new HMAC key, protect it into [Integrity] Key, and stamp

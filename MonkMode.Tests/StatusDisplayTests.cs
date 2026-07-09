@@ -137,6 +137,40 @@ public class StatusDisplayPureTests
             new[] { "--sites", "a.com", "--for", "2h", "--commit" }, MonkMode.Program.BlockOptionNames()));
     }
 
+    [Fact]
+    public void UnknownOptions_AllSessionKill_IsAKnownBlockFlag_NotWarned()
+    {
+        // D2c: `block --all-session-kill` must NOT be flagged as an unrecognised option (it is a
+        // real bare boolean flag), or the typo warning would nag on every use.
+        Assert.Contains("--all-session-kill", MonkMode.Program.BlockOptionNames());
+        Assert.Empty(MonkMode.Program.UnknownOptions(
+            new[] { "--apps", "chrome.exe", "--for", "2h", "--all-session-kill" }, MonkMode.Program.BlockOptionNames()));
+    }
+
+    // ---- BooleanFlagsWithValue: the "=value on an on/off flag" detector (D5 follow-up) ----
+
+    [Fact]
+    public void BooleanFlagsWithValue_FlagsCommitEqualsValue_WhichHasFlagSilentlyIgnores()
+    {
+        // The gap this closes: `--commit=yes` is a NO-OP under HasFlag (it only matches the bare
+        // "--commit"), and UnknownOptions won't flag it (its head is a known flag). Pin that this
+        // detector catches it (case-insensitive, on the "--flag" head), so DoBlock can warn.
+        Assert.Equal(new[] { "--commit" },
+            MonkMode.Program.BooleanFlagsWithValue(new[] { "--sites", "a.com", "--commit=yes" }).ToArray());
+        Assert.Equal(new[] { "--all-session-kill" },
+            MonkMode.Program.BooleanFlagsWithValue(new[] { "--COMMIT" /* bare, fine */, "--all-session-kill=1" }).ToArray());
+    }
+
+    [Fact]
+    public void BooleanFlagsWithValue_IgnoresBareBooleans_ValueFlags_And_Null()
+    {
+        // A bare boolean (correct usage), a value-flag written with "=" (--for=2h is legitimate),
+        // and null/empty args all yield nothing - only a BOOLEAN flag misused with "=value" warns.
+        Assert.Empty(MonkMode.Program.BooleanFlagsWithValue(new[] { "--commit", "--for=2h", "--sites", "a.com" }));
+        Assert.Empty(MonkMode.Program.BooleanFlagsWithValue(null!));
+        Assert.Empty(MonkMode.Program.BooleanFlagsWithValue(new string[] { }));
+    }
+
     private static string Reformat(string s)
     {
         // "" / unparseable pass through verbatim (both copies must see the identical raw string);

@@ -750,6 +750,13 @@ Public Class Service1
         ' regardless), and under macValid the MAC-covered flag is authentic. Default
         ' not-committed on a failed read - harmless, since a failed read => not macValid.
         Dim iniCommitted As Boolean = False
+        ' D2c: whether THIS block kills blocked apps in EVERY session (not just session 0).
+        ' Default FALSE = the current session-0-only kill = fail-safe: a tick that couldn't read
+        ' the flag never widens (the block still holds - hosts stay locked, the deadline never
+        ' lifts - and the notifier still covers the interactive session). Read raw (NOT macValid-
+        ' gated): a widen-only union that can never REMOVE a kill, so a tampered "yes" (which also
+        ' freezes the block) only ever ADDS kills - matching the schedule app-kill union's stance.
+        Dim iniAllSessionKill As Boolean = False
         ' B7: MAC validity for this tick. Default FALSE = fail closed: if the
         ' config can't even be read, or the MAC doesn't verify, the block is
         ' treated as active (never expired) and every self-heal gate keeps
@@ -808,6 +815,10 @@ Public Class Service1
             If StrComp("null", iniProcessList) <> 0 Then
                 iniProcessList = encryptionW.DecryptData(iniProcessList)
             End If
+            ' D2c: read the [Process] AllSession all-session-app-kill flag ("yes" = widen the kill
+            ' loop below from session 0 to EVERY session). Plaintext-as-stored (MAC-covered, not
+            ' decrypted), read raw like the schedule union (widen-only, never removes a kill).
+            iniAllSessionKill = AllSessionKillArmed(iniFile.GetKeyValue("Process", "AllSession"))
             ' B7: evaluate the tamper-evident MAC (DPAPI-unprotect [Integrity]
             ' Key, validate [Integrity] Mac over the canonical). Invalid/absent
             ' MAC or a DPAPI failure -> False -> block stays standing.
@@ -1083,9 +1094,18 @@ Public Class Service1
         Dim killList As String = EffectiveKillList(iniProcessList,
                                                    If(scheduleActiveNow, activeSchedule.Apps, Nothing),
                                                    scheduleActiveNow)
+        ' D2c: normally the SERVICE kills only session-0 processes and the user-session notifier
+        ' (MM_notify appKillTimer_Tick, SessionId<>0) kills the interactive session. With the armed
+        ' [Process] AllSession flag, the LocalSystem service (which alone has cross-session kill
+        ' privilege) kills matching apps in EVERY session - closing the "fast-user-switch to a second
+        ' account" gap the notifier's single-session reach leaves. ProcessInKillScope WIDENS only:
+        ' allSessionKill=False is the byte-identical session-0-only gate as before (Proc.SessionId is
+        ' read exactly as the old If did), so a default block is unchanged; True makes it true for any
+        ' session. No widen ever removes a kill (fail-closed, matching the schedule app-kill union
+        ' that is likewise un-gated by macValid).
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
-            If Proc.SessionId = 0 Then
+            If ProcessInKillScope(iniAllSessionKill, Proc.SessionId) Then
                 Try
                     If killList.Contains(Proc.ProcessName + ".exe") Then
                         Proc.Kill()
@@ -1461,6 +1481,26 @@ Public Class Service1
     ' silently un-commit a genuinely committed block. Pure + Shared so it is unit tested.
     Friend Shared Function IsCommitted(ByVal committedText As String) As Boolean
         Return String.Equals(If(committedText, "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ' D2c: interpret the [Process] AllSession flag. "yes" (case/space-insensitive, mirroring
+    ' IsCommitted) = kill blocked apps in EVERY session, not just session 0; "no"/absent/Nothing/
+    ' anything else = the current session-0-only service kill (the notifier still covers the
+    ' interactive session). The flag is MAC-covered, so under a valid MAC this value is authentic
+    ' (the CLI wrote it at arm and it never changes during the block). It is read raw (NOT macValid-
+    ' gated): a widen-only union that can only ADD kills, so this default of "off on anything but
+    ' 'yes'" can never REMOVE a session-0 kill, and a tampered "yes" (which also freezes the block)
+    ' only ever widens. Pure + Shared so it is unit tested.
+    Friend Shared Function AllSessionKillArmed(ByVal allSessionText As String) As Boolean
+        Return String.Equals(If(allSessionText, "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ' D2c: is THIS process in the service's kill scope this tick? All-session ON => every session;
+    ' OFF => session 0 only (the byte-identical prior gate). WIDENS only - OFF can never kill fewer
+    ' than session 0, ON only ADDS the other sessions - so no error path here ever removes a kill.
+    ' Pure + Shared so the widening decision is unit-tested without enumerating live processes.
+    Friend Shared Function ProcessInKillScope(ByVal allSessionKill As Boolean, ByVal sessionId As Integer) As Boolean
+        Return allSessionKill OrElse sessionId = 0
     End Function
 
     ' ===== C3b: partner code (R1 - the FAST service-adjudicated early exit) =====
@@ -2571,6 +2611,10 @@ Public Class Service1
         ' PLAINTEXT (as-stored, like Committed - NOT decrypted); absent => "" (a v7 config
         ' read under v8 code builds a different canonical and freezes, R9). MAC-covered.
         Dim coolOffDuration As String = iniFile.GetKeyValue("CoolOff", "Duration")
+        ' D2c: the [Process] AllSession all-session-app-kill flag, plaintext-as-stored (like
+        ' Committed - NOT decrypted); absent => "" (a v8 config read under v9 code builds a
+        ' different canonical and freezes, R9). MAC-covered.
+        Dim allSessionKill As String = iniFile.GetKeyValue("Process", "AllSession")
 
         Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
@@ -2582,7 +2626,7 @@ Public Class Service1
         ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
         Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", encryptionW.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration, allSessionKill)
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads

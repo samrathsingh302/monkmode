@@ -152,6 +152,15 @@ Module Program
             Console.Error.WriteLine("Note: ignoring unrecognised option(s): " & String.Join(", ", unknownOpts) & ". Run 'monkmode help' for the flags 'block' accepts.")
         End If
 
+        ' D5 follow-up: a boolean flag given as "--flag=value" (e.g. --commit=yes) is a NO-OP under
+        ' HasFlag's bare-flag match, so it would SILENTLY arm a non-committed / session-0-only block
+        ' the user believed they had configured. UnknownOptions won't catch it (its head "--commit"
+        ' is a known flag), so warn here specifically - still never failing (proceed with it OFF).
+        Dim boolWithValue As List(Of String) = BooleanFlagsWithValue(args)
+        If boolWithValue.Count > 0 Then
+            Console.Error.WriteLine("Note: " & String.Join(", ", boolWithValue) & " is an on/off flag - pass it bare (e.g. '--commit'), not with '=value'. The '=value' form was ignored.")
+        End If
+
         Dim domains As New List(Of String)
         domains.AddRange(SplitList(GetOption(args, "--sites")))
 
@@ -304,10 +313,15 @@ Module Program
         ' C4: `--commit` arms a COMMITTED block (self-serve cooling-off disabled = the
         ' partner code + expiry are the only exits). The flag is MAC-covered from birth.
         Dim committed As Boolean = HasFlag(args, "--commit")
+        ' D2c: `--all-session-kill` widens app-kill from the current session (+ session 0) to
+        ' EVERY logged-in session - the LocalSystem service kills blocked apps in all sessions,
+        ' not just session 0. MAC-covered from birth; a widen-only policy (fail-closed: it can
+        ' only ADD kills). No-op if no apps are blocked (nothing to kill), noted below only then.
+        Dim allSessionKill As Boolean = HasFlag(args, "--all-session-kill")
         ' C3b: WriteConfig mints a fresh partner code and returns the plaintext ONCE
         ' (stored only as a salted, MAC-covered hash). Shown once below; never logged.
         ' C6b: coolOffSeconds (0 = default floor) is written MAC-covered from birth.
-        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate, committed, coolOffSeconds)
+        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate, committed, coolOffSeconds, allSessionKill)
         ' B5a: snapshot the user's current browser DoH policy BEFORE the service
         ' starts and forces it off, so teardown restores the pre-block state (no
         ' data loss). Must precede InstallAndStart - the service sets the policy in
@@ -328,6 +342,9 @@ Module Program
         Console.WriteLine("MonkMode is now active until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
+        ' D2c: confirm the all-session widening, but only when there are apps to kill (the flag is a
+        ' no-op without a blocklist - never claim an effect that won't happen).
+        If allSessionKill AndAlso apps.Count > 0 Then Console.WriteLine("  App-kill: ALL sessions (blocked apps are killed in every logged-in session, not just this one).")
         ' C6b: confirm a custom cooling-off duration when set (the ~1h floor still applies if shorter).
         If coolOffSeconds > 0 Then Console.WriteLine("  Cooling-off: " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & " (the self-serve 'unblock' wait; a ~1h minimum still applies if this is shorter).")
         Console.WriteLine("Close and reopen your browser to see the block. It cannot be removed until the timer ends.")
@@ -892,7 +909,31 @@ Module Program
     ' D5: the flags `block` accepts (for the UnknownOptions typo warning). One list, so a new block
     ' flag is added in exactly one place alongside its DoBlock handling.
     Friend Function BlockOptionNames() As String()
-        Return New String() {"--sites", "--preset", "--apps", "--app-preset", "--for", "--until", "--file", "--commit", "--cooloff"}
+        Return New String() {"--sites", "--preset", "--apps", "--app-preset", "--for", "--until", "--file", "--commit", "--cooloff", "--all-session-kill"}
+    End Function
+
+    ' D5 follow-up (pure): the BOOLEAN "--flag=value" tokens in args - an on/off flag (--commit,
+    ' --all-session-kill) written with an "=value" (e.g. "--commit=yes"), which HasFlag's bare-flag
+    ' match silently IGNORES, leaving the user believing they set it. Returned so the caller WARNS
+    ' (never fails: the block proceeds with the flag OFF, HasFlag's default). Matches the "--flag"
+    ' head against the known boolean set, case-insensitive. Null-safe; Friend so it is unit-tested.
+    Friend Function BooleanFlagsWithValue(ByVal args As String()) As List(Of String)
+        Dim result As New List(Of String)
+        If args Is Nothing Then Return result
+        Dim boolNames As String() = {"--commit", "--all-session-kill"}
+        For Each a As String In args
+            If a Is Nothing Then Continue For
+            Dim eq As Integer = a.IndexOf("="c)
+            If eq < 0 Then Continue For
+            Dim head As String = a.Substring(0, eq)
+            For Each k As String In boolNames
+                If String.Equals(head, k, StringComparison.OrdinalIgnoreCase) Then
+                    result.Add(head)
+                    Exit For
+                End If
+            Next
+        Next
+        Return result
     End Function
 
     Private Sub PrintUsage()
@@ -900,7 +941,7 @@ Module Program
         Console.WriteLine("")
         Console.WriteLine("Usage:")
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
-        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h]")
+        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h] [--all-session-kill]")
         Console.WriteLine("  monkmode status  (an active block + time left + how to exit / a pending cooling-off, or the armed schedule's live window state)")
         Console.WriteLine("  monkmode stats   (read-only summary of your block history: counts, total focus time, longest block)")
         Console.WriteLine("  monkmode add --sites c.com")
@@ -919,6 +960,7 @@ Module Program
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
         Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
         Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")
+        Console.WriteLine("  - --all-session-kill kills blocked apps in EVERY logged-in Windows session, not just the one you ran 'block' in (useful if you fast-user-switch to a second account to dodge the kill). No effect unless you block apps.")
         Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM, same-day only). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")

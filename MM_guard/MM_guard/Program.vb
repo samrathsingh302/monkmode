@@ -247,6 +247,10 @@ Module Program
         ' PLAINTEXT (as-stored, like Committed - NOT decrypted); absent => "" (a v7 config
         ' read under v8 code builds a different canonical and freezes, R9). MAC-covered.
         Dim coolOffDuration As String = ini.GetKeyValue("CoolOff", "Duration")
+        ' D2c: the [Process] AllSession all-session-app-kill flag, plaintext-as-stored (like
+        ' Committed - NOT decrypted); absent => "" (a v8 config read under v9 code builds a
+        ' different canonical and freezes, R9). MAC-covered.
+        Dim allSessionKill As String = ini.GetKeyValue("Process", "AllSession")
 
         Dim untilPlain As String = If(untilEnc = "", "", enc.DecryptData(untilEnc))
         Dim highWaterPlain As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
@@ -258,7 +262,7 @@ Module Program
         ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
         Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", enc.DecryptData(scheduleActiveEnc))
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration, allSessionKill)
     End Function
 
     ' B7 live MAC gate (DPAPI seam - smoke-tested). DPAPI-unprotect [Integrity]
