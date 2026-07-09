@@ -12,16 +12,70 @@ blocker (GPLv3): a 2011 VB.NET 2.0 WinForms codebase that no longer built,
 modernised to .NET 8, converted to a CLI, threat-modelled, tested and hardened.
 
 ```
+monkmode setup --partner "Alex (alex@example.com)"   # required once, first run
 monkmode block --sites reddit.com,youtube.com --for 2h30m
-monkmode block --sites x.com --apps chrome.exe --until "2026-06-11 18:00"
-monkmode block --file blocklist.txt --for 8h
+monkmode block --preset social,video --apps chrome.exe --until "2026-06-11 18:00"
+monkmode block --file blocklist.txt --for 8h --commit
+monkmode schedule --sites x.com --windows "Mon-Fri 09:00-17:00"
 monkmode status
-monkmode add --sites x.com        # an active block can only ever grow
+monkmode stats
+monkmode add --sites x.com          # an active block can only ever grow
+monkmode unblock                    # start the cooling-off exit (delayed)
+monkmode unblock --code <CODE>      # partner code: lifts within ~10s
 monkmode help
 ```
 
 `--for` accepts `45` (minutes), `90m`, `2h`, `1d12h`. Once a block starts it
 cannot be shortened or replaced until it expires; `add` can only add more sites.
+
+You block **sites** (hosts-level, machine-wide) and **apps** (killed on sight),
+named explicitly, from a `--file` list, or via a named **preset** category —
+`social`, `video`, `news`, `shopping`, `adult` for sites; `games`, `chat` for
+apps. `monkmode setup` can record **account defaults** (a default blocklist,
+app list and cooling-off duration) that a bare `monkmode block` inherits. You
+can arm recurring **schedules** (wall-clock windows enforced at the same
+strength as a manual block), review history with `monkmode stats`, and widen
+app-kill to every logged-in session with `--all-session-kill`. `monkmode
+status` shows the live block, time left and the current exit path; the notifier
+raises tray toasts at block start, when a cooling-off begins, and at expiry.
+
+## Exits — how a block ends (and what that honestly protects against)
+
+A block is deliberately *hard to leave on impulse*, not impossible to leave.
+There are three ordinary ways out, in increasing order of friction:
+
+- **Wait for the timer.** A block always lifts itself at its end time. Expiry
+  is decided off a monotonic high-water mark (see below), so rolling the clock
+  forward can't bring it early.
+- **Cooling-off (self-serve, but delayed).** `monkmode unblock` does *not* lift
+  the block — it *requests* a lift. The block stays fully enforced while the
+  service counts down a mandatory wait (~1 hour of active machine time by
+  default; raise it with `--cooloff`, never shorten it), then lifts itself.
+  `monkmode unblock --cancel` aborts a pending wait. There is no self-serve
+  *instant* exit — that is the point.
+- **Partner accountability code (immediate).** Every block mints a one-time
+  code, shown once at block start and stored only as a salted, MAC-covered
+  hash. Relay it to an accountability partner. `monkmode unblock --code <CODE>`
+  is verified by the *service* (not the CLI) and lifts within ~10 s. A fresh
+  code is minted per block; a wrong, blank or tampered code leaves the block
+  standing.
+
+A **committed** block (`monkmode block --commit`) disables the self-serve
+cooling-off, leaving the partner code (or the timer) as the only early way out
+— use it when you mean it.
+
+**What this does *not* protect against — the honest ceiling.** You keep
+Administrator rights on your own single machine, so MonkMode is *impulse-proof,
+not admin-proof*. A deliberate, explicitly-flagged escape hatch —
+`monkmode unblock --force` — always tears a block down and removes the service.
+It is retained on purpose as brick-insurance: a fail-closed bug or a dead DPAPI
+store must never be able to trap the machine permanently, so the guaranteed way
+out is kept and documented rather than hidden. And an offline / WinRE /
+determined-admin-with-time attack (B10) always wins eventually. MonkMode aims to
+defeat casual-to-determined bypasses; it does **not** claim to be unbreakable,
+and there is deliberately no BitLocker / BIOS-lock / non-admin-account layer in
+this codebase. See the full bypass table (B1–B11) and the honest ceiling in
+`ARCHITECTURE.md`.
 
 ## How it works
 
@@ -31,7 +85,7 @@ Four cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
 |---|---|---|---|
 | `MonkMode/` | `monkmode.exe` | User (elevated) | CLI. Parses commands, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
 | `MonkMode_srv/` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcement core. Locks the hosts file, restores it if tampered with, kills blocked processes, keeps the guardian alive, lifts the block only when the timer genuinely expires. `CanStop=False`. |
-| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service, shows a tray toast when the block ends. |
+| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service (it no longer rewrites the end time), and shows tray toasts at block start, when a cooling-off begins, and when the block ends. |
 | `MM_guard/` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Watchdog guardian. Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
 A block is hosts-file DNS sinkholing (`127.0.0.1` entries below a
@@ -99,23 +153,32 @@ point, not a product:
   inherited popup window and the weak user-session watchdog twin (later
   reinstated properly as the SYSTEM-session guardian).
 - **Verified live, not just compiled:** an elevated end-to-end smoke test
-  (block → enforce → tamper-repair → watchdog kill drills → clock drill →
-  auto-expire → clean teardown), grown as each hardening layer landed, passes
-  **71/0** — including force-killing the service, the guardian and the notifier
-  in turn, disabling SCM recovery to prove the guardian alone restores the
-  service, a forward-clock drill, and the browser-DoH self-heal. Its first
-  incarnation exposed three real bugs the
-  compiler couldn't: `0.0.0.0` sinkholes that
-  Windows' resolver silently ignores (now `127.0.0.1`), a persistent write
+  (block → enforce → tamper-repair → watchdog kill drills → auto-expire →
+  clean teardown), grown as each hardening layer landed, passes **69/0** on the
+  current build (09/07/2026), and a dedicated config-integrity fail-closed drill
+  passes **10/0** — together covering force-killing the service, the guardian
+  and the notifier in turn, disabling SCM recovery to prove the guardian alone
+  restores the service, the browser-DoH self-heal, and a corrupted MAC that
+  keeps the block standing rather than lifting it. The accountability core was
+  exercised live in the same sitting (cooling-off can't be skipped, a wrong code
+  doesn't lift, a good code does, a committed block refuses self-serve, a
+  scheduled window auto-starts and tears down on `--clear`). The forward /
+  backward clock drills are unit-pinned; their live drill is deferred, since
+  manipulating the system clock is unsafe to run unattended. The smoke's first
+  incarnation exposed three real bugs the compiler couldn't: `0.0.0.0` sinkholes
+  that Windows' resolver silently ignores (now `127.0.0.1`), a persistent write
   handle on the hosts file that stopped the DNS client re-reading it (any
   `ipconfig /flushdns` un-blocked everything), and a notifier that exited
   instantly due to a WinForms entry-point subtlety.
-- **Tested where it counts:** an xunit suite (**345 tests**) covers the dangerous
+- **Tested where it counts:** an xunit suite (**938 tests**) covers the dangerous
   string logic (hosts-file marker stripping and repair, culture-safe datetime
   round-trips under de-DE/fr-FR/en-US/en-GB locales, crypto round-trips and
   cross-project ciphertext equivalence, the config-integrity MAC and its
   four-project canonical parity, the monotonic clock gates, and the browser-DoH
-  policy decisions). The tests are deliberately written in **C#**: VB's
+  policy decisions), plus the accountability core added since (the cooling-off
+  and partner-code lifecycle and their fail-closed gates, schedule parsing and
+  window→duration conversion, preset expansion, and the separate stats file).
+  The tests are deliberately written in **C#**: VB's
   case-insensitive namespaces merge the `MonkMode` and `monkmode` namespaces
   and make the duplicated types ambiguous. Pure unit tests — nothing touches
   the real hosts file, registry or SCM, so they run in CI.
@@ -144,12 +207,20 @@ point, not a product:
   installs/starts the service via the Service Control Manager). Requires the
   .NET 8 desktop runtime.
 
-## Removing the service (development only)
+## Removing a block or the service
 
-Run as Administrator: `sc delete MONKMODE`
+The intended way out of an active block is one of the exits above — cooling-off,
+the partner code, or waiting for the timer. While a block is active the service
+carries a deny-DELETE ACE, so `sc delete MONKMODE` is *refused* (B6); that is by
+design, not a bug.
 
-Note: this removal path is exactly the kind of bypass the Phase 3 hardening is
-meant to close. Documented only because it's needed in development.
+The deliberate escape hatch is `monkmode unblock --force` (run as
+Administrator): it disables SCM recovery, stops the watchdog pair, removes the
+deny-DELETE ACE, deletes the service, and strips only the MonkMode hosts marker
+block (your own hosts content is preserved). It is the honest, documented
+removal for a fail-closed corner or a determined admin — see the honest ceiling
+above. When no block is active the service is idle and `sc delete MONKMODE`
+removes it normally.
 
 ## Upstream & licence
 
