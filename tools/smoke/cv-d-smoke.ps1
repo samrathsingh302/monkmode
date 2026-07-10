@@ -70,11 +70,34 @@ function WaitSvc([string]$want, [int]$sec) {
   while ((Get-Date) -lt $u) { if ((SvcState) -eq $want) { return $true }; Start-Sleep -Milliseconds 500 }
   return ((SvcState) -eq $want)
 }
-# Arm a block; return its stdout lines. Waits for the service to come up.
-function Arm([string]$argline) {
-  $out = & $monk block @($argline -split ' ') 2>&1 | ForEach-Object { "$_" }
+# PIPE-WEDGE WARNING (belt-and-braces): NEVER pipe/capture a block-arm's stdout on an
+# OLD dist that predates the P2 notifier handle-inheritance fix. There, the CLI's
+# RegisterAndLaunchNotifier spawns mm_notify.exe so it INHERITS the CLI's stdout, so any
+# PowerShell pipeline reading that stdout (| ForEach-Object, | Out-Null on a capture, a
+# `$x = & monk block` assignment) blocks until the notifier exits at block EXPIRY - every
+# later check then runs post-expiry (this voided drills on 2026-07-10 + retro-explains the
+# 09/07 cv-d spurious FAILs). Blocker.RegisterAndLaunchNotifier fixed the ROOT cause in
+# source (10/07/2026: UseShellExecute=True -> no handle inheritance -> pipe closes on CLI
+# exit), so a CURRENT dist doesn't wedge at all; these helpers stay pipe-free anyway so a
+# stale smoke build can never re-wedge the script. Mirrors clock-drill-test.ps1 (8db2fcb).
+
+# Arm a block WITHOUT reading its stdout (bare, exactly like clock-drill-test.ps1): the
+# arm's output flows to the console, never through a PS pipeline, so it cannot wedge on any
+# build. Use for arms whose output we don't parse. Waits for the service to come up.
+function ArmQuiet([string]$argline) {
+  & $monk block @($argline -split ' ')   # bare: stdout -> console, no pipe (no wedge)
   [void](WaitSvc 'Running' 60)   # poll, not a fixed sleep: install+start races StartPending under load
   Start-Sleep -Seconds 2         # small settle for the hosts write + config flush
+}
+# Arm a block AND return its stdout lines - ONLY for CV1/CV2, which must parse the one-time
+# accountability code minted on stdout (ParseCode). This one unavoidably captures stdout, so
+# it relies on the P2 source fix (current dist) to not wedge; on a pre-fix dist these two
+# arms would still stall until expiry, so run CV1/CV2 against a CURRENT build. Waits for the
+# service to come up.
+function Arm([string]$argline) {
+  $out = & $monk block @($argline -split ' ') 2>&1 | ForEach-Object { "$_" }
+  [void](WaitSvc 'Running' 60)
+  Start-Sleep -Seconds 2
   return $out
 }
 # The one-time accountability code is printed on the line after the "Emergency
@@ -141,7 +164,7 @@ try {
 
   # --- D1a: --preset expands to its domains -----------------------------------
   Write-Host "`n=== D1a: --preset social expands to its domains ===" -ForegroundColor Cyan
-  Arm "--preset social --for $FOR" | Out-Null
+  ArmQuiet "--preset social --for $FOR"   # pipe-free: output unused (see PIPE-WEDGE WARNING)
   Check "D1a social preset armed (service running)" ((SvcState) -eq 'Running')
   Check "D1a preset expanded: reddit.com in hosts"    (HostsHas '127\.0\.0\.1\s+reddit\.com')
   Check "D1a preset expanded: facebook.com in hosts"  (HostsHas '127\.0\.0\.1\s+facebook\.com')
@@ -149,7 +172,7 @@ try {
 
   # --- D2a: --app-preset expands to its apps ----------------------------------
   Write-Host "`n=== D2a: --app-preset games expands to its apps ===" -ForegroundColor Cyan
-  Arm "--app-preset games --for $FOR" | Out-Null
+  ArmQuiet "--app-preset games --for $FOR"   # pipe-free: output unused (see PIPE-WEDGE WARNING)
   Check "D2a games app-preset armed (service running)" ((SvcState) -eq 'Running')
   $stApps = (& $monk status 2>&1 | ForEach-Object { "$_" }) -join "`n"
   Check "D2a app-preset expanded: steam.exe in status/config" ($stApps -match 'steam\.exe' -or (IniHas 'steam\.exe'))
@@ -158,7 +181,7 @@ try {
   # --- D1b/D2b: account defaults inherit when a block names no source ----------
   Write-Host "`n=== D1b/D2b: default site + app lists inherit (both dimensions) ===" -ForegroundColor Cyan
   & $monk setup --partner 'Smoke Tester' --default-sites inherit-test.example --default-apps mmsmoke_dfl.exe 2>&1 | Out-Null
-  Arm "--for $FOR" | Out-Null    # NO --sites/--apps: must inherit both defaults
+  ArmQuiet "--for $FOR"    # NO --sites/--apps: must inherit both defaults; pipe-free (output unused)
   Check "D1b default SITE inherited (inherit-test.example in hosts)" (HostsHas '127\.0\.0\.1\s+inherit-test\.example')
   $stDfl = (& $monk status 2>&1 | ForEach-Object { "$_" }) -join "`n"
   Check "D2b default APP inherited (mmsmoke_dfl.exe in status/config)" ($stDfl -match 'mmsmoke_dfl\.exe' -or (IniHas 'mmsmoke_dfl\.exe'))
@@ -188,7 +211,7 @@ try {
   Start-Process -FilePath $testExe -ArgumentList '-t','127.0.0.1' -WindowStyle Hidden | Out-Null
   Start-Sleep -Seconds 1
   Check "D2c test app (mmsmoke_testapp.exe) running pre-block" ($null -ne (Get-Process mmsmoke_testapp -ErrorAction SilentlyContinue))
-  Arm "--apps mmsmoke_testapp.exe --all-session-kill --for $FOR" | Out-Null
+  ArmQuiet "--apps mmsmoke_testapp.exe --all-session-kill --for $FOR"   # pipe-free: output unused (see PIPE-WEDGE WARNING)
   Check "D2c block armed (service running)" ((SvcState) -eq 'Running')
   Check "D2c v9 config carries AllSession=yes (MAC-covered)" (IniHas '(?im)^\s*AllSession\s*=\s*yes')
   $killed = $false

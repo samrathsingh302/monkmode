@@ -794,7 +794,27 @@ Module Blocker
         Catch
         End Try
         Try
-            Process.Start(notifier)
+            ' P2: launch the notifier WITHOUT inheriting the CLI's stdio handles.
+            ' A bare Process.Start(path) defaults to UseShellExecute=False on .NET,
+            ' which hands our stdout/stderr to the child; the notifier is a long-lived
+            ' user-session tray agent, so ANY caller that PIPES or CAPTURES `monkmode
+            ' block` output (| tee, $x = ..., CI) then blocks until the notifier exits
+            ' at block EXPIRY, because the inherited write-handle keeps the pipe open
+            ' (proven live 2026-07-10 - voided two clock drills; retro-explains the
+            ' 09/07 cv-d spurious FAILs). UseShellExecute=True launches the GUI notifier
+            ' via ShellExecute with NO handle inheritance, so the pipe closes the moment
+            ' the CLI exits. It still lands in the SAME interactive session (not the
+            ' guardian's cross-session problem, which uses CreateProcessAsUser with
+            ' bInheritHandles=False). WindowStyle Hidden avoids any flash (it hides
+            ' itself regardless). Best-effort: the notifier carries ZERO enforcement
+            ' authority, so a launch failure must NEVER fail the arm - the Catch keeps
+            ' the block arming exactly as before (matching the silent-swallow style of
+            ' the Run-key write above).
+            Dim psi As New ProcessStartInfo(notifier) With {
+                .UseShellExecute = True,
+                .WindowStyle = ProcessWindowStyle.Hidden
+            }
+            Process.Start(psi)
         Catch
         End Try
     End Sub

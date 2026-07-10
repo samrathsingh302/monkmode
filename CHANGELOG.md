@@ -14,9 +14,6 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 Queued, not yet landed (see `vault/dev/monk-mode/tasks.md` for the live queue):
 
-- **P2 — notifier stdout-handle fix.** `mm_notify` inherits the CLI's stdout, so
-  any piped/captured `block` arm wedges until the block expires; the fix is a
-  handle-inheritance change so block-arm can be safely scripted.
 - **D4b — persistent notifications.** WinRT Action-Center toasts to replace the
   transient balloons, which fired but were not reliably seen (found in the
   10/07/2026 watched sitting).
@@ -126,6 +123,12 @@ yet live-smoke-tested and the Samrath-gated release steps (H3/H4) remain.
 - Removed a needless zero-byte hosts window on default-block write.
 - Three latent clock-drill script defects found in the 10/07/2026 watched sitting
   (script-only; enforcement was correct throughout).
+- **P2 — notifier stdout-handle wedge.** The CLI launched `mm_notify` so it
+  inherited the CLI's stdout, so any piped or captured `block` arm (`| tee`,
+  `$x = ...`, CI) blocked until the block expired. The notifier is now launched
+  detached (no handle inheritance), so a `block` arm can be safely scripted;
+  `cv-d-smoke.ps1` was also made pipe-free as belt-and-braces. Fixed 10/07/2026,
+  not yet live-verified (the fix's live proof rides the next elevated smoke).
 
 ### Security
 

@@ -501,13 +501,15 @@ service and guardian processes have exited.
 These are real, live-observed footguns — worth internalising before you script
 anything.
 
-- **Never pipe or capture `monkmode block` output.** The notifier
-  (`mm_notify`) inherits the CLI's stdout, so redirecting or capturing the
+- **Never pipe or capture `monkmode block` output.** Historically the notifier
+  (`mm_notify`) inherited the CLI's stdout, so redirecting or capturing the
   output of `monkmode block` (`| tee`, `> log.txt`, `$(...)`, backticks, a
-  captured subprocess) leaves the calling shell **wedged until the block
+  captured subprocess) left the calling shell **wedged until the block
   expires**. Run `block` with its output going straight to the terminal.
-  (Live-proven 10/07/2026; a proper fix is pending as P2.) Note that "expiry" of
-  a block leaves the service *Stopped but still installed*, not gone.
+  (Live-proven 10/07/2026. **P2 — fixed in source 10/07/2026** by launching the
+  notifier detached with no handle inheritance, but **not yet live-verified**, so
+  keep avoiding piped/captured arms until a smoke proves the fix.) Note that
+  "expiry" of a block leaves the service *Stopped but still installed*, not gone.
 
 - **`--for` has a strict >60-second floor.** A block must end at least a minute
   in the future, so **`--for 1` is refused** ("The block must end at least a

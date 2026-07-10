@@ -367,12 +367,17 @@ before scripting or running a smoke.
 
 ### 4.1 Never pipe or capture `monkmode block` output (pipe-wedge)
 
-The notifier (`mm_notify`) inherits the CLI's stdout, so **redirecting or
-capturing** the output of `monkmode block` (`| tee`, `> log.txt`, `$(...)`,
-backticks, a captured subprocess) leaves the calling shell **wedged until the
-block expires** [E28]. Run `block` with its output going straight to the
-terminal — never through a pipe or capture. This is live-proven (10/07/2026); a
-proper fix is pending as **P2**. Two corollaries for diagnosis:
+Historically the notifier (`mm_notify`) inherited the CLI's stdout, so
+**redirecting or capturing** the output of `monkmode block` (`| tee`,
+`> log.txt`, `$(...)`, backticks, a captured subprocess) left the calling shell
+**wedged until the block expires** [E28]. Run `block` with its output going
+straight to the terminal — never through a pipe or capture. This is live-proven
+(10/07/2026). **P2 is now fixed in source (10/07/2026)** — the notifier is
+launched detached (`UseShellExecute=True`, no handle inheritance) so a `block`
+arm can be safely scripted — **but the fix is not yet live-verified**, so keep
+avoiding piped/captured arms until the next elevated smoke proves it (and note an
+older `dist` build under smoke may still carry the wedge). Two corollaries for
+diagnosis:
 
 - To poll for a lift, watch state (service not-Running **or** hosts marker gone,
   per 2.1/2.3) — **never** a captured block-arm.
