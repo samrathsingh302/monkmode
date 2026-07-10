@@ -55,7 +55,7 @@ $cleanup = Join-Path $PSScriptRoot 'cleanup.ps1'
 $pass = 0; $fail = 0
 function Check($n,$c){ if($c){Write-Host "  [PASS] $n" -ForegroundColor Green;$script:pass++}else{Write-Host "  [FAIL] $n" -ForegroundColor Red;$script:fail++} }
 function SvcState { $s=Get-Service MONKMODE -ErrorAction SilentlyContinue; if($s){$s.Status}else{'gone'} }
-function HostsBlocked { (try{Get-Content $hosts -Raw}catch{''}) -match '#### MonkMode Entries ####' }
+function HostsBlocked { $(try{Get-Content $hosts -Raw}catch{''}) -match '#### MonkMode Entries ####' }
 function ForceDown { & $monk unblock --force 2>&1|Out-Null; $u=(Get-Date).AddSeconds(25); while((Get-Date)-lt $u -and (SvcState)-ne 'gone'){Start-Sleep -Milliseconds 500}; if((SvcState)-ne 'gone'){& powershell -ExecutionPolicy Bypass -File $cleanup -Dist $Dist 2>&1|Out-Null} }
 # True clock offset (seconds) vs an external HTTP Date header, WITHOUT setting
 # the clock. $null if unreachable. NB: uses an 8s-bounded HTTP HEAD, NOT
@@ -100,7 +100,10 @@ Write-Host "  probe held - proceeding with the drills." -ForegroundColor Green
 try {
   # --- B4: forward jump past Until must NOT lift ------------------------------
   Write-Host "`n=== B4: forward clock jump past Until must NOT lift ===" -ForegroundColor Cyan
-  & $monk block --sites example.com --for 3 2>&1|Out-Null; Start-Sleep -Seconds 3
+  # NEVER pipe/suppress an arm: the CLI's RegisterAndLaunchNotifier spawns mm_notify.exe,
+  # which INHERITS stdout - a PS pipeline (|Out-Null, capture) then blocks until the
+  # notifier exits at block EXPIRY, so every check runs post-expiry (2026-07-10 void drills).
+  & $monk block --sites example.com --for 3; Start-Sleep -Seconds 3
   Check "B4 block armed" ((SvcState) -eq 'Running')
   Start-Sleep -Seconds 12   # let HighWater seed on real ticks
   $anchor=Get-Date; $sw=[Diagnostics.Stopwatch]::StartNew(); $survived=$false
@@ -118,23 +121,28 @@ try {
   # --- B1c: backward roll must NOT over-extend -------------------------------
   if (-not $SkipBackward) {
     Write-Host "`n=== B1c: backward clock roll must NOT over-extend the block ===" -ForegroundColor Cyan
-    & $monk block --sites example.com --for 1 2>&1|Out-Null; Start-Sleep -Seconds 3
-    Check "B1c block armed (--for 1)" ((SvcState) -eq 'Running')
+    # --for 2, not 1: the CLI enforces a strict >60s-in-the-future floor (Program.vb
+    # 'must end at least a minute in the future'), so a 1-minute block always refuses.
+    & $monk block --sites example.com --for 2; Start-Sleep -Seconds 3   # unpiped - see B4 note
+    Check "B1c block armed (--for 2)" ((SvcState) -eq 'Running')
     $anchor=Get-Date; $sw=[Diagnostics.Stopwatch]::StartNew(); $liftedAt=-1
     try {
       Start-Sleep -Seconds 8                                   # a little real elapsed first
       Set-Date -Date $anchor.AddMinutes(-30) -ErrorAction Stop|Out-Null   # roll BACK 30m mid-block
-      # wait on REAL monotonic time (immune to the wall roll) up to ~95s; the
-      # block's real duration is 60s, so a correct fix lifts by ~60-75s real.
-      while ($sw.Elapsed.TotalSeconds -lt 95) {
-        if ((SvcState) -eq 'gone') { $liftedAt = [int]$sw.Elapsed.TotalSeconds; break }
+      # wait on REAL monotonic time (immune to the wall roll) up to ~160s; the
+      # block's real duration is 120s, so a correct fix lifts by ~120-140s real.
+      # Lift signal: on GENUINE expiry the service goes Stopped but stays INSTALLED
+      # (it is only deleted by unblock --force / teardown - observed live 2026-07-10),
+      # and the hosts marker block is removed. 'gone' would never fire here.
+      while ($sw.Elapsed.TotalSeconds -lt 160) {
+        if ((SvcState) -ne 'Running' -or -not (HostsBlocked)) { $liftedAt = [int]$sw.Elapsed.TotalSeconds; break }
         Start-Sleep -Milliseconds 1000
       }
     } finally {
       $sw.Stop(); Set-Date -Date $anchor.AddSeconds([math]::Round($sw.Elapsed.TotalSeconds)) -ErrorAction SilentlyContinue|Out-Null
     }
-    Write-Host ("    block lifted at ~{0}s real (real duration 60s; over-extend bug would exceed 90s)" -f $liftedAt)
-    Check "B1c block lifted at its REAL ~60s duration despite the -30m roll (not frozen open)" ($liftedAt -ge 55 -and $liftedAt -le 90)
+    Write-Host ("    block lifted at ~{0}s real (real duration 120s; over-extend bug would exceed 150s)" -f $liftedAt)
+    Check "B1c block lifted at its REAL ~120s duration despite the -30m roll (not frozen open)" ($liftedAt -ge 115 -and $liftedAt -le 150)
     Check "B1c clock restored after drill (within 5s of NTP)" ([math]::Abs(([double](NtpOffset))) -lt 5)
     ForceDown
   }
