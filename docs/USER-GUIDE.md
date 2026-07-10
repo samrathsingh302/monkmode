@@ -46,20 +46,49 @@ Administrator.").
 
 ## 1. Install
 
-There is **no installer yet**. Today, installing means: build the four
-executables into one folder, then run the CLI from that folder as
-Administrator. The first `block`/`schedule` you run *is* the install — it
-registers and starts the `MONKMODE` service.
+The supported install is the `tools\install.ps1` script (slice H1): it publishes a
+self-contained build and copies the four executables to `C:\Program Files\MonkMode\`,
+then adds that folder to the machine `PATH` so `monkmode` works from any elevated
+prompt. Program Files is admin-ACL'd, which raises the tamper bar over a
+user-writable folder. **Installing files does not arm anything** — the first
+`block`/`schedule` you run *is* the enforcement install, registering and starting the
+`MONKMODE` service.
 
-> **Placeholder (slice H1, not yet landed).** A self-contained build plus a
-> Program Files install script is planned and will supersede the manual folder
-> copying described here. Until then, use the `dist\` folder produced by
-> `build-dist.ps1` directly.
+### 1a. Recommended: the install script
 
-### 1a. Build from source
+From an **elevated** PowerShell prompt, in the repo root:
 
-The .NET 8 SDK is user-scoped on this machine (not on `PATH`), so call it by its
-full path:
+```
+powershell -ExecutionPolicy Bypass -File tools\install.ps1
+```
+
+That publishes a self-contained `win-x64` payload (bundling the .NET 8 runtime, so
+the target machine needs no .NET installed), copies it to `C:\Program Files\MonkMode\`,
+and adds that folder to the machine `PATH`. Open a **new** elevated prompt afterwards
+so the updated `PATH` is picked up, then continue at Section 2 (`monkmode setup`).
+
+What the installer deliberately does **not** do:
+
+- It does **not** install or start the service — your first `monkmode block` does that.
+- It does **not** create shortcuts (MonkMode is a CLI, no GUI).
+- It has **no uninstaller yet** (slice H2). To remove MonkMode, follow the manual
+  removal in Section 9 / `docs\RUNBOOK.md` §3: remove the service first, then delete
+  `C:\Program Files\MonkMode\`.
+
+The installer **refuses to run while a `MONKMODE` service already exists** (installed
+or running) — never upgrade the binaries across an armed block, or a MAC'd config can
+freeze fail-closed (the forward-migration freeze; see Section 10). Let any live block
+end and remove the service first, then re-run the installer. Re-running it on a machine
+with no `MONKMODE` service upgrades in place, and the `PATH` entry is never duplicated.
+
+Options: `-PayloadDir <folder>` installs a pre-built payload instead of publishing;
+`-InstallDir <folder>` overrides the target location.
+
+### 1b. Build from source (manual / dev)
+
+If you would rather run from a plain `dist\` folder (the dev workflow, no Program Files
+copy), build and assemble it yourself. The .NET 8 SDK is user-scoped on this machine
+(not on `PATH`), so call it by its full path:
 
 ```
 C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release
@@ -71,7 +100,7 @@ Run the tests the same way:
 C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln -c Release
 ```
 
-### 1b. Assemble the runnable folder (`dist\`)
+### 1c. Assemble the runnable folder (`dist\`)
 
 All four executables must live together in one folder, alongside
 `monkmode_settings.ini` (which is created at block time). `build-dist.ps1`
@@ -94,7 +123,7 @@ The script rebuilds `dist\` from scratch each run (it deletes and recreates the
 folder). **Always rebuild `dist\` before any live/smoke run** — a stale `dist\`
 missing `mm_guard.exe` is the classic cause of a half-broken block.
 
-### 1c. First run (elevated)
+### 1d. First run (elevated)
 
 Open an **elevated** command prompt, `cd` into `dist\`, and run `setup` once
 (Section 2), then start a block (Section 3). For example:
@@ -472,7 +501,7 @@ anything.
 
 - **Always rebuild `dist\` before a live run.** A stale `dist\` (built before the
   guardian existed, or missing an exe) produces a half-broken block. See
-  Section 1b.
+  Section 1c.
 
 ---
 

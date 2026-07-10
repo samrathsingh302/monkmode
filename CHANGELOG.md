@@ -14,7 +14,6 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 Queued, not yet landed (see `vault/dev/monk-mode/tasks.md` for the live queue):
 
-- **H1 — installer.** Self-contained install script to `C:\Program Files\MonkMode\`.
 - **H2 — uninstall UX.** A clean, honest teardown path.
 - **P2 — notifier stdout-handle fix.** `mm_notify` inherits the CLI's stdout, so
   any piped/captured `block` arm wedges until the block expires; the fix is a
@@ -74,6 +73,12 @@ and the GPL-compliance polish (G2/G3) have not yet landed.
   live schedule state, plus an input-typo warning and expanded help.
 - **Config shadow backup (R8).** A MAC-covered shadow copy refreshed on legitimate
   writes; a corrupt or short primary is restored from it rather than freezing.
+- **File installer (H1).** A self-contained `win-x64` publish pipeline
+  (`build-dist.ps1 -SelfContained`, bundling the .NET 8 runtime) and an elevated
+  `install.ps1` that copies the four executables to `C:\Program Files\MonkMode\` (admin-ACL'd,
+  raising the tamper bar) and adds them to the machine `PATH` idempotently. It installs
+  files only — the first `block` still registers the service — and refuses to overwrite while
+  a `MONKMODE` service exists (never upgrade across a block).
 
 ### Changed
 

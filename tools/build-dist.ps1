@@ -22,8 +22,28 @@
 # (watchdog guardian) all live together, alongside monkmode_settings.ini
 # once a block is started.
 #
-# Usage:  powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
+# The four exes find each other by directory (AppContext.BaseDirectory -
+# MonkMode\Blocker.vb:109-111, MM_guard\...\Program.vb:218/317), so the single-
+# folder layout is a hard runtime contract, not just tidiness.
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
+#     Framework-dependent build (needs the .NET 8 desktop runtime on the target
+#     machine). Smaller output; the default.
+#
+#   powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1 -SelfContained
+#     Self-contained win-x64 build (bundles the .NET 8 runtime - runs on a machine
+#     with NO .NET installed). Larger output; this is the payload tools\install.ps1
+#     copies to C:\Program Files\MonkMode\ (slice H1).
+#
 # Then (from an elevated prompt):  dist\monkmode.exe block --sites reddit.com --for 2h
+
+param(
+    # Bundle the .NET 8 runtime into dist\ (self-contained win-x64) so the target
+    # machine needs no .NET installed. Off = framework-dependent (the original
+    # behaviour), which needs the .NET 8 desktop runtime present.
+    [switch]$SelfContained
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -47,11 +67,24 @@ $projects = @(
     'MM_guard\MM_guard\MM_guard.vbproj'
 )
 
+# Common publish args for all four projects. Self-contained adds the win-x64 RID
+# and bundles the runtime; all four still land in the SAME $dist folder (they share
+# one copy of the runtime DLLs - identical files, so overwriting across the four
+# publishes is harmless, and the four exes keep finding each other by directory).
+$publishArgs = @('-c', 'Release', '-o', $dist, '--nologo')
+if ($SelfContained) {
+    $publishArgs += @('-r', 'win-x64', '--self-contained', 'true')
+}
+
 foreach ($p in $projects) {
-    & $dotnet publish (Join-Path $root $p) -c Release -o $dist --nologo
+    & $dotnet publish (Join-Path $root $p) @publishArgs
     if ($LASTEXITCODE -ne 0) { throw "publish failed for $p" }
 }
 
 Write-Host ""
-Write-Host "Deployed to: $dist"
+if ($SelfContained) {
+    Write-Host "Deployed (self-contained win-x64) to: $dist"
+} else {
+    Write-Host "Deployed (framework-dependent) to: $dist"
+}
 Get-ChildItem $dist -Filter *.exe | Select-Object -ExpandProperty Name
