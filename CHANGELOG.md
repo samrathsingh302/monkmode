@@ -14,10 +14,6 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 Queued, not yet landed (see `vault/dev/monk-mode/tasks.md` for the live queue):
 
-- **G2 / G3 — GPLv3 compliance polish.** Resolve the bundled `IniFileVb.vb`
-  upstream-licence question (third-party INI parser, likely CPOL and
-  GPL-incompatible: verify, note in a `NOTICE`, or clean-room-replace) and finish
-  the redistribution notices.
 - **H1 — installer.** Self-contained install script to `C:\Program Files\MonkMode\`.
 - **H2 — uninstall UX.** A clean, honest teardown path.
 - **P2 — notifier stdout-handle fix.** `mm_notify` inherits the CLI's stdout, so
@@ -94,6 +90,13 @@ and the GPL-compliance polish (G2/G3) have not yet landed.
   code (immediate); teardown is service-driven. `unblock --force` is **retained as
   unconditional brick-insurance** (the reset hatch used in live smokes) — this is
   the shipped reality and is documented as such.
+- **Clean-room INI parser (GPL compliance).** Replaced the inherited third-party
+  INI reader/writer (`IniFileVb.vb`, by Ludvik Jerabek, CPOL 1.02 — a non-free,
+  GPL-incompatible licence per the FSF) with a clean-room GPLv3 implementation
+  (`IniFile.vb`) across all four assemblies, with 22 new parser and round-trip
+  tests. The source tree now contains no third-party code; copyright, fork
+  acknowledgement and the removal history are recorded in `NOTICE`, with a
+  source-availability statement in the README.
 
 ### Fixed
 
@@ -138,7 +141,7 @@ Elevated smoke evidence backing the claims above (dates dd/mm/yyyy):
 - **9/0 clock drills** watched, 10/07/2026 — B4 survived a +30m jump past the
   deadline (×3); B1c lifted at ~117s of a 120s block under a −30m roll; clock
   within ~1s of NTP after every drill.
-- **938/938** unit tests green; Release build 0 errors.
+- **960/960** unit tests green; Release build 0 errors.
 
 ### Honest ceiling
 

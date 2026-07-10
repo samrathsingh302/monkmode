@@ -1,0 +1,44 @@
+MonkMode
+Copyright (C) 2026 Samrath Singh
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License version 3, as published by the Free
+Software Foundation. The full licence text is in the file COPYING at the root of
+this repository, and at <https://www.gnu.org/licenses/gpl-3.0.html>.
+
+This program is distributed WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+General Public License for details.
+
+------------------------------------------------------------------------------
+Fork acknowledgement
+------------------------------------------------------------------------------
+
+MonkMode is a fork of Cold Turkey, a VB.NET WinForms website/application
+blocker.
+
+    Cold Turkey
+    Copyright (C) 2011-2012 Felix Belzile
+    Licensed under the GNU General Public License version 3.
+
+The unmodified upstream sources were inherited under GPLv3, and MonkMode retains
+that licence. Portions of the enforcement service, the hosts-file blocking
+approach and the config/notifier contracts derive from that work.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+As of 10/07/2026 the source tree contains no third-party code. Every source file
+is either original MonkMode work (Copyright (C) 2026 Samrath Singh) or inherited
+Cold Turkey code (Copyright (C) 2011-2012 Felix Belzile); both are GPLv3.
+
+Historical note - INI parser:
+Earlier revisions bundled a third-party INI reader/writer, IniFileVb.vb
+(originally "IniFile" by Ludvik Jerabek, published on CodeProject under the Code
+Project Open Licence, CPOL 1.02). The Free Software Foundation lists the CPOL as
+a non-free licence that is incompatible with the GPL. On 10/07/2026 that file was
+removed and replaced by a clean-room GPLv3 implementation, IniFile.vb (and its
+three sibling copies), Copyright (C) 2026 Samrath Singh. The original file, with
+its author's attribution intact, remains in this repository's git history
+(removed in commit 48ad4ea).

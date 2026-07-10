@@ -225,4 +225,19 @@ removes it normally.
 ## Upstream & licence
 
 Originally based on **Cold Turkey** by Felix Belzile. Licensed **GPLv3**
-(inherited) — see [COPYING](COPYING).
+(inherited) — see [COPYING](COPYING). Copyright, fork acknowledgement and
+third-party history (including the removed CPOL INI parser) are recorded in
+[NOTICE](NOTICE).
+
+### Source availability
+
+MonkMode is distributed as source; there is no separate binary distribution. The
+complete corresponding source for any build is this repository, on the
+`monkmode` branch:
+
+    https://github.com/samrathsingh302/monkmode
+
+Build it with the .NET 8 SDK (`dotnet build MonkMode.sln -c Release`) and
+assemble a runnable folder with `tools\build-dist.ps1` — see
+[Building & running](#building--running). All use is governed by the GPLv3 terms
+in [COPYING](COPYING).
