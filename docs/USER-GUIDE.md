@@ -71,9 +71,9 @@ What the installer deliberately does **not** do:
 
 - It does **not** install or start the service — your first `monkmode block` does that.
 - It does **not** create shortcuts (MonkMode is a CLI, no GUI).
-- It has **no uninstaller yet** (slice H2). To remove MonkMode, follow the manual
-  removal in Section 9 / `docs\RUNBOOK.md` §3: remove the service first, then delete
-  `C:\Program Files\MonkMode\`.
+- It does **not** uninstall — that is `tools\uninstall.ps1` (slice H2, Section 9). The
+  uninstaller is deliberately weaker than the exits: it refuses while a block is
+  enforcing and never acts as an escape hatch.
 
 The installer **refuses to run while a `MONKMODE` service already exists** (installed
 or running) — never upgrade the binaries across an armed block, or a MAC'd config can
@@ -465,12 +465,34 @@ is by design (bypass B6), not a bug.
   works and additionally cleans up the snapshot, SafeBoot keys, DoH policy, and
   autorun.
 
-Because there is no install script yet, there is also no dedicated uninstall
-command that deletes the built folder — remove the `dist\` folder yourself after
-the service is gone.
+**Removing the files (`tools\uninstall.ps1`):** once no block is active, the
+sibling uninstaller does the file-level teardown that `install.ps1` (Section 1)
+set up. From an **elevated** prompt in the repo root:
 
-> **Placeholder (slice H2, not yet landed).** A proper uninstall UX is planned
-> and will supersede the manual `sc delete` + folder-removal described here.
+```
+powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1
+```
+
+It is deliberately **weaker than the exits above — never an alternative to
+them.** Detection is fail-closed: it removes nothing unless it can positively
+establish that no block is enforcing (service not running, no hosts marker, no
+live schedule). If a block is still active it **refuses** and routes you back to
+the exits (or to `unblock --force` for the during-a-block removal); it never
+stops a running service, never calls `unblock --force` itself, and never edits
+hosts. When clear, it deletes the idle service registration (`sc delete` on a
+stopped service only), the install dir, the machine `PATH` entry, and the
+current user's notifier autorun. Your account data (`monkmode_setup.ini`,
+`monkmode_stats`, and the stale enforcement config) is **kept by default** so a
+reinstall keeps your setup and history; pass `-PurgeData` for a clean slate.
+Options: `-InstallDir <folder>` if you installed somewhere other than
+`C:\Program Files\MonkMode`; `-IgnoreSchedule` to remove despite a lingering
+recurring schedule (it is then orphaned — clear it with `monkmode schedule
+--clear` first).
+
+If you ran from a plain `dist\` folder (Section 1b, no `install.ps1`), there is
+no service registration the uninstaller can key off in Program Files — just
+`sc delete MONKMODE` while idle and delete the `dist\` folder yourself after the
+service and guardian processes have exited.
 
 ---
 

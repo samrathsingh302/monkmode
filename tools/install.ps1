@@ -36,10 +36,11 @@
 #     itself (MonkMode\Program.vb DoBlock -> ServiceInstaller.InstallAndStart). Installing
 #     files is inert until you arm your first block.
 #   - It does NOT create Start-menu shortcuts (there is no GUI - MonkMode is a CLI).
-#   - It does NOT uninstall anything. There is no file-level uninstaller yet (slice H2).
-#     To remove MonkMode by hand, follow docs\RUNBOOK.md section 3 (Full-uninstall
-#     how-to): remove the service first (`sc delete MONKMODE` while idle, or
-#     `monkmode unblock --force`), THEN delete C:\Program Files\MonkMode\.
+#   - It does NOT uninstall anything. Removal is the sibling tools\uninstall.ps1 (slice
+#     H2), which is fail-closed and refuses while a block is enforcing (never an escape
+#     hatch). Or remove by hand per docs\RUNBOOK.md section 3 (Full-uninstall how-to):
+#     remove the service first (`sc delete MONKMODE` while idle, or `monkmode unblock
+#     --force`), THEN delete C:\Program Files\MonkMode\.
 #
 # WHY PROGRAM FILES:
 #   C:\Program Files is protected by admin-only write ACLs, so a standard (non-elevated)
@@ -196,5 +197,5 @@ Write-Host "Next steps (from an elevated prompt; open a new one so PATH is picke
 Write-Host "  monkmode setup --partner ""Alex (alex@example.com)"""
 Write-Host "  monkmode block --sites reddit.com --for 2h"
 Write-Host ""
-Write-Host "To remove MonkMode later there is no uninstaller yet (slice H2): follow docs\RUNBOOK.md section 3 -"
-Write-Host "remove the service first, then delete $InstallDir."
+Write-Host "To remove MonkMode later, run tools\uninstall.ps1 (elevated) once no block is active - it is"
+Write-Host "fail-closed and refuses while a block is enforcing. Or remove by hand per docs\RUNBOOK.md section 3."

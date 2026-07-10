@@ -271,10 +271,15 @@ is removable normally:
 sc delete MONKMODE
 ```
 
-Then remove the app folder (`dist\`) by hand — there is no install script yet,
-so there is no dedicated uninstall command that deletes the built folder
-(`USER-GUIDE.md` §9 covers this happy path). `monkmode unblock --force` also
-works when idle and additionally cleans up the artefacts below.
+Then remove the app folder. For a Program Files install (via `tools\install.ps1`),
+`tools\uninstall.ps1` automates the whole file-level teardown once idle — it
+`sc delete`s the stopped service, removes the install dir, the machine `PATH`
+entry and the current user's notifier autorun, and keeps your data unless you pass
+`-PurgeData` (`USER-GUIDE.md` §9). It is fail-closed: it refuses if anything is
+still enforcing, so it is never an escape hatch. The manual path below remains the
+fallback (and the only route for a plain `dist\` folder that was never installed):
+delete the folder by hand after the service is gone. `monkmode unblock --force`
+also works when idle and additionally cleans up the artefacts below.
 
 ### 3.2 The forced teardown (`unblock --force`) — what it removes
 

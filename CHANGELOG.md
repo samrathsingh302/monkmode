@@ -14,7 +14,6 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 Queued, not yet landed (see `vault/dev/monk-mode/tasks.md` for the live queue):
 
-- **H2 — uninstall UX.** A clean, honest teardown path.
 - **P2 — notifier stdout-handle fix.** `mm_notify` inherits the CLI's stdout, so
   any piped/captured `block` arm wedges until the block expires; the fix is a
   handle-inheritance change so block-arm can be safely scripted.
@@ -26,8 +25,10 @@ Queued, not yet landed (see `vault/dev/monk-mode/tasks.md` for the live queue):
 
 First release candidate. The enforcement core, config integrity, exit model and
 CLI/UX are complete and live-verified (see [Live-verification](#live-verification)).
-The candidate label reflects that the packaging slices (installer H1, uninstall H2)
-and the GPL-compliance polish (G2/G3) have not yet landed.
+The GPL-compliance work (G2/G3, including the clean-room INI parser
+replacement) and the packaging slices (installer H1, uninstaller H2) have all
+landed; the candidate label reflects that the install/uninstall scripts are not
+yet live-smoke-tested and the Samrath-gated release steps (H3/H4) remain.
 
 ### Added
 
@@ -79,6 +80,15 @@ and the GPL-compliance polish (G2/G3) have not yet landed.
   raising the tamper bar) and adds them to the machine `PATH` idempotently. It installs
   files only — the first `block` still registers the service — and refuses to overwrite while
   a `MONKMODE` service exists (never upgrade across a block).
+- **File uninstaller (H2).** An elevated `tools\uninstall.ps1` that reverses the H1 install:
+  it `sc delete`s the idle service registration (stopped-only), removes the install dir, the
+  machine `PATH` entry and the current user's notifier autorun, keeping account data unless
+  `-PurgeData` is passed. It is deliberately **weaker than the R1 exits, never an alternative
+  to them**: detection is fail-closed (it refuses unless it can positively establish that no
+  block is enforcing — service state, hosts marker, schedule spec), it never stops a running
+  service, never calls `unblock --force`, and never edits hosts. A lingering recurring
+  schedule refuses unless `-IgnoreSchedule`; it self-protects against being pointed at a
+  source/working tree.
 
 ### Changed
 
