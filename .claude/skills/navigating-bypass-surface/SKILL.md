@@ -5,7 +5,7 @@ description: "Bypass, B1-B11, threat model, severity, residual, mitigation statu
 
 # Navigating the bypass surface (B1-B11)
 
-Canonical source: the bypass table at vault/dev/monk-mode/specs/ARCHITECTURE.md:271-283. Never assess a bypass from memory — read the row first; every claim below cites it.
+Canonical source: the bypass table at vault/dev/repos/monk-mode/specs/ARCHITECTURE.md:271-283. Never assess a bypass from memory — read the row first; every claim below cites it.
 
 ## Status board — DATED SNAPSHOT (10/07/2026)
 This table is a convenience snapshot only; ARCHITECTURE.md:271-283 is the source of truth. Read the live row before acting on any entry here.
@@ -51,4 +51,4 @@ This table is a convenience snapshot only; ARCHITECTURE.md:271-283 is the source
 - [ ] Sweep restated copies afterwards (repo CLAUDE.md test line, README) or note the drift where you found it.
 
 ## Provenance & maintenance
-Distilled 06/07/2026 pre-model-sunset from vault/dev/monk-mode/specs/ARCHITECTURE.md (bypass table :182-194), vault/dev/monk-mode/tasks.md, plans/fable5-slices.md and the vault handoffs (the newest dated handoff always wins over this snapshot). Re-verify against ARCHITECTURE.md's bypass table and the newest handoff in vault/dev/monk-mode/handoffs/ when they change — newest dated evidence wins.
+Distilled 06/07/2026 pre-model-sunset from vault/dev/repos/monk-mode/specs/ARCHITECTURE.md (bypass table :182-194), vault/dev/repos/monk-mode/tasks.md, plans/fable5-slices.md and the vault handoffs (the newest dated handoff always wins over this snapshot). Re-verify against ARCHITECTURE.md's bypass table and the newest handoff in vault/dev/repos/monk-mode/handoffs/ when they change — newest dated evidence wins.

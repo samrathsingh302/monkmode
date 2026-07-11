@@ -14,7 +14,7 @@ a `CanStop=False` LocalSystem service. A careless dev command arms or damages th
   Read-only analysis unless Samrath explicitly asks for a live test.
 - [ ] Unit tests must never touch real hosts/registry/SCM — pure tests on strings/temp paths only.
 - [ ] Any `--for` arming happens ONLY inside a smoke (fable5-slices.md:121), and smokes are
-  human-gated because they need Administrator (vault/dev/monk-mode/tasks.md ⚙ bucket) — never
+  human-gated because they need Administrator (vault/dev/repos/monk-mode/tasks.md ⚙ bucket) — never
   from a dev/loop session.
 
 ## Hosts safety
@@ -47,11 +47,11 @@ a `CanStop=False` LocalSystem service. A careless dev command arms or damages th
   `C:/Users/samra/.dotnet/dotnet.exe` (CLAUDE.md:15) — NOT the `C:/Program Files/dotnet/`
   one that PATH resolves to.
 - [ ] Working markdown (handoffs, tasks, plans, specs, logs) lives in the vault at
-  `C:/Users/samra/vault/dev/monk-mode/`, never in the repo (CLAUDE.md:32-37). The repo keeps
+  `C:/Users/samra/vault/dev/repos/monk-mode/`, never in the repo (CLAUDE.md:32-37). The repo keeps
   only code + README + CLAUDE.md + skills/fixtures.
-- [ ] Current project state = the newest dated handoff in `vault/dev/monk-mode/handoffs/` —
+- [ ] Current project state = the newest dated handoff in `vault/dev/repos/monk-mode/handoffs/` —
   read it before believing any count or "next" claim elsewhere.
 
 ## Provenance & maintenance
-Distilled 06/07/2026 pre-model-sunset from repo CLAUDE.md + vault/dev/monk-mode/ handoffs/specs.
+Distilled 06/07/2026 pre-model-sunset from repo CLAUDE.md + vault/dev/repos/monk-mode/ handoffs/specs.
 Re-verify when repo CLAUDE.md or the newest handoff contradicts it (newest handoff wins).

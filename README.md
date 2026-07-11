@@ -131,7 +131,7 @@ service on a 10-second loop.
   process re-asserts its enforcement (re-locks hosts, restores the block) before
   the process dies, so a crash can never leave the block open.
 - **Honest threat model.** `ARCHITECTURE.md` (kept in the project vault at
-  `vault/dev/monk-mode/specs/`) catalogues the full bypass surface
+  `vault/dev/repos/monk-mode/specs/`) catalogues the full bypass surface
   (B1–B11), ranked by effort. While the user keeps admin
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to

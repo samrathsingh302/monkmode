@@ -544,7 +544,7 @@ anything.
 ## See also
 
 - `README.md` — the exit model, the honest ceiling, and the engineering notes.
-- `ARCHITECTURE.md` (in the project vault, `vault/dev/monk-mode/specs/`) — the
+- `ARCHITECTURE.md` (in the project vault, `vault/dev/repos/monk-mode/specs/`) — the
   full bypass surface B1–B11, ranked by effort, with live-verification evidence.
 - `monkmode help` — the always-current usage text, including the live preset and
   app-preset category names.

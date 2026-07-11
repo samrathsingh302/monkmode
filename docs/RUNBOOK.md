@@ -420,7 +420,7 @@ that is defeating your own enforcement.
 - `USER-GUIDE.md` — the command-first lifecycle (setup, block, schedule,
   presets, cooling-off, the partner code, stats, and the happy-path removal).
 - `README.md` — the exit model, the honest ceiling, and engineering notes.
-- `ARCHITECTURE.md` (project vault, `vault/dev/monk-mode/specs/`) — the full
+- `ARCHITECTURE.md` (project vault, `vault/dev/repos/monk-mode/specs/`) — the full
   bypass surface B1–B11, ranked by effort, with live-verification evidence.
 
 ---

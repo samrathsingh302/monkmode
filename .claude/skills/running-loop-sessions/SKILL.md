@@ -15,16 +15,16 @@ must NOT spawn each other.
 
 ## Session shape (in order)
 1. Read repo `CLAUDE.md`, then the newest dated handoff in
-   `C:/Users/samra/vault/dev/monk-mode/handoffs/` (= current state).
-2. Do ONE slice (per `vault/dev/monk-mode/plans/fable5-slices.md` run sheet).
+   `C:/Users/samra/vault/dev/repos/monk-mode/handoffs/` (= current state).
+2. Do ONE slice (per `vault/dev/repos/monk-mode/plans/fable5-slices.md` run sheet).
 3. Gate BEFORE commit:
    - [ ] Build 0-err: `C:/Users/samra/.dotnet/dotnet.exe build MonkMode.sln -c Release`
    - [ ] Full suite green: `C:/Users/samra/.dotnet/dotnet.exe test MonkMode.sln`
    - [ ] Verifier tier: enforcement-core touch = MANDATORY fresh-eyes verifier before commit
      (slice ids at plans/fable5-slices.md:121); inputs-only = light verifier.
 4. Local commit only — no push, no `--no-verify`, never rewrite history.
-5. Exit: dated handoff `YYYY-MM-DD-HHmm-<slug>.md` to `vault/dev/monk-mode/handoffs/` +
-   update `vault/dev/monk-mode/tasks.md`. **A session without its handoff has failed its
+5. Exit: dated handoff `YYYY-MM-DD-HHmm-<slug>.md` to `vault/dev/repos/monk-mode/handoffs/` +
+   update `vault/dev/repos/monk-mode/tasks.md`. **A session without its handoff has failed its
    exit** (CLAUDE.md:42).
 6. End output with `LOOP_STATUS: CONTINUE` (or DONE/BLOCKED) on the last line.
 
@@ -54,5 +54,5 @@ The driver auto-commits abandoned work as un-gated "WIP checkpoint" commits (his
   (including this skill's) as current.
 
 ## Provenance & maintenance
-Distilled 06/07/2026 pre-model-sunset from repo CLAUDE.md + vault/dev/monk-mode/ handoffs/specs.
+Distilled 06/07/2026 pre-model-sunset from repo CLAUDE.md + vault/dev/repos/monk-mode/ handoffs/specs.
 Re-verify when repo CLAUDE.md or the newest handoff contradicts it (newest handoff wins).

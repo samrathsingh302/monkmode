@@ -20,7 +20,7 @@ The core invariant: **no error path may ever lift a block**. Errors freeze or ov
 ## Self-heal gates (B2 / B3 / B5a / B6)
 - [ ] All four per-tick self-heals gate on `BlockHeld(...)` — B2 hosts repair Service1.vb:950, B3 SafeBoot :1018, B5a DoH-off :1034, B6 deny-DELETE ACE :1050.
 - [ ] `BlockHeld` (Service1.vb:1688-1689) = `Not EffectiveBlockHasExpired(...) OrElse (macValid AndAlso ScheduleActive(...))` — for a manual block it reduces to the verbatim `Not EffectiveBlockHasExpired(...)` pattern (comment :1000); invalid MAC ⇒ held ⇒ keep enforcing.
-- [ ] Read-only probe first, so intact state is a true no-op — no churn (pattern documented in vault/dev/monk-mode/specs/ARCHITECTURE.md:184-191).
+- [ ] Read-only probe first, so intact state is a true no-op — no churn (pattern documented in vault/dev/repos/monk-mode/specs/ARCHITECTURE.md:184-191).
 - [ ] A new self-heal MUST copy this gate verbatim, take `asOf = newHwAsOf` (trusted high-water, never `DateTime.Now`), and sit in its own `Try` so its failure never disturbs sibling gates or crashes the tick.
 
 ## Config corruption and recovery (B8 + C1b)
@@ -51,4 +51,4 @@ The core invariant: **no error path may ever lift a block**. Errors freeze or ov
 - [ ] Fail-closed on ambiguity: unparseable, missing, unknown ⇒ block stands / emit nothing.
 
 ## Provenance & maintenance
-Distilled 06/07/2026 pre-model-sunset from Service1.vb, Blocker.vb, ConfigBackup.vb, vault/dev/monk-mode/specs/ARCHITECTURE.md and the vault handoffs. Line numbers pinned to baseline commit `dc34f0b` (dirty D1b tree for Blocker.vb — cited as-is); the 06-07/07/2026 fix-branch merges shift Service1.vb lines — re-locate symbols by NAME, not line, after those land. Re-verify against ARCHITECTURE.md's bypass table and the newest handoff in vault/dev/monk-mode/handoffs/ when they change — newest dated evidence wins.
+Distilled 06/07/2026 pre-model-sunset from Service1.vb, Blocker.vb, ConfigBackup.vb, vault/dev/repos/monk-mode/specs/ARCHITECTURE.md and the vault handoffs. Line numbers pinned to baseline commit `dc34f0b` (dirty D1b tree for Blocker.vb — cited as-is); the 06-07/07/2026 fix-branch merges shift Service1.vb lines — re-locate symbols by NAME, not line, after those land. Re-verify against ARCHITECTURE.md's bypass table and the newest handoff in vault/dev/repos/monk-mode/handoffs/ when they change — newest dated evidence wins.

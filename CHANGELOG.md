@@ -12,7 +12,7 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 ## [Unreleased]
 
-Queued, not yet landed (see `vault/dev/monk-mode/tasks.md` for the live queue):
+Queued, not yet landed (see `vault/dev/repos/monk-mode/tasks.md` for the live queue):
 
 - **D4b — persistent notifications.** WinRT Action-Center toasts to replace the
   transient balloons, which fired but were not reliably seen (found in the

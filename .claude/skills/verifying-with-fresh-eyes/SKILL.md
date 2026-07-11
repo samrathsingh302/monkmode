@@ -10,7 +10,7 @@ REFUTE the safety claim, don't confirm the builder's story.
 
 ## When mandatory
 - [ ] Any slice touching `Service1.vb` enforcement paths, `ConfigIntegrity`, a canonical
-  bump, or teardown — vault/dev/monk-mode/plans/fable5-slices.md:121 lists the slice ids
+  bump, or teardown — vault/dev/repos/monk-mode/plans/fable5-slices.md:121 lists the slice ids
   (A2, C1, C1b, C2b, C3b, C4, C5b, B1b, H2).
 - [ ] Inputs-only slices get a LIGHT verifier pass instead (precedent: D1a, handoff
   2026-07-04-2206-d1a-site-presets.md).
@@ -52,5 +52,5 @@ Severity ladder (as used in the monk-mode handoffs): P0 = enforcement-breaking o
   hosts/registry/SCM, never pushes, never rewrites history.
 
 ## Provenance & maintenance
-Distilled 06/07/2026 pre-model-sunset from repo CLAUDE.md + vault/dev/monk-mode/ handoffs/specs.
+Distilled 06/07/2026 pre-model-sunset from repo CLAUDE.md + vault/dev/repos/monk-mode/ handoffs/specs.
 Re-verify when repo CLAUDE.md or the newest handoff contradicts it (newest handoff wins).
