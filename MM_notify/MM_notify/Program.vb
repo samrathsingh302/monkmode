@@ -30,12 +30,26 @@
 Option Explicit On
 Option Strict Off
 
+Imports Microsoft.Toolkit.Uwp.Notifications
 Imports System.Windows.Forms
 
 Module Program
 
     <STAThread()>
     Sub Main()
+        ' D4b: if THIS process was launched by the toast COM activator (the user clicked a
+        ' persistent Action-Centre toast), do nothing and exit. The notifier the CLI spawned is
+        ' already running its poll/app-kill loop; a click-relaunch must not start a SECOND notifier
+        ' racing it (double Run-entry removal, double app-kill). We register no OnActivated handler
+        ' (the toasts are informational, with no buttons), so the click has no work to do. This does
+        ' NOT touch how the CLI LAUNCHES the notifier (the P2 no-stdio-inherit spawn, 0607ff9) - it
+        ' is the notifier's own front-door guard against the toolkit's activation relaunch. Fail-soft:
+        ' if the compat probe ever throws, fall through to the normal launch (never worse than today).
+        Try
+            If ToastNotificationManagerCompat.WasCurrentProcessToastActivated() Then Return
+        Catch ex As Exception
+        End Try
+
         Application.EnableVisualStyles()
         Application.SetCompatibleTextRenderingDefault(False)
 

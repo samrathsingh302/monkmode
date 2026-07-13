@@ -34,6 +34,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports Microsoft.Toolkit.Uwp.Notifications
 Imports Microsoft.Win32
 Imports System.Diagnostics
 Imports System.Drawing
@@ -244,13 +245,34 @@ Public Class Form1
         End Try
     End Function
 
-    ' D4: build + show a tray balloon, fail-soft (a toast is cosmetic; it must never bubble an
-    ' exception into the poll/load path). All D4 toasts + the block-ended toast route through here.
+    ' D4/D4b: show a notification, fail-soft (a toast is cosmetic; it must never bubble an exception
+    ' into the poll/load path). All D4 toasts + the block-ended toast route through here. D4b swaps
+    ' the DELIVERY: try a PERSISTENT WinRT Action-Centre toast first, fall back to the historical
+    ' transient balloon on any failure. The try/fallback decision lives in the pure, tested
+    ' Notifications.DeliverWithFallback; this method only wires the two live delegates to it.
     Private Sub ShowToast(ByVal body As String)
-        Try
-            tray.ShowBalloonTip(8000, Notifications.ToastTitle, body, ToolTipIcon.Info)
-        Catch ex As Exception
-        End Try
+        Notifications.DeliverWithFallback(body, AddressOf DeliverPersistentToast, AddressOf DeliverBalloon)
+    End Sub
+
+    ' D4b: the persistent path - a WinRT ToastGeneric that lands in AND STAYS in the Action Centre,
+    ' so a toast suppressed by DND / full-screen (the 10/07/2026 miss) is still viewable later.
+    ' ToastNotificationManagerCompat makes this work for this UNPACKAGED exe: the first
+    ' CreateToastNotifier() idempotently registers the AUMID + a per-user Start-menu shortcut + an
+    ' HKCU COM activator (HKCU-only, at runtime only - never at build or in tests). ExpirationTime
+    ' bounds how long it lingers. Throws on any WinRT/registration failure BY DESIGN -
+    ' DeliverWithFallback catches it and drops to the balloon; the notifier never crashes.
+    Private Sub DeliverPersistentToast(ByVal body As String)
+        Dim doc As New Windows.Data.Xml.Dom.XmlDocument()
+        doc.LoadXml(Notifications.BuildToastXml(Notifications.ToastTitle, body))
+        Dim toast As New Windows.UI.Notifications.ToastNotification(doc)
+        toast.ExpirationTime = DateTimeOffset.Now.AddHours(Notifications.ToastExpiryHours)
+        ToastNotificationManagerCompat.CreateToastNotifier().Show(toast)
+    End Sub
+
+    ' D4b: the transient fallback - the historical NotifyIcon balloon, byte-unchanged. Reached only
+    ' when the persistent path throws (e.g. a Windows build/context without the compat activator).
+    Private Sub DeliverBalloon(ByVal body As String)
+        tray.ShowBalloonTip(8000, Notifications.ToastTitle, body, ToolTipIcon.Info)
     End Sub
 
     Private Sub appKillTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles appKillTimer.Tick

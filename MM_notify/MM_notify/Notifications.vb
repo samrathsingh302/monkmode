@@ -172,4 +172,82 @@ Friend Module Notifications
         Return dt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
     End Function
 
+    ' ================= D4b: persistent Action-Centre toast delivery =================
+    '
+    ' The four builders above produce the toast STRINGS; this section produces the toast
+    ' PAYLOAD (a WinRT ToastGeneric XML document) and the fail-safe delivery contract - both
+    ' PURE (no WinRT, no disk, no registration) so they are unit-tested cross-assembly exactly
+    ' like the strings. Form1 owns the live WinRT call (ToastNotificationManagerCompat) + the
+    ' balloon fallback; this module owns only the payload + the orchestration decision.
+
+    ' How long a delivered toast lingers in the Action Centre before Windows evicts it. The whole
+    ' point of D4b: on the 10/07/2026 sitting all three balloons fired but DND/full-screen
+    ' suppressed them and they were gone forever. A persistent toast with a generous expiry means
+    ' a MISSED block-start / cooling-off / expiry toast is still viewable hours later. 24h is long
+    ' enough to survive a focus session or a night, without lingering indefinitely (a stale
+    ' "block ended" toast a day later is harmless; a week later is clutter). Set on the WinRT
+    ' ToastNotification.ExpirationTime by Form1; named here so the value lives in one place.
+    Friend Const ToastExpiryHours As Integer = 24
+
+    ' XML-escape the five predefined entities for safe embedding in toast element text. Toast
+    ' bodies are our own fixed strings today (no '&' / '<' / '>'), but escaping is the correct,
+    ' future-proof contract: a body that ever gains an ampersand or angle bracket must not produce
+    ' a malformed document that throws in XmlDocument.LoadXml (which would then drop to the balloon
+    ' fallback and lose the persistence D4b exists to add). Order matters: '&' first. Never throws;
+    ' Nothing => "".
+    Friend Function EscapeXml(ByVal s As String) As String
+        If s Is Nothing Then Return ""
+        Return s.Replace("&", "&amp;") _
+                .Replace("<", "&lt;") _
+                .Replace(">", "&gt;") _
+                .Replace("""", "&quot;") _
+                .Replace("'", "&apos;")
+    End Function
+
+    ' Build the WinRT ToastGeneric payload for a title + body. The first <text> is the header line
+    ' (title), the second the message (body) - the same two-line shape as the old balloon
+    ' (title="MonkMode", body=the message), so nothing about the message identity moves. Default
+    ' scenario deliberately: a plain toast already lands in and PERSISTS in the Action Centre;
+    ' scenario="reminder"/"alarm" would demand action buttons and nag on-screen, which is wrong for
+    ' an informational block notice. Expiry is applied to the ToastNotification object, not the XML.
+    ' Pure + deterministic (both texts escaped) so the emitted document is always well-formed and
+    ' unit-testable by parse + literal. Never throws.
+    Friend Function BuildToastXml(ByVal title As String, ByVal body As String) As String
+        Return "<toast><visual><binding template=""ToastGeneric"">" &
+               "<text>" & EscapeXml(title) & "</text>" &
+               "<text>" & EscapeXml(body) & "</text>" &
+               "</binding></visual></toast>"
+    End Function
+
+    ' Which delivery path a toast took - reported so a test can PROVE the fail-safe fallback fires
+    ' (not merely that no exception escaped). None = both paths threw and were swallowed.
+    Friend Enum ToastDelivery
+        Persistent
+        Balloon
+        None
+    End Enum
+
+    ' The fail-safe delivery contract (requirement: a notification failure must NEVER crash the
+    ' notifier or affect enforcement). Try the persistent (WinRT Action-Centre) path; if it throws
+    ' for ANY reason - no WinRT support, shortcut/registration failure, COM error - fall back to the
+    ' transient balloon; if that ALSO throws, swallow and report None. A toast is cosmetic: it may
+    ' never bubble an exception into the poll/load path, and the notifier holds no enforcement, so
+    ' losing a toast entirely is acceptable where crashing is not. Pure orchestration over injected
+    ' delegates so the whole try/fallback decision is unit-tested with a throwing 'persistent'.
+    Friend Function DeliverWithFallback(ByVal body As String,
+                                        ByVal persistent As Action(Of String),
+                                        ByVal balloon As Action(Of String)) As ToastDelivery
+        Try
+            persistent(body)
+            Return ToastDelivery.Persistent
+        Catch ex As Exception
+        End Try
+        Try
+            balloon(body)
+            Return ToastDelivery.Balloon
+        Catch ex As Exception
+        End Try
+        Return ToastDelivery.None
+    End Function
+
 End Module

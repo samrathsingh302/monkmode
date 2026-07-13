@@ -30,6 +30,7 @@
 
 using System;
 using System.Globalization;
+using System.Xml.Linq;
 
 namespace MonkMode.Tests;
 
@@ -167,4 +168,86 @@ public class NotificationsTests
     [Fact]
     public void BlockEndedMessage_PinsTheExactHistoricalText()
         => Assert.Equal("Your block has ended. You're free — stay strong.", mm_notify.Notifications.BlockEndedMessage());
+
+    // ---- D4b: the persistent-toast PAYLOAD builder (pure XML; no WinRT is touched here) ----
+
+    [Theory]
+    [InlineData("plain", "plain")]
+    [InlineData("a & b", "a &amp; b")]                  // ampersand escaped first
+    [InlineData("<x>", "&lt;x&gt;")]                    // angle brackets escaped
+    [InlineData("q\"q", "q&quot;q")]                    // double quote
+    [InlineData("it's", "it&apos;s")]                   // apostrophe
+    [InlineData("", "")]                                // empty
+    public void EscapeXml_EscapesTheFivePredefinedEntities(string raw, string expected)
+        => Assert.Equal(expected, mm_notify.Notifications.EscapeXml(raw));
+
+    [Fact]
+    public void EscapeXml_Null_IsEmpty_NeverThrows()
+        => Assert.Equal("", mm_notify.Notifications.EscapeXml(null!));
+
+    [Fact]
+    public void BuildToastXml_IsWellFormed_WithTitleAndBodyAsTheTwoTextLines()
+    {
+        // The real block-ended body carries a non-ASCII em dash + an apostrophe: prove it lands
+        // in a well-formed ToastGeneric document with title as the first <text>, body as the second.
+        var xml = mm_notify.Notifications.BuildToastXml(
+            "MonkMode", mm_notify.Notifications.BlockEndedMessage());
+        var doc = XDocument.Parse(xml);   // throws if malformed - the assertion is that it does not
+        Assert.Equal("toast", doc.Root!.Name.LocalName);
+        var binding = doc.Root.Element("visual")!.Element("binding")!;
+        Assert.Equal("ToastGeneric", binding.Attribute("template")!.Value);
+        var texts = binding.Elements("text").ToArray();
+        Assert.Equal(2, texts.Length);
+        Assert.Equal("MonkMode", texts[0].Value);
+        Assert.Equal("Your block has ended. You're free — stay strong.", texts[1].Value);
+    }
+
+    [Fact]
+    public void BuildToastXml_BodyWithMarkupChars_StaysWellFormed_AndRoundTrips()
+    {
+        // A body that ever gained '&' / '<' / '>' must not produce a document that throws in
+        // XmlDocument.LoadXml (which would silently drop delivery to the balloon fallback).
+        const string nasty = "block & <tag> \"quote\" 'apos' ends";
+        var xml = mm_notify.Notifications.BuildToastXml("MonkMode", nasty);
+        var doc = XDocument.Parse(xml);
+        var texts = doc.Root!.Element("visual")!.Element("binding")!.Elements("text").ToArray();
+        Assert.Equal(nasty, texts[1].Value);   // the parser decodes the escapes back to the original
+    }
+
+    // ---- D4b: the fail-safe delivery orchestration (pure; delegates stand in for the live paths) ----
+
+    [Fact]
+    public void DeliverWithFallback_PersistentSucceeds_ReportsPersistent_AndSkipsBalloon()
+    {
+        var balloonCalled = false;
+        var got = mm_notify.Notifications.DeliverWithFallback(
+            "hi", body => { /* persistent OK */ }, body => balloonCalled = true);
+        Assert.Equal(mm_notify.Notifications.ToastDelivery.Persistent, got);
+        Assert.False(balloonCalled);   // the transient path is never touched when persistent works
+    }
+
+    [Fact]
+    public void DeliverWithFallback_PersistentThrows_FallsBackToBalloon_WithTheSameBody()
+    {
+        // The core fail-safe pin: a throwing persistent path (no WinRT / registration failure) must
+        // still deliver the notification via the balloon, and must not let the exception escape.
+        string? balloonBody = null;
+        var got = mm_notify.Notifications.DeliverWithFallback(
+            "the-body",
+            body => throw new InvalidOperationException("no WinRT here"),
+            body => balloonBody = body);
+        Assert.Equal(mm_notify.Notifications.ToastDelivery.Balloon, got);
+        Assert.Equal("the-body", balloonBody);
+    }
+
+    [Fact]
+    public void DeliverWithFallback_BothThrow_SwallowsAndReportsNone_NeverThrows()
+    {
+        // Even total delivery failure must not crash the notifier or affect enforcement.
+        var got = mm_notify.Notifications.DeliverWithFallback(
+            "x",
+            body => throw new Exception("persistent down"),
+            body => throw new Exception("balloon down too"));
+        Assert.Equal(mm_notify.Notifications.ToastDelivery.None, got);
+    }
 }

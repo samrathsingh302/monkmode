@@ -33,6 +33,21 @@ As of 10/07/2026 the source tree contains no third-party code. Every source file
 is either original MonkMode work (Copyright (C) 2026 Samrath Singh) or inherited
 Cold Turkey code (Copyright (C) 2011-2012 Felix Belzile); both are GPLv3.
 
+Binary distribution - NuGet packages (added 14/07/2026):
+The notifier (mm_notify) uses the Windows Community Toolkit notifications
+library, so built/published output (including dist\ payloads) ships the
+following MIT-licensed assemblies alongside the MonkMode executables:
+
+    Microsoft.Toolkit.Uwp.Notifications 7.1.3
+    Copyright (c) .NET Foundation and Contributors
+    Licensed under the MIT License (licence text: THIRD-PARTY-LICENSES.md)
+
+    Microsoft.Windows.SDK.NET / WinRT.Runtime (C#/WinRT projection)
+    Copyright (c) Microsoft Corporation
+    Licensed under the MIT License (licence text: THIRD-PARTY-LICENSES.md)
+
+The MIT licence is GPLv3-compatible; the combined work remains GPLv3.
+
 Historical note - INI parser:
 Earlier revisions bundled a third-party INI reader/writer, IniFileVb.vb
 (originally "IniFile" by Ludvik Jerabek, published on CodeProject under the Code
