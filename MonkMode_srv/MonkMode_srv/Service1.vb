@@ -1821,24 +1821,43 @@ Public Class Service1
         Return d.Trim()
     End Function
 
-    ' Parity copy of Blocker.BuildHostsEntries: one "127.0.0.1 <domain>" line per site (plus a
-    ' "127.0.0.1 www.<domain>" line for a bare second-level domain), each CRLF-terminated. Uses
-    ' 127.0.0.1 (NOT 0.0.0.0 - Windows' resolver ignores 0.0.0.0 hosts entries). Byte-for-byte
-    ' identical to the CLI so the synthesised schedule block matches a manual block's format.
+    ' Parity copy of Blocker.BuildHostsEntries: one "127.0.0.1 <domain>" line per site (plus
+    ' "127.0.0.1 www./m./web./mobile.<domain>" mirror lines for a bare second-level domain),
+    ' each CRLF-terminated. Uses 127.0.0.1 (NOT 0.0.0.0 - Windows' resolver ignores 0.0.0.0
+    ' hosts entries). Byte-for-byte identical to the CLI so the synthesised schedule block
+    ' matches a manual block's format.
     ' Friend Shared so the CLI<->service parity test (and EffectiveHostsBlock) can call it.
     Friend Shared Function BuildHostsEntries(ByVal domains As IEnumerable(Of String)) As String
         Dim sb As New System.Text.StringBuilder
+        ' Dedup by host name so an explicit web.snapchat.com given ALONGSIDE the bare
+        ' snapchat.com (which auto-expands the same mirror) never emits a repeated line;
+        ' first occurrence wins, so order is stable.
+        Dim seen As New HashSet(Of String)(StringComparer.Ordinal)
         For Each raw As String In domains
             Dim d As String = NormalizeDomain(raw)
             If d = "" Then Continue For
-            sb.Append("127.0.0.1 ").Append(d).Append(vbCrLf)
+            If seen.Add(d) Then sb.Append("127.0.0.1 ").Append(d).Append(vbCrLf)
             If Not d.StartsWith("www.") AndAlso d.IndexOf("."c) = d.LastIndexOf("."c) Then
-                ' bare second-level domain -> also block www.
-                sb.Append("127.0.0.1 www.").Append(d).Append(vbCrLf)
+                ' Bare second-level domain -> also block the common no-bypass web mirrors.
+                ' web.snapchat.com is Snapchat's web app and m./mobile. are the usual
+                ' mobile-web hosts (m.facebook.com, mobile.twitter.com): leaving them out
+                ' lets the site load unblocked. Hosts lines for absent mirrors are inert,
+                ' and in a self-control blocker over-blocking is acceptable while
+                ' under-blocking is the sin, so we emit them all. Order fixed: bare first,
+                ' then www./m./web./mobile.
+                For Each prefix As String In HostsVariantPrefixes
+                    Dim v As String = prefix & d
+                    If seen.Add(v) Then sb.Append("127.0.0.1 ").Append(v).Append(vbCrLf)
+                Next
             End If
         Next
         Return sb.ToString()
     End Function
+
+    ' The subdomain prefixes a bare second-level domain expands into (in emit order) - the
+    ' parity twin of Blocker.HostsVariantPrefixes. www. is the classic mirror; m./web./mobile.
+    ' cover the mobile-web + web-app hosts that would otherwise be a casual bypass.
+    Private Shared ReadOnly HostsVariantPrefixes As String() = {"www.", "m.", "web.", "mobile."}
 
     ' design §6.3: the effective hosts marker block to repair THIS tick. While a scheduled window
     ' is open (scheduleActive) the target is snapshotBlock UNION the schedule's own synthesised

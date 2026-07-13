@@ -311,17 +311,35 @@ Module Blocker
     ' AAAA lookups for that name, so a single 127.0.0.1 line fully blocks it.
     Public Function BuildHostsEntries(ByVal domains As IEnumerable(Of String)) As String
         Dim sb As New System.Text.StringBuilder
+        ' Dedup by host name so an explicit web.snapchat.com given ALONGSIDE the bare
+        ' snapchat.com (which auto-expands the same mirror) never emits a repeated line;
+        ' first occurrence wins, so order is stable.
+        Dim seen As New HashSet(Of String)(StringComparer.Ordinal)
         For Each raw As String In domains
             Dim d As String = NormalizeDomain(raw)
             If d = "" Then Continue For
-            sb.Append("127.0.0.1 ").Append(d).Append(vbCrLf)
+            If seen.Add(d) Then sb.Append("127.0.0.1 ").Append(d).Append(vbCrLf)
             If Not d.StartsWith("www.") AndAlso d.IndexOf("."c) = d.LastIndexOf("."c) Then
-                ' bare second-level domain -> also block www.
-                sb.Append("127.0.0.1 www.").Append(d).Append(vbCrLf)
+                ' Bare second-level domain -> also block the common no-bypass web mirrors.
+                ' web.snapchat.com is Snapchat's web app and m./mobile. are the usual
+                ' mobile-web hosts (m.facebook.com, mobile.twitter.com): leaving them out
+                ' lets the site load unblocked. Hosts lines for absent mirrors are inert,
+                ' and in a self-control blocker over-blocking is acceptable while
+                ' under-blocking is the sin, so we emit them all. Order fixed: bare first,
+                ' then www./m./web./mobile.
+                For Each prefix As String In HostsVariantPrefixes
+                    Dim v As String = prefix & d
+                    If seen.Add(v) Then sb.Append("127.0.0.1 ").Append(v).Append(vbCrLf)
+                Next
             End If
         Next
         Return sb.ToString()
     End Function
+
+    ' The subdomain prefixes a bare second-level domain expands into (in emit order).
+    ' www. is the classic mirror; m./web./mobile. cover the mobile-web + web-app hosts
+    ' that would otherwise be a casual bypass (web.snapchat.com, m.facebook.com, ...).
+    Private ReadOnly HostsVariantPrefixes As String() = {"www.", "m.", "web.", "mobile."}
 
     Private Sub ClearReadOnly(ByVal path As String)
         If File.Exists(path) Then
@@ -412,8 +430,9 @@ Module Blocker
     ' nothing extra to protect. The categories are FIXED (the user picks them, can't edit
     ' them); an EDITABLE user default site list is a separate concern (D1b, stored MAC-covered
     ' on the setup ini, mirroring the C6c cooling-off default). Every domain is the bare
-    ' registrable single-label-TLD form, so BuildHostsEntries adds the www. variant and the
-    ' same NormalizeDomain scheme/path handling applies as for a hand-typed --sites domain.
+    ' registrable single-label-TLD form, so BuildHostsEntries expands the www./m./web./mobile.
+    ' mirror variants and the same NormalizeDomain scheme/path handling applies as for a
+    ' hand-typed --sites domain.
     Private ReadOnly PresetTable As New Dictionary(Of String, String())(StringComparer.OrdinalIgnoreCase) From {
         {"social", New String() {"facebook.com", "instagram.com", "twitter.com", "x.com", "tiktok.com", "reddit.com", "snapchat.com", "tumblr.com", "pinterest.com", "linkedin.com", "threads.net"}},
         {"video", New String() {"youtube.com", "netflix.com", "twitch.tv", "hulu.com", "disneyplus.com", "primevideo.com"}},

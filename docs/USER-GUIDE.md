@@ -198,7 +198,7 @@ refuses ("Nothing to block.").
 
 | Flag | Effect |
 |---|---|
-| `--sites a.com,b.com` | Explicit domains (comma- or semicolon-separated). URLs are tolerated — scheme and path are stripped; a bare second-level domain also blocks its `www.`. |
+| `--sites a.com,b.com` | Explicit domains (comma- or semicolon-separated). URLs are tolerated — scheme and path are stripped; a bare second-level domain also blocks its `www.`, `m.`, `web.` and `mobile.` mirrors (so `snapchat.com` covers `web.snapchat.com`). |
 | `--preset social,video` | Expand named site categories (Section 5) into the site list. Pure input sugar. |
 | `--file list.txt` | Read domains from a file, one per line; blank lines and `#` comments are skipped. |
 | `--apps chrome.exe,foo.exe` | Executable names to kill. `.exe` is appended if you omit it. |

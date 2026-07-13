@@ -214,13 +214,18 @@ public class SitePresetTests
     {
         // The preset's whole point: its domains are enforced exactly like --sites. Feed an expanded
         // preset through BuildMonkModeBlock (the same string WriteHostsBlock writes to hosts AND the
-        // MAC-covered snapshot) and confirm a known domain + its auto www. variant land as real
+        // MAC-covered snapshot) and confirm a known domain + its mirror variants land as real
         // 127.0.0.1 entries under the MonkMode marker - proving the input -> enforcement seam.
         Assert.True(Expand("social", out var domains, out _));
         var block = MonkMode.Blocker.BuildMonkModeBlock(domains);
         Assert.Contains("#### MonkMode Entries ####", block);
         Assert.Contains("127.0.0.1 facebook.com", block);
         Assert.Contains("127.0.0.1 www.facebook.com", block);   // single-dot domain => www. auto-added
+        // Snapchat's web app lives at web.snapchat.com - the real driver for the mirror expansion:
+        // blocking the bare snapchat.com must also cover the no-bypass web + mobile-web hosts.
+        Assert.Contains("127.0.0.1 web.snapchat.com", block);
+        Assert.Contains("127.0.0.1 m.snapchat.com", block);
+        Assert.Contains("127.0.0.1 mobile.snapchat.com", block);
     }
 
     // ---- D1b: TryBuildDefaultSites - the pure setup-time merge of --default-sites + --default-preset

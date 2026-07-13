@@ -1142,9 +1142,9 @@ public class EffectiveKillListTests
 public class HostsEntriesParityTests
 {
     [Theory]
-    [InlineData("reddit.com")]                // bare 2LD -> also gets a www. line
-    [InlineData("news.ycombinator.com")]      // subdomain (two dots) -> no www.
-    [InlineData("www.reddit.com")]            // already www. -> no extra www.
+    [InlineData("reddit.com")]                // bare 2LD -> also gets the www./m./web./mobile. mirrors
+    [InlineData("news.ycombinator.com")]      // subdomain (two dots) -> no mirror variants
+    [InlineData("www.reddit.com")]            // already www. -> no extra variants
     [InlineData("Reddit.COM")]                // uppercase -> lowercased
     [InlineData("HTTPS://reddit.com/r/all")]  // pasted URL -> scheme + path stripped
     [InlineData("  spaced.com  ")]            // surrounding whitespace trimmed
@@ -1180,8 +1180,11 @@ public class EffectiveHostsBlockTests
 {
     private const string Marker = "#### MonkMode Entries ####";
     // A manual block's snapshot (marker + CRLF-terminated entries), exactly as the CLI persists it.
+    // Built through BuildHostsEntries so it carries the SAME mirror expansion (reddit.com plus its
+    // www./m./web./mobile. lines) the CLI actually writes - a hand-listed subset would leave the
+    // union tests appending mirrors the real snapshot already holds.
     private static readonly string ManualSnapshot =
-        Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 www.reddit.com\r\n";
+        Marker + "\r\n" + MonkMode.Blocker.BuildHostsEntries(new[] { "reddit.com" });
     private static System.Collections.Generic.List<string> Sites(params string[] s) =>
         new System.Collections.Generic.List<string>(s);
 
@@ -1247,7 +1250,8 @@ public class EffectiveHostsBlockTests
         Assert.Equal(union.IndexOf(Marker, System.StringComparison.Ordinal),         // ...and only once
                      union.LastIndexOf(Marker, System.StringComparison.Ordinal));
         Assert.Contains("127.0.0.1 x.com\r\n", union);                               // schedule site appended
-        Assert.Contains("127.0.0.1 www.x.com\r\n", union);                           // ...with its www. line
+        Assert.Contains("127.0.0.1 www.x.com\r\n", union);                           // ...with its www. mirror
+        Assert.Contains("127.0.0.1 web.x.com\r\n", union);                           // ...and the web-app mirror
     }
 
     [Fact]
@@ -1256,7 +1260,7 @@ public class EffectiveHostsBlockTests
         // reddit.com is in BOTH the manual snapshot and the schedule: the union dedups it line-wise
         // and adds only the genuinely new x.com (extend, never duplicate).
         var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("reddit.com", "x.com"), scheduleActive: true);
-        Assert.Equal(ManualSnapshot + "127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);
+        Assert.Equal(ManualSnapshot + MonkMode.Blocker.BuildHostsEntries(new[] { "x.com" }), union);
         Assert.Equal(1, CountOccurrences(union, "127.0.0.1 reddit.com\r\n"));   // the shared line, exactly once
     }
 
@@ -1282,7 +1286,7 @@ public class EffectiveHostsBlockTests
         // after the bare marker - a valid single-marker block.
         var markerOnly = MonkMode.Blocker.BuildMonkModeBlock(System.Array.Empty<string>());  // "marker\r\n"
         var union = monkmode.Service1.EffectiveHostsBlock(markerOnly, Sites("x.com"), scheduleActive: true);
-        Assert.Equal(markerOnly + "127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);
+        Assert.Equal(markerOnly + MonkMode.Blocker.BuildHostsEntries(new[] { "x.com" }), union);
     }
 
     [Fact]
@@ -1303,7 +1307,7 @@ public class EffectiveHostsBlockTests
         // first schedule line can't FUSE onto the snapshot's last line.
         var snapshot = Marker + "\r\n127.0.0.1 reddit.com";   // no trailing CRLF
         var union = monkmode.Service1.EffectiveHostsBlock(snapshot, Sites("x.com"), scheduleActive: true);
-        Assert.Equal(Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);
+        Assert.Equal(Marker + "\r\n127.0.0.1 reddit.com\r\n" + MonkMode.Blocker.BuildHostsEntries(new[] { "x.com" }), union);
     }
 
     [Fact]
@@ -1311,9 +1315,11 @@ public class EffectiveHostsBlockTests
     {
         // An LF-ending snapshot (hand-edited): the line-set split on {CRLF,LF} still dedups a
         // shared site (terminator-agnostic), and genuinely new schedule lines are appended.
-        var snapshot = Marker + "\n127.0.0.1 reddit.com\n127.0.0.1 www.reddit.com\n";
+        // The snapshot carries the full reddit mirror set (bare + www./m./web./mobile.) in LF form,
+        // so a schedule reddit.com dedups against ALL of them, not just the bare + www. lines.
+        var snapshot = (Marker + "\r\n" + MonkMode.Blocker.BuildHostsEntries(new[] { "reddit.com" })).Replace("\r\n", "\n");
         var union = monkmode.Service1.EffectiveHostsBlock(snapshot, Sites("reddit.com", "x.com"), scheduleActive: true);
-        Assert.Equal(snapshot + "127.0.0.1 x.com\r\n127.0.0.1 www.x.com\r\n", union);   // reddit.* not re-added
+        Assert.Equal(snapshot + MonkMode.Blocker.BuildHostsEntries(new[] { "x.com" }), union);   // reddit.* not re-added
     }
 
     private static int CountOccurrences(string haystack, string needle)

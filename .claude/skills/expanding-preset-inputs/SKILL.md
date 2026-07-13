@@ -10,7 +10,7 @@ Presets are PURE INPUT: expanded domains flow into the SAME `domains` list as a 
 
 ## Ground truth (line numbers reflect the dirty working tree, 06/07/2026)
 - `PresetTable` — MonkMode/Blocker.vb:367. Fixed compile-time dictionary (case-insensitive), 5 categories: social / video / news / shopping / adult. Not stored config, so nothing extra to MAC.
-- Every table domain is deliberately a bare SINGLE-DOT registrable domain: `BuildHostsEntries` (Blocker.vb:262) auto-adds the `www.` variant only when `Not d.StartsWith("www.") AndAlso d.IndexOf("."c) = d.LastIndexOf("."c)` (:268) — a multi-dot host (bbc.co.uk) gets no `www.` line. Keep new table entries single-dot, or accept the missing-www gap knowingly.
+- Every table domain is deliberately a bare SINGLE-DOT registrable domain: `BuildHostsEntries` (Blocker.vb `BuildHostsEntries`) auto-adds the `www./m./web./mobile.` mirror variants only when `Not d.StartsWith("www.") AndAlso d.IndexOf("."c) = d.LastIndexOf("."c)` — a multi-dot host (bbc.co.uk) gets no variant lines. Keep new table entries single-dot, or accept the missing-mirror gap knowingly. (D1c, 14/07/2026: widened from www.-only to www./m./web./mobile. so web.snapchat.com etc. can't casually bypass.)
 - `KnownPresetNames()` — Blocker.vb:378. Public, sorted snapshot of the table keys; feeds both the usage/help text and the unknown-preset error hint, so names can never drift from the live table.
 - `TryExpandPresets(presetArg, domains, errorMsg)` — Blocker.vb:393. Comma/semicolon split, trimmed, union deduped case-insensitively with order preserved (category order, then domain order). FAIL-CLOSED: ANY unknown token → emit NOTHING, return False, error names every unknown token plus all valid names (:411-417). Empty/Nothing arg → True with an empty list. A typo must never quietly UNDER-block.
 - CLI wiring: `DoBlock` (MonkMode/Program.vb:124) expands `--preset` at Program.vb:141-148 — BEFORE every side effect; an unknown category returns 1 before any hosts/service touch.
@@ -33,7 +33,7 @@ Presets are PURE INPUT: expanded domains flow into the SAME `domains` list as a 
 ## Known quirks — do not fix
 - `--preset --for 2h` (value omitted): `GetOption` (Program.vb:690) grabs the next arg, so `--for` becomes the preset value → "Unknown preset: --for" + safe abort. Identical behaviour to every valued option; harmless.
 - `DoBlock` wiring is verify-by-READING only: it does console/service I/O and cannot be unit-run without arming a block — live verification is the elevated manual smoke's job, never a dev-session run.
-- The single-dot-only `www.` rule is pre-existing behaviour shared with `--sites`; widening www coverage would be its own slice touching `BuildHostsEntries`, not a preset change.
+- The single-dot-only mirror rule is behaviour shared with `--sites`; the mirror set (`www./m./web./mobile.`) was widened from www.-only in slice D1c (14/07/2026) by touching `BuildHostsEntries` (both parity copies), not the preset table.
 
 ## Provenance & maintenance
 Distilled 06/07/2026 pre-model-sunset from Blocker.vb / ConfigIntegrity.vb / the monk-mode handoffs (esp. 2026-07-04-2206-d1a-site-presets.md). Line numbers cite the dirty D1b working tree. Re-verify every citation when the schema version consts (ConfigIntegrity.vb `CurrentSchemaVersion`, Blocker.vb `SetupSchemaVersion`) or the newest handoff in vault/dev/repos/monk-mode/handoffs/ change — the code consts are ground truth; handoff naming has drifted before.
