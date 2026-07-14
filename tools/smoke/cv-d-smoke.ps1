@@ -70,6 +70,14 @@ function WaitSvc([string]$want, [int]$sec) {
   while ((Get-Date) -lt $u) { if ((SvcState) -eq $want) { return $true }; Start-Sleep -Milliseconds 500 }
   return ((SvcState) -eq $want)
 }
+# A LIFT ends Stopped-but-present (RUNBOOK [E9]: the service strips hosts and stops itself;
+# its registration stays installed - only 'unblock --force' / cleanup deletes it). 'gone'
+# is accepted too so the helper keeps working if a teardown ever races a force-clean.
+function WaitSvcLifted([int]$sec) {
+  $u = (Get-Date).AddSeconds($sec)
+  while ((Get-Date) -lt $u) { if ((SvcState) -in @('Stopped','gone')) { return $true }; Start-Sleep -Milliseconds 500 }
+  return ((SvcState) -in @('Stopped','gone'))
+}
 # PIPE-WEDGE WARNING (belt-and-braces): NEVER pipe/capture a block-arm's stdout on an
 # OLD dist that predates the P2 notifier handle-inheritance fix. There, the CLI's
 # RegisterAndLaunchNotifier spawns mm_notify.exe so it INHERITS the CLI's stdout, so any
@@ -137,7 +145,7 @@ try {
   Check "CV2 block still enforced after refused unblock" ((SvcState) -eq 'Running' -and (HostsHas 'example\.com'))
   # the correct code lifts it (service adjudicates on its tick)
   & $monk unblock --code $codeA 2>&1 | Out-Null
-  Check "CV1 correct code lifted the block (service verified, <=40s)" (WaitSvc 'gone' 40)
+  Check "CV1 correct code lifted the block (service Stopped-or-gone, <=40s; RUNBOOK E9)" (WaitSvcLifted 40)
   Check "CV1 hosts block removed after code lift" (-not (HostsHas '#### MonkMode Entries ####'))
   ForceDown
 
@@ -202,7 +210,8 @@ try {
   $stSch = (& $monk status 2>&1 | ForEach-Object { "$_" }) -join "`n"
   Check "D5 status shows the armed schedule window state" ($stSch -match '(?i)window|schedule')
   & $monk schedule --clear 2>&1 | Out-Null
-  Check "#2 schedule --clear tore the service down (no orphan; window closed at 03:xx)" (WaitSvc 'gone' 35)
+  Check "#2 schedule --clear tore enforcement down (service Stopped-or-gone <=35s; RUNBOOK E9)" (WaitSvcLifted 35)
+  Check "#2 schedule --clear left no hosts orphan (marker block gone)" (-not (HostsHas '#### MonkMode Entries ####'))
   ForceDown
 
   # --- D2c: --all-session-kill arms AllSession=yes; the service kills the app --
