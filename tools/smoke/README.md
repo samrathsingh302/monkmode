@@ -11,6 +11,11 @@ canonical bump):
 powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
 ```
 
+⚠️ `build-dist.ps1` wipes `dist\` **including `monkmode_setup.ini`** — run
+`dist\monkmode.exe setup` once after every rebuild, or every arm refuses with
+exit 4 (fail-closed by design). No smoke script self-setups; this cost a 30-min
+re-run on 14/07/2026.
+
 Each script defaults `-Dist` to `repo\dist` (derived from its own location); pass
 `-Dist <path>` to point elsewhere. Ephemeral run outputs (transcripts, hosts
 backups) are written to `C:\Users\samra\monkmode-smoketest\` and are NOT
