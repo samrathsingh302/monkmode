@@ -56,6 +56,7 @@ if (-not $Dist) {
 $dist   = $Dist
 $monk   = Join-Path $dist 'monkmode.exe'
 $ini    = Join-Path $dist 'monkmode_settings.ini'
+$setupIni = Join-Path $dist 'monkmode_setup.ini'   # absent on a fresh dist -> arms refuse exit 4
 $hosts  = "$env:SystemRoot\System32\drivers\etc\hosts"
 $backup = 'C:\Users\samra\monkmode-smoketest\hosts.backup.txt'
 $cleanup = 'C:\Users\samra\monkmode-smoketest\cleanup.ps1'
@@ -85,6 +86,14 @@ if (-not $me.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administra
   Write-Host "This script must be run ELEVATED (as Administrator). Aborting." -ForegroundColor Red; exit 1
 }
 if (-not (Test-Path $monk)) { Write-Host "monkmode.exe not found at $monk. Build dist first (tools\build-dist.ps1)." -ForegroundColor Red; exit 1 }
+# build-dist.ps1 wipes monkmode_setup.ini, so a fresh dist arms fail-closed (exit
+# 4). Self-setup once (defaults suffice for this test) so the arm below isn't
+# silently refused. Idempotent: skipped when the file already exists.
+if (-not (Test-Path $setupIni)) {
+  Write-Host "No monkmode_setup.ini in dist -> running one-time 'monkmode setup' (fresh-dist precondition)." -ForegroundColor Yellow
+  & $monk setup | Out-Null
+  if (-not (Test-Path $setupIni)) { Write-Host "'monkmode setup' did not produce $setupIni (exit $LASTEXITCODE). Aborting." -ForegroundColor Red; exit 1 }
+}
 if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host "MONKMODE already exists. Run cleanup.ps1 first." -ForegroundColor Yellow; exit 1 }
 if (-not (Test-Path $backup)) { Copy-Item $hosts $backup -Force }
 

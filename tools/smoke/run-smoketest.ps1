@@ -81,6 +81,7 @@ Start-Transcript -Path $log -Force | Out-Null
 $dist     = $Dist
 $monk     = Join-Path $dist 'monkmode.exe'
 $ini      = Join-Path $dist 'monkmode_settings.ini'
+$setupIni = Join-Path $dist 'monkmode_setup.ini'   # CLI setup file; absent on a fresh dist -> arms refuse exit 4
 $snap     = Join-Path $dist 'monkmode_hosts.block'
 $hosts    = "$env:SystemRoot\System32\drivers\etc\hosts"
 $backup   = 'C:\Users\samra\monkmode-smoketest\hosts.backup.txt'
@@ -216,6 +217,18 @@ if (-not $me.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administra
   exit 1
 }
 if (-not (Test-Path $monk)) { Write-Host "monkmode.exe not found at $monk. Build dist first (tools\build-dist.ps1)." -ForegroundColor Red; exit 1 }
+
+# build-dist.ps1 wipes dist\ INCLUDING monkmode_setup.ini, so a fresh dist has no
+# setup file and every `block` arm fail-closes with exit 4. Self-setup once here
+# (defaults: no partner/cooloff/default-lists needed for the smoke) so the run is
+# not silently aborted (cost a 30-min re-run 14/07/2026). Idempotent: skipped when
+# the file already exists.
+if (-not (Test-Path $setupIni)) {
+  Write-Host "No monkmode_setup.ini in dist -> running one-time 'monkmode setup' (fresh-dist precondition)." -ForegroundColor Yellow
+  & $monk setup | Out-Null
+  if (-not (Test-Path $setupIni)) { Write-Host "'monkmode setup' did not produce $setupIni (exit $LASTEXITCODE). Aborting." -ForegroundColor Red; exit 1 }
+}
+
 if (-not (Test-Path $backup)) { Copy-Item $hosts $backup -Force }
 
 if (Get-Service MONKMODE -ErrorAction SilentlyContinue) {
