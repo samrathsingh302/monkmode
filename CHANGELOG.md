@@ -12,11 +12,48 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 ## [Unreleased]
 
-Queued, not yet landed (see `vault/dev/repos/monk-mode/tasks.md` for the live queue):
+Nothing queued (see `vault/dev/repos/monk-mode/tasks.md` for the live queue).
 
-- **D4b — persistent notifications.** WinRT Action-Center toasts to replace the
-  transient balloons, which fired but were not reliably seen (found in the
-  10/07/2026 watched sitting).
+## [1.0.0] — 16/07/2026
+
+First release. Everything the release candidate was waiting on has since been
+live-proven: the install/uninstall scripts passed their elevated drills, the
+real install landed (H3), and a real 24-hour block ran end-to-end on the
+maintainer's machine — armed, enforced, and exited via the sanctioned
+cooling-off path with a textbook lift (service stopped-but-present, hosts
+restored to the user's own content, guardian and notifier down).
+
+### Added
+
+- **D4b — persistent notifications.** WinRT Action-Centre toasts (a
+  notifier-only change) replace the transient balloons for block-armed, expiry
+  and clock-change notices; the block-start toast was live-confirmed persistent
+  in the notification centre (15/07/2026).
+- **D1c — subdomain mirror coverage.** Bare blocked domains now also expand to
+  their `www.` / `m.` / `web.` / `mobile.` mirrors in the hosts block;
+  live-verified under a social-preset block (14/07/2026).
+
+### Changed
+
+- **Smoke tooling only** (no product-code changes): the CV/D lift assertions now
+  follow the documented lift contract (a genuine expiry leaves the service
+  stopped-but-present; only `--force` deletes it), and `run-smoketest.ps1` /
+  `b7-failclosed-test.ps1` self-run `monkmode setup` on a fresh dist, closing
+  the arm-refusal trap after `build-dist.ps1` wipes the setup ini.
+
+### Live-verification
+
+- **14/07/2026 elevated batch:** B1–B7 full smoke **69/0** · CV/D **28/0** ·
+  P2 piped-arm proof — a deliberately piped `block` arm returned in **0.8 s**
+  (the pre-fix shape hung until expiry) · D1c subdomain mirrors live ·
+  H1/H2 live drills — install verified (4 exes + machine `PATH`), uninstall
+  clean on an idle machine, uninstall **refused** (exit 1, nothing touched)
+  against a live block, then reinstalled.
+- **First real block, end-to-end:** armed 14/07/2026 (snapchat + instagram,
+  24 h), enforced continuously, exited early via the sanctioned cooling-off
+  (the block held through the full cooling-off floor), clean teardown per the
+  lift contract on 15/07/2026.
+- **979/979** unit tests green; Release build 0 errors.
 
 ## [1.0.0-rc] — 10/07/2026
 
