@@ -210,8 +210,9 @@ bypass table (B1–B11) and full ceiling in the README, `docs/USER-GUIDE.md` and
 ## The fork base
 
 - **Upstream:** Cold Turkey by **Felix Belzile**, a 2011 VB.NET 2.0 WinForms
-  application, licensed **GPLv3** (see `COPYING`). The `master` branch preserves
-  the untouched original.
+  application, licensed **GPLv3** (see `COPYING`). The untouched original
+  survives as the root of this repository's history (commit `c0838c4`,
+  "0.6 Serious").
 - **Inherited and kept:** the LocalSystem enforcement service, the hosts-file
   blocking approach, the four-component split, and the config/notifier contracts.
 - **Rebuilt:** the .NET 8 migration, the CLI front-end, and every hardening layer

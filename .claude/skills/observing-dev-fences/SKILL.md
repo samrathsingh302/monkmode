@@ -26,7 +26,7 @@ a `CanStop=False` LocalSystem service. A careless dev command arms or damages th
   (CLAUDE.md:21).
 - [ ] Remote is named **`monkmode`**, NOT `origin`. **No push at all until slice H4** (the
   human-gated push slice in plans/fable5-slices.md).
-- [ ] `master` = the untouched original Cold Turkey fork base — never work on it (CLAUDE.md:22).
+- [ ] The untouched Cold Turkey fork base = root commit `c0838c4` "0.6 Serious" (no `master` branch exists) — never rewrite history beneath it (CLAUDE.md:22).
 - [ ] Dirty working-tree files = LIVE slice work in progress — never clean, stash, or checkout
   over them.
 
