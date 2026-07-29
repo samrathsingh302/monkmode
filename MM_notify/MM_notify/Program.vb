@@ -31,9 +31,19 @@ Option Explicit On
 Option Strict Off
 
 Imports Microsoft.Toolkit.Uwp.Notifications
+Imports System.Diagnostics
+Imports System.Threading
 Imports System.Windows.Forms
 
 Module Program
+
+    ' D4c: the process-lifetime root for the single-instance claim. This field is
+    ' load-bearing, not bookkeeping: a Mutex whose last managed reference is dropped
+    ' gets its handle closed by the finaliser, which would hand the claim straight to
+    ' the next spawn and re-open the double-notifier window. Never disposed - the
+    ' kernel object dies with the process, which IS the release we want (a crashed or
+    ' killed notifier frees the claim for the guardian's relaunch).
+    Private _singleInstanceClaim As Mutex
 
     <STAThread()>
     Sub Main()
@@ -47,6 +57,41 @@ Module Program
         ' if the compat probe ever throws, fall through to the normal launch (never worse than today).
         Try
             If ToastNotificationManagerCompat.WasCurrentProcessToastActivated() Then Return
+        Catch ex As Exception
+        End Try
+
+        ' D4c: single-instance guard. A reboot DURING a live block spawns the notifier
+        ' TWICE, deterministically: the SYSTEM-session guardian's tick sees a notifier
+        ' count of 0 straight after boot and relaunches one, and then Explorer processes
+        ' the HKCU `MonkMode_notify` Run entry and starts a second. Nothing stopped that
+        ' before this guard - Application.myapp's <SingleInstance>true</SingleInstance> is
+        ' DEAD in this project (only the VB application framework's generated Sub Main
+        ' honours it, and we bypass that with MyType=WindowsFormsWithCustomSubMain to drive
+        ' Application.Run ourselves, see the file header), and the D4b check above only
+        ' catches the toast-activation relaunch. Two notifiers means double toasts, double
+        ' Run-entry removal and double app-kill at expiry, and two concurrent [Time]
+        ' TimeChanging ini writers - worst case a torn write, which fails the MAC and so
+        ' fails CLOSED into a Hold (never an early lift, but a wedge).
+        '
+        ' Fail-SOFT, in the same direction as D4b, and deliberately so: this process does
+        ' the user-session app-kill and the clock-change compensation, so erroring BOTH
+        ' instances into exiting would stop blocked apps being killed - an UNDER-block,
+        ' strictly worse than the double-spawn we are fixing. So we stand down ONLY on the
+        ' deterministic "the object already existed" signal AND a second real mm_notify
+        ' process actually existing - losing the mutex alone is spoofable by a same-user
+        ' squatter (see ShouldStandDown's header for the vector and its residuals). If the
+        ' claim attempt OR the process count throws for any reason at all we fall through
+        ' and launch normally (never worse than today).
+        '
+        ' The claim is never released by us. It is a kernel handle that dies with the
+        ' process, so a crashed or killed notifier auto-frees it for the guardian's next
+        ' relaunch, and because we never WaitOne there is no AbandonedMutexException path.
+        Try
+            If Not SingleInstance.TryClaim(SingleInstance.NotifierMutexName, _singleInstanceClaim) Then
+                Dim liveCount As Integer =
+                    Process.GetProcessesByName(SingleInstance.NotifierProcessName).Length
+                If SingleInstance.ShouldStandDown(True, liveCount) Then Return
+            End If
         Catch ex As Exception
         End Try
 
