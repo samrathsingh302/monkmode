@@ -1,0 +1,9 @@
+# mm-reddit list
+# One domain per line. Lines starting with # are ignored.
+reddit.com
+old.reddit.com
+new.reddit.com
+sh.reddit.com
+np.reddit.com
+redd.it
+i.redd.it

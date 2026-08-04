@@ -1,0 +1,8 @@
+# mm-insta list - Instagram / WhatsApp
+# One domain per line. Lines starting with # are ignored.
+# Note: the real WhatsApp blocker is the app-kill (--apps WhatsApp.exe, wired into mm-insta).
+# These domains only cover the whatsapp.com WEBSITE - WhatsApp's actual chat traffic
+# (incl. WhatsApp Web) goes via *.whatsapp.net, which hosts blocking does NOT catch.
+# Your phone is unaffected.
+instagram.com
+whatsapp.com

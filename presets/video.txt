@@ -1,0 +1,10 @@
+# mm-video list - TikTok / Snapchat (the doom-scroll set)
+# One domain per line. Lines starting with # are ignored.
+# www. / m. / web. / mobile. mirrors are covered automatically by MonkMode.
+tiktok.com
+vm.tiktok.com
+snapchat.com
+# To block ALL of YouTube too, uncomment the next two lines TOGETHER.
+# (Shorts-only blocking is impossible at hosts level - see the v1.1 spec.)
+# youtube.com
+# youtu.be
