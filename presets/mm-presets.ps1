@@ -26,6 +26,22 @@ function MM-Default([string]$key) {
     if ($line) { ($line -split '=', 2)[1].Trim() } else { '2h' }
 }
 
+# The '23:59 today' target for `midnight`, rolled to TOMORROW when today's has gone (or is about
+# to). The CLI refuses any block that does not end MORE than 60 seconds out - MonkMode\Program.vb:277,
+# `If untilDate <= DateTime.Now.AddSeconds(60)` -> "The block must end at least a minute in the
+# future." (exit 1). So the old unconditional "today 23:59" silently FAILED TO ARM when run at or
+# near 23:59: nothing was blocked, precisely at the late-night hour the block is most wanted.
+# $LeadSeconds is deliberately wider than the CLI's own 60s floor: the CLI re-reads DateTime.Now
+# after this string is built, so a target computed at exactly the floor could still be refused by
+# the time monkmode.exe starts. 90s keeps that race off the table.
+# Pure - takes 'now' as a parameter and only returns a string, so the rollover is inspectable and
+# testable without waiting for 23:59 or arming anything.
+function MM-MidnightUntil([datetime]$Now = (Get-Date), [int]$LeadSeconds = 90) {
+    $target = $Now.Date.AddHours(23).AddMinutes(59)
+    if ($target -le $Now.AddSeconds($LeadSeconds)) { $target = $target.AddDays(1) }
+    $target.ToString('yyyy-MM-dd HH:mm')
+}
+
 function MM-Arm([string]$listFile, [string]$key, [string]$For, [string[]]$extraArgs) {
     if (-not (MM-IsAdmin)) {
         Write-Host 'Run this from an ELEVATED terminal (Win+X -> Terminal (Admin), then type powershell) - MonkMode refuses without it.' -ForegroundColor Yellow
@@ -35,7 +51,13 @@ function MM-Arm([string]$listFile, [string]$key, [string]$For, [string[]]$extraA
     $sites = MM-Sites $listFile
     if (-not $sites) { Write-Host "List $listFile is empty - nothing to block." -ForegroundColor Yellow; return }
     if ($For -eq 'midnight') {
-        $until = (Get-Date).ToString('yyyy-MM-dd') + ' 23:59'
+        $now = Get-Date
+        $until = MM-MidnightUntil $now
+        if ($until -notlike ($now.ToString('yyyy-MM-dd') + '*')) {
+            # Rolled past today's 23:59, so this is a ~24h block, not a short one. Say so BEFORE
+            # arming - a block can never be cut short once it starts.
+            Write-Host "Today's 23:59 has passed (or is too close to arm) - blocking until $until instead." -ForegroundColor Yellow
+        }
         & monkmode block --sites $sites @extraArgs --until $until
     } else {
         & monkmode block --sites $sites @extraArgs --for $For

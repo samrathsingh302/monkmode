@@ -314,7 +314,7 @@ Public Class Form1
         If killList Is Nothing OrElse killList = "" OrElse killList = "null" Then Return
         For Each proc As Process In Process.GetProcesses()
             Try
-                If proc.SessionId <> 0 AndAlso killList.Contains(proc.ProcessName & ".exe") Then
+                If proc.SessionId <> 0 AndAlso ProcessNameInKillList(killList, proc.ProcessName) Then
                     proc.Kill()
                 End If
             Catch ex As Exception
@@ -559,6 +559,19 @@ Public Class Form1
             sb.Append(app)
         Next
         Return sb.ToString()
+    End Function
+
+    ' Does the effective kill list name this live process's image? Case-INSENSITIVE (Ordinal): the
+    ' list holds whatever casing the user typed at arm time (PackApps only appends a missing ".exe",
+    ' it never lower-cases) while ProcessName reports the casing Windows holds for the running image,
+    ' so a case-SENSITIVE compare silently UNDER-killed ("WhatsApp.exe" in the list vs a live
+    ' "Whatsapp") - fail-open. Ignoring case only ever ADDS matches (widen-only), so no kill this
+    ' code used to make is removed. Still a SUBSTRING search, the old predicate's exact shape: a
+    ' token-exact match would NARROW it, and narrowing is the fail-open being fixed. Nothing/empty
+    ' => no match. Byte-for-byte Service1.ProcessNameInKillList (parity-pinned).
+    Friend Shared Function ProcessNameInKillList(ByVal killList As String, ByVal processName As String) As Boolean
+        If killList Is Nothing OrElse killList.Length = 0 Then Return False
+        Return killList.IndexOf(If(processName, "") & ".exe", StringComparison.OrdinalIgnoreCase) >= 0
     End Function
 
     ' C5b (c3): is a schedule armed? macValid AND the Spec parses to >=1 window - the EXACT

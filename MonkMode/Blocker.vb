@@ -496,9 +496,12 @@ Module Blocker
     ' canonical surface and NO schema bump (a code constant, not stored config - nothing extra to
     ' protect). The categories are FIXED (an EDITABLE user *default* app list is the separate D2b
     ' slice, stored MAC-covered on the setup ini, mirroring D1b). Entries are the bare process-image
-    ' names BlockedApps/the notifier compare on (lowercase, .exe); the exact bundle membership is
-    ' refinable product content, NOT a correctness surface (an absent process name simply never
-    ' matches - over-listing is harmless, it just tries to kill a name that isn't running).
+    ' names BlockedApps/the notifier compare on, ".exe"-suffixed; they are written lowercase purely
+    ' as a house convention - casing is NOT load-bearing, because the kill-side match
+    ' (Service1/Form1.ProcessNameInKillList) is OrdinalIgnoreCase, so an entry's casing never has to
+    ' agree with the live ProcessName. The exact bundle membership is refinable product content, NOT
+    ' a correctness surface (an absent process name simply never matches - over-listing is harmless,
+    ' it just tries to kill a name that isn't running).
     Private ReadOnly AppPresetTable As New Dictionary(Of String, String())(StringComparer.OrdinalIgnoreCase) From {
         {"games", New String() {"steam.exe", "epicgameslauncher.exe", "battle.net.exe", "riotclientservices.exe", "leagueclient.exe", "valorant.exe", "robloxplayerbeta.exe"}},
         {"chat", New String() {"discord.exe", "telegram.exe", "whatsapp.exe", "signal.exe", "slack.exe"}}

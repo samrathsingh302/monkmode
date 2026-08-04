@@ -1114,7 +1114,7 @@ Public Class Service1
         For Each Proc In processList
             If ProcessInKillScope(iniAllSessionKill, Proc.SessionId) Then
                 Try
-                    If killList.Contains(Proc.ProcessName + ".exe") Then
+                    If ProcessNameInKillList(killList, Proc.ProcessName) Then
                         Proc.Kill()
                     End If
                 Catch ex As Exception
@@ -1508,6 +1508,29 @@ Public Class Service1
     ' Pure + Shared so the widening decision is unit-tested without enumerating live processes.
     Friend Shared Function ProcessInKillScope(ByVal allSessionKill As Boolean, ByVal sessionId As Integer) As Boolean
         Return allSessionKill OrElse sessionId = 0
+    End Function
+
+    ' The per-tick app-kill MATCH decision: does the effective kill list name this live process's
+    ' image? Case-INSENSITIVE (Ordinal), because the two sides are written by different parties and
+    ' need not agree on casing: the list holds whatever the user typed at arm time (PackApps,
+    ' Blocker.vb:630, only APPENDS a missing ".exe" - it never lower-cases, so `--apps WhatsApp.exe`
+    ' is stored verbatim; the schedule's own apps, Blocker.vb:1059, likewise), while ProcessName
+    ' reports the casing Windows holds for the running image. The old case-SENSITIVE String.Contains
+    ' therefore silently UNDER-killed - a list entry "WhatsApp.exe" against a live ProcessName
+    ' "Whatsapp" simply never matched, and the app stayed open. That is FAIL-OPEN, the one thing
+    ' enforcement may never do, so the match ignores case.
+    ' WIDEN-ONLY, the property that makes this safe: ignoring case can only ever ADD matches -
+    ' every (list, name) pair that matched case-sensitively still matches - so no kill this code
+    ' used to make can be removed by the change.
+    ' Deliberately still a SUBSTRING search over the delimited list, the old predicate's exact shape.
+    ' A token-exact match would be tidier but would NARROW the set (it would stop "code.exe" matching
+    ' a list holding "vscode.exe"), and narrowing here is precisely the fail-open this fixes.
+    ' Nothing/empty list => no match: the old loop's NullReferenceException on a Nothing list was
+    ' swallowed by its own Catch and killed nothing either, so this is the same outcome, not a narrow.
+    ' Pure + Shared so the matcher is unit-tested without enumerating live processes.
+    Friend Shared Function ProcessNameInKillList(ByVal killList As String, ByVal processName As String) As Boolean
+        If killList Is Nothing OrElse killList.Length = 0 Then Return False
+        Return killList.IndexOf(If(processName, "") & ".exe", StringComparison.OrdinalIgnoreCase) >= 0
     End Function
 
     ' ===== C3b: partner code (R1 - the FAST service-adjudicated early exit) =====
