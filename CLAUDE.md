@@ -1,5 +1,5 @@
 # MonkMode — Claude Code instructions
-**Read order, every session:** 1) this file · 2) current state = newest dated handoff in `C:\Users\samra\vault\dev\repos\monk-mode\handoffs\` (always — gotchas; handoffs moved to the vault 26/06/2026, no repo HANDOFF.md) + `C:\Users\samra\vault\dev\repos\monk-mode\specs\ARCHITECTURE.md` (bypass surface B1–B11) + README
+**Read order, every session:** 1) this file · 2) current state = newest dated handoff in `C:\Users\samra\OneDrive\dev\repos\monk-mode\handoffs\` (always — gotchas; handoffs moved to the vault 26/06/2026, no repo HANDOFF.md) + `C:\Users\samra\OneDrive\dev\repos\monk-mode\specs\ARCHITECTURE.md` (bypass surface B1–B11) + README
 House doctrine, defaults and the session ritual load from the global `~/.claude/CLAUDE.md` — not restated here (trimmed 05/08/2026).
 
 ## What this is
@@ -12,7 +12,7 @@ A personal, tamper-resistant website/app self-control blocker for Windows — Sa
 - `MM_notify/` → `mm_notify.exe` (user-session notifier: app-kill, clock-change comp, tray-toast at expiry).
 - `MM_guard/` → `mm_guard.exe` (SYSTEM-session watchdog guardian spawned by the service: SCM-restarts a killed service, relaunches the notifier; exits only on genuine expiry).
 - Build: `C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release` (SDK is user-scoped, not on PATH).
-- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is the manual elevated smoke test (last run **63/63, 14/06/2026** — B1 + B2 + B4 + B6 + B7 live-verified, B3 registration live-verified; the B3 in-Safe-Mode run was not reboot-tested, by choice; rebuild `dist\` first via `tools\build-dist.ps1`, see `C:\Users\samra\vault\dev\repos\monk-mode\specs\ARCHITECTURE.md` §4).
+- Tests: `MonkMode.Tests/` (xunit, C# — VB can't reference both `MonkMode` and `monkmode` namespaces); run `C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln`. Pure unit tests on strings/temp paths only. Live-path verification is the manual elevated smoke test (last run **63/63, 14/06/2026** — B1 + B2 + B4 + B6 + B7 live-verified, B3 registration live-verified; the B3 in-Safe-Mode run was not reboot-tested, by choice; rebuild `dist\` first via `tools\build-dist.ps1`, see `C:\Users\samra\OneDrive\dev\repos\monk-mode\specs\ARCHITECTURE.md` §4).
 
 ## Fences
 - **Never run the service / CLI during dev or audit** — it edits the LIVE hosts file, adds an HKCU `Run` entry, and installs a `CanStop=False` LocalSystem service. Read-only analysis unless Samrath explicitly asks for a live test. Unit tests must never touch real hosts/registry/SCM either.
@@ -27,4 +27,4 @@ One slice per session · Phase 1 done; Phase 2 (threat model) deferred — don't
 ---
 
 ## Markdown lives in the dev zone, never this repo
-All working md → `C:\Users\samra\vault\dev\repos\monk-mode\` (`handoffs\` newest dated file = current state · `tasks.md` · `logs\` `specs\` `plans\` `guides\` `prompts\`). This repo keeps only code + `README.md` + `CLAUDE.md` + skills/agents + fixtures + product content. Session ritual (catch-up, handoff at close, split-when-large, seeded spawns) = the global contract in `~/.claude/CLAUDE.md` (trimmed 05/08/2026; ROUTER retired).
+All working md → `C:\Users\samra\OneDrive\dev\repos\monk-mode\` (`handoffs\` newest dated file = current state · `tasks.md` · `logs\` `specs\` `plans\` `guides\` `prompts\`). This repo keeps only code + `README.md` + `CLAUDE.md` + skills/agents + fixtures + product content. Session ritual (catch-up, handoff at close, split-when-large, seeded spawns) = the global contract in `~/.claude/CLAUDE.md` (trimmed 05/08/2026; ROUTER retired).
