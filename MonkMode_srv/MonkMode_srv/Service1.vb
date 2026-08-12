@@ -2626,56 +2626,66 @@ Public Class Service1
         End Try
     End Sub
 
-    ' B7: build the canonical (decrypted plaintext, fixed field order) the MAC is
-    ' computed over, from a loaded ini. Byte-identical construction to the CLI's
-    ' Blocker.CanonicalFromIni and the notifier/guardian readers - all parties
-    ' must derive the same input or the MAC would never agree. [Integrity]
-    ' Key/Mac are excluded (you can't MAC the MAC). Friend (not Private) so the
-    ' end-to-end parity tests can prove this reader derives a byte-identical
-    ' canonical to the CLI writer and the other readers - the tautological
-    ' BuildCanonical literal comparison can't catch a drift in THIS wrapper (e.g.
-    ' if someone started decrypting CustomSites or stopped decrypting ProcessList).
-    Friend Function CanonicalFromIni(ByVal iniFile As IniFile) As String
-        Dim untilEnc As String = iniFile.GetKeyValue("Time", "Until")
-        Dim highWaterEnc As String = iniFile.GetKeyValue("Time", "HighWater")
-        Dim coolOffEnc As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
-        Dim procEnc As String = iniFile.GetKeyValue("Process", "List")
-        Dim nowEnc As String = iniFile.GetKeyValue("CurrentTime", "Now")
-        Dim sites As String = iniFile.GetKeyValue("User", "CustomSites")
-        ' C3b: the [Partner] fields are stored PLAINTEXT (as-stored, like CustomSites -
-        ' NOT decrypted like the datetimes); absent => "" (a v4 config read under v5
-        ' code therefore builds a different canonical and freezes, R9). MAC-covered.
-        Dim partnerSalt As String = iniFile.GetKeyValue("Partner", "Salt")
-        Dim partnerHash As String = iniFile.GetKeyValue("Partner", "Hash")
-        Dim partnerUnlockedAt As String = iniFile.GetKeyValue("Partner", "UnlockedAt")
-        ' C4: the [Commit] Committed flag ("yes"/"no", plaintext-as-stored, MAC-covered).
-        Dim committed As String = iniFile.GetKeyValue("Commit", "Committed")
-        ' C5b: [Schedule] Spec is the recurring-window rule stored PLAINTEXT (as-stored,
-        ' like CustomSites/[Partner] - NOT decrypted); [Schedule] ActiveUntil is an
-        ' ENCRYPTED datetime like CoolOffUntil ("" = no window open). Absent => "" (a v6
-        ' config read under v7 code builds a different canonical and freezes, R9).
-        Dim scheduleSpec As String = iniFile.GetKeyValue("Schedule", "Spec")
-        Dim scheduleActiveEnc As String = iniFile.GetKeyValue("Schedule", "ActiveUntil")
-        ' C6b: the [CoolOff] Duration configured cooling-off wait in seconds, stored
-        ' PLAINTEXT (as-stored, like Committed - NOT decrypted); absent => "" (a v7 config
-        ' read under v8 code builds a different canonical and freezes, R9). MAC-covered.
-        Dim coolOffDuration As String = iniFile.GetKeyValue("CoolOff", "Duration")
-        ' D2c: the [Process] AllSession all-session-app-kill flag, plaintext-as-stored (like
-        ' Committed - NOT decrypted); absent => "" (a v8 config read under v9 code builds a
-        ' different canonical and freezes, R9). MAC-covered.
-        Dim allSessionKill As String = iniFile.GetKeyValue("Process", "AllSession")
+    ' B7/B4: builds the v10 two-level canonical the MAC is computed over, from a
+    ' loaded ini - the global header, then one 16-line block per slot for
+    ' pos = 1 To the CLAMPED [Slots] SlotCount. Every party (this writer, plus the
+    ' service/guardian/notifier readers) must derive a byte-identical string or the
+    ' MAC never validates and every block freezes, so BELOW the `crypt` alias line
+    ' this body is byte-identical text in all four copies - diff them on any edit.
+    ' [Integrity] Key/Mac are excluded (you can't MAC the MAC); missing values pass
+    ' through as "". Stale [SlotN] sections beyond SlotCount are never read.
+    Friend Function CanonicalFromIni(ByVal ini As IniFile) As String
+        Dim crypt As Simple3Des = encryptionW      ' the ONLY line that differs across the four copies
+        ' Globals: HighWater/Now/[Guard] HoldUntil are ENCRYPTED datetimes (decrypted
+        ' here, like every datetime); [Slots] NextSlotId/SlotCount and [Guard]
+        ' ArmedCount are plaintext ints (the MAC is their protection).
+        Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
+        Dim nowEnc As String = ini.GetKeyValue("CurrentTime", "Now")
+        Dim guardHoldEnc As String = ini.GetKeyValue("Guard", "HoldUntil")
+        Dim highWaterPlain As String = If(highWaterEnc = "", "", crypt.DecryptData(highWaterEnc))
+        Dim nowPlain As String = If(nowEnc = "", "", crypt.DecryptData(nowEnc))
+        Dim guardHoldPlain As String = If(guardHoldEnc = "", "", crypt.DecryptData(guardHoldEnc))
 
-        Dim untilPlain As String = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
-        Dim highWaterPlain As String = If(highWaterEnc = "", "", encryptionW.DecryptData(highWaterEnc))
-        ' C2b: CoolOffUntil is an encrypted datetime like Until/HighWater; absent/
-        ' empty ("" - no cooling-off pending) passes through verbatim.
-        Dim coolOffPlain As String = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
-        Dim procPlain As String = If(procEnc = "" OrElse procEnc = "null", procEnc, encryptionW.DecryptData(procEnc))
-        Dim nowPlain As String = If(nowEnc = "", "", encryptionW.DecryptData(nowEnc))
-        ' C5b: ScheduleActiveUntil decrypts exactly like CoolOffUntil ("" = no window open).
-        Dim scheduleActivePlain As String = If(scheduleActiveEnc = "", "", encryptionW.DecryptData(scheduleActiveEnc))
+        ' The CLAMPED count is BOTH the header value and the loop bound, so a forged
+        ' SlotCount can only ever build a canonical nothing can match -> freeze.
+        Dim slotCount As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+        Dim slots As New System.Text.StringBuilder()
+        For pos As Integer = 1 To slotCount
+            Dim sec As String = "Slot" & pos.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            ' Per slot, the ENCRYPTED datetimes are Until/StartAt/CoolOffUntil/
+            ' ScheduleActiveUntil; everything else - INCLUDING Sites/Apps/UrlPatterns -
+            ' is plaintext-as-stored. No "null" sentinel any more (v10): "no apps" is "".
+            Dim untilEnc As String = ini.GetKeyValue(sec, "Until")
+            Dim startAtEnc As String = ini.GetKeyValue(sec, "StartAt")
+            Dim coolOffEnc As String = ini.GetKeyValue(sec, "CoolOffUntil")
+            Dim scheduleActiveEnc As String = ini.GetKeyValue(sec, "ScheduleActiveUntil")
+            slots.Append(ConfigIntegrity.BuildSlotCanonical(pos,
+                ini.GetKeyValue(sec, "Id"),
+                If(startAtEnc = "", "", crypt.DecryptData(startAtEnc)),
+                ini.GetKeyValue(sec, "DurationSeconds"),
+                If(untilEnc = "", "", crypt.DecryptData(untilEnc)),
+                ini.GetKeyValue(sec, "Sites"),
+                ini.GetKeyValue(sec, "Apps"),
+                ini.GetKeyValue(sec, "UrlPatterns"),
+                ini.GetKeyValue(sec, "AllSession"),
+                ini.GetKeyValue(sec, "ScheduleSpec"),
+                If(scheduleActiveEnc = "", "", crypt.DecryptData(scheduleActiveEnc)),
+                If(coolOffEnc = "", "", crypt.DecryptData(coolOffEnc)),
+                ini.GetKeyValue(sec, "CoolOffDuration"),
+                ini.GetKeyValue(sec, "PartnerSalt"),
+                ini.GetKeyValue(sec, "PartnerHash"),
+                ini.GetKeyValue(sec, "PartnerUnlockedAt"),
+                ini.GetKeyValue(sec, "Committed")))
+        Next
 
-        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion, untilPlain, procPlain, sites, nowPlain, highWaterPlain, coolOffPlain, partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec, scheduleActivePlain, coolOffDuration, allSessionKill)
+        Return ConfigIntegrity.BuildCanonical(ConfigIntegrity.CurrentSchemaVersion,
+                                             highWaterPlain,
+                                             nowPlain,
+                                             ini.GetKeyValue("Slots", "NextSlotId"),
+                                             slotCount,
+                                             guardHoldPlain,
+                                             ini.GetKeyValue("Guard", "ArmedCount"),
+                                             slots.ToString())
     End Function
 
     ' B7 live MAC gate (the DPAPI seam - smoke-tested, not unit-tested). Reads

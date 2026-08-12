@@ -380,7 +380,6 @@ public class PartnerCodeEndToEndTests
 {
     private static readonly CultureInfo EnCa = new("en-CA");
     private static readonly byte[] Key = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
-    private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
     private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
     private static readonly string HwText = Hw.ToString(EnCa);
     private static readonly string FutureUntil = Hw.AddHours(8).ToString(EnCa);
@@ -392,7 +391,7 @@ public class PartnerCodeEndToEndTests
 
     // The armed config's canonical (UnlockedAt="", not committed) and its MAC.
     private static string ArmedCanonical() =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, "", "no", "", "", "", "");
+        OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, "", "no", "", "", "", "");
 
     [Fact]
     public void CorrectCode_SetsUnlockedAt_AndTheBlockLiftsAcrossServiceAndGuardian()
@@ -407,8 +406,7 @@ public class PartnerCodeEndToEndTests
 
         // 3. It sets the MAC-covered UnlockedAt and re-stamps (a NEW canonical + MAC).
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
-        var unlockedCanonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "", "", "");
+        var unlockedCanonical = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "", "", "");
         var unlockedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key);
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(unlockedCanonical, unlockedMac, Key);
         Assert.True(macValid);
@@ -432,8 +430,7 @@ public class PartnerCodeEndToEndTests
         // The load-bearing edge: once a code has unlocked (UnlockedAt set, valid MAC),
         // the guardian must STAND DOWN, not SCM-restart the service in the stopMe() gap.
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
-        var unlockedCanonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "", "", "");
+        var unlockedCanonical = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "no", "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlockedCanonical, MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key), Key);
 
@@ -462,8 +459,7 @@ public class PartnerCodeEndToEndTests
         var armedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(ArmedCanonical(), Key);
         var attackerCode = "MYOWN-CODE1";
         var attackerHash = MonkMode.ConfigIntegrity.ComputePartnerHash(Salt, attackerCode);
-        var swapped = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, attackerHash, "", "no", "", "", "", "");
+        var swapped = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, attackerHash, "", "no", "", "", "", "");
 
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(swapped, armedMac, Key);
         Assert.False(macValid);   // the swap broke the MAC
@@ -482,8 +478,7 @@ public class PartnerCodeEndToEndTests
         // stored MAC no longer validates => freeze. A non-empty UnlockedAt is only
         // trusted UNDER a valid MAC (i.e. only if the service wrote it after a code).
         var armedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(ArmedCanonical(), Key);
-        var forged = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, Hw.ToString(EnCa), "no", "", "", "", "");
+        var forged = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, Hw.ToString(EnCa), "no", "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(forged, armedMac, Key);
         Assert.False(macValid);
         Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", Hw.ToString(EnCa), "", HwText, 5, macValid, scheduleArmed: false));
@@ -497,8 +492,7 @@ public class PartnerCodeEndToEndTests
         // original MAC no longer validates => freeze. Can't delete your way to "no code
         // required".
         var armedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(ArmedCanonical(), Key);
-        var stripped = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", "", "", "", "no", "", "", "", "");
+        var stripped = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", "", "", "", "no", "", "", "", "");
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(stripped, armedMac, Key));
     }
 
@@ -519,8 +513,7 @@ public class PartnerCodeEndToEndTests
         // A genuinely COMMITTED block (Committed="yes") whose code was verified: the
         // code-unlock still lifts it (the exit a commit deliberately keeps).
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
-        var unlockedCanonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "yes", "", "", "", "");
+        var unlockedCanonical = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "yes", "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlockedCanonical, MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key), Key);
         Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
@@ -549,20 +542,14 @@ public class PartnerCodeBackupCarryTests
             var hash = MonkMode.ConfigIntegrity.ComputePartnerHash(salt, code);
 
             var ini = new MonkMode.IniFile();
-            ini.AddSection("User");
-            ini.SetKeyValue("User", "CustomSites", "reddit.com;");
-            ini.AddSection("Time");
-            ini.SetKeyValue("Time", "Until", enc.EncryptData(new DateTime(2026, 12, 31, 18, 0, 0).ToString(ca)));
+            // v10: the [Partner] verifier is PER-SLOT ([Slot1] PartnerSalt/PartnerHash/
+            // PartnerUnlockedAt) - each block has its own code. Still plaintext-as-stored.
+            OneSlot.WriteSlot1((sec, k, v) => ini.SetKeyValue(sec, k, v),
+                enc.EncryptData(new DateTime(2026, 12, 31, 18, 0, 0).ToString(ca)), "", "reddit.com;",
+                enc.EncryptData(new DateTime(2026, 6, 25, 12, 0, 0).ToString(ca)),
+                enc.EncryptData(new DateTime(2026, 6, 25, 12, 0, 0).ToString(ca)), "",
+                Convert.ToBase64String(salt), hash, "", "no", "", "", "", "");
             ini.SetKeyValue("Time", "TimeChanging", "no");
-            ini.SetKeyValue("Time", "HighWater", enc.EncryptData(new DateTime(2026, 6, 25, 12, 0, 0).ToString(ca)));
-            ini.AddSection("CurrentTime");
-            ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(new DateTime(2026, 6, 25, 12, 0, 0).ToString(ca)));
-            ini.AddSection("Process");
-            ini.SetKeyValue("Process", "List", "null");
-            ini.AddSection("Partner");
-            ini.SetKeyValue("Partner", "Salt", Convert.ToBase64String(salt));
-            ini.SetKeyValue("Partner", "Hash", hash);
-            ini.SetKeyValue("Partner", "UnlockedAt", "");
             ini.Save(primary);
 
             // The refresh a legitimate write performs (MAC validity injected true, as
@@ -583,7 +570,7 @@ public class PartnerCodeBackupCarryTests
             restored.Load(primary);
             Assert.Equal(canonicalBefore, MonkMode.Blocker.CanonicalFromIni(restored));
             Assert.True(MonkMode.ConfigIntegrity.PartnerCodeMatches(
-                code, restored.GetKeyValue("Partner", "Salt"), restored.GetKeyValue("Partner", "Hash")));
+                code, restored.GetKeyValue("Slot1", "PartnerSalt"), restored.GetKeyValue("Slot1", "PartnerHash")));
         }
         finally
         {

@@ -231,6 +231,25 @@ Public Class IniFile
         End Try
     End Sub
 
+    ' Remove the named section and every key in it; True if one was there, False (a
+    ' no-op) if not. Case-insensitive like every other lookup. Both m_sections AND
+    ' m_order must drop it together - m_order is what Save re-emits from and
+    ' m_sections is what GetKeyValue/AddSection look in, so dropping one only would
+    ' leave Save writing a section no reader can see (or the reverse). The removal is
+    ' by OBJECT reference, since List(Of IniSection).Remove has no case-insensitive
+    ' by-name overload. Used to RETIRE a slot: a finished [SlotN] is deleted from the
+    ' file outright rather than flagged, so no stale state can be resurrected.
+    Public Function RemoveSection(ByVal name As String) As Boolean
+        Dim key As String = If(name, "")
+        Dim sec As IniSection = Nothing
+        If Not m_sections.TryGetValue(key, sec) Then
+            Return False
+        End If
+        m_sections.Remove(key)
+        m_order.Remove(sec)
+        Return True
+    End Function
+
     Private Function GetOrCreateSection(ByVal name As String) As IniSection
         Dim key As String = If(name, "")
         Dim sec As IniSection = Nothing

@@ -61,12 +61,13 @@ public class CanonicalParityTests
     // caller-supplied parameter). Shared by the four byte-identical copies.
     private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
 
-    // A representative block, exactly the shape the CLI writes: an encrypted
-    // [Time] Until, an encrypted [CurrentTime] Now, an encrypted [Process] List,
-    // and a PLAINTEXT [User] CustomSites (the CLI stores CustomSites in the
-    // clear - only Until/Now/ProcessList are encrypted). CustomSites is chosen to
-    // be valid Base64-looking-ish but the point is it must pass through the
-    // canonical VERBATIM (never decrypted); ProcessList must be decrypted.
+    // A representative block, in the v10 slot shape: the ENCRYPTED datetimes
+    // ([Time] HighWater, [CurrentTime] Now, and the slot's Until/CoolOffUntil/
+    // ScheduleActiveUntil) plus PLAINTEXT lists and flags (the slot's Sites/Apps/
+    // UrlPatterns, the [Partner] fields, Committed, ScheduleSpec, CoolOffDuration,
+    // AllSession). The list values must pass through the canonical VERBATIM; the
+    // datetimes must be decrypted. Each constant is distinct so a wrapper reading
+    // the wrong field, or getting the decrypt split wrong, diverges visibly.
     private const string UntilPlain = "2026-12-31 11:59:59 p.m.";
     private const string NowPlain = "2026-06-25 12:00:00 p.m.";
     private const string ProcListPlain = "chrome.exe;brave.exe;steam.exe;";
@@ -129,83 +130,42 @@ public class CanonicalParityTests
     // Same logical content into each project's own IniFile. The encrypted fields
     // get the shared ciphertext; CustomSites is stored plaintext, as the CLI does.
 
+    // v10: the same logical block, now as ONE SLOT - the encrypted datetimes stay
+    // encrypted in the file (the wrappers decrypt them), and Sites/Apps ride the slot
+    // as PLAINTEXT (P8 - a blocklist is not a secret, the MAC is its protection).
+    // OneSlot.WriteSlot1 writes the identical 22 keys into whichever project's IniFile
+    // the delegate targets, so no copy can drift from the others by a typo.
+    private static void Fill(Action<string, string, string> set) =>
+        OneSlot.WriteSlot1(set,
+            UntilEnc, ProcListPlain, CustomSitesPlain, NowEnc, HighWaterEnc, CoolOffUntilEnc,
+            PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain,
+            ScheduleSpecPlain, ScheduleActiveUntilEnc, CoolOffDurationPlain, AllSessionKillPlain);
+
     private static MonkMode.IniFile CliIni()
     {
         var ini = new MonkMode.IniFile();
-        ini.SetKeyValue("Time", "Until", UntilEnc);
-        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
-        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
-        ini.SetKeyValue("CurrentTime", "Now", NowEnc);
-        ini.SetKeyValue("Process", "List", ProcListEnc);
-        ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
-        ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
-        ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
-        ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
-        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
-        ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
-        ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
-        ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
-        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
+        Fill((s, k, v) => ini.SetKeyValue(s, k, v));
         return ini;
     }
 
     private static monkmode.IniFile ServiceIni()
     {
         var ini = new monkmode.IniFile();
-        ini.SetKeyValue("Time", "Until", UntilEnc);
-        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
-        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
-        ini.SetKeyValue("CurrentTime", "Now", NowEnc);
-        ini.SetKeyValue("Process", "List", ProcListEnc);
-        ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
-        ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
-        ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
-        ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
-        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
-        ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
-        ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
-        ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
-        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
+        Fill((s, k, v) => ini.SetKeyValue(s, k, v));
         return ini;
     }
 
     private static mm_guard.IniFile GuardianIni()
     {
         var ini = new mm_guard.IniFile();
-        ini.SetKeyValue("Time", "Until", UntilEnc);
-        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
-        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
-        ini.SetKeyValue("CurrentTime", "Now", NowEnc);
-        ini.SetKeyValue("Process", "List", ProcListEnc);
-        ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
-        ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
-        ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
-        ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
-        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
-        ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
-        ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
-        ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
-        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
+        Fill((s, k, v) => ini.SetKeyValue(s, k, v));
         return ini;
     }
 
     private static mm_notify.IniFile NotifierIni()
     {
         var ini = new mm_notify.IniFile();
-        ini.SetKeyValue("Time", "Until", UntilEnc);
-        ini.SetKeyValue("Time", "HighWater", HighWaterEnc);
-        ini.SetKeyValue("Time", "CoolOffUntil", CoolOffUntilEnc);
-        ini.SetKeyValue("CurrentTime", "Now", NowEnc);
-        ini.SetKeyValue("Process", "List", ProcListEnc);
-        ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
-        ini.SetKeyValue("Partner", "Salt", PartnerSaltPlain);
-        ini.SetKeyValue("Partner", "Hash", PartnerHashPlain);
-        ini.SetKeyValue("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
-        ini.SetKeyValue("Commit", "Committed", CommittedPlain);
-        ini.SetKeyValue("Schedule", "Spec", ScheduleSpecPlain);
-        ini.SetKeyValue("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
-        ini.SetKeyValue("CoolOff", "Duration", CoolOffDurationPlain);
-        ini.SetKeyValue("Process", "AllSession", AllSessionKillPlain);
+        Fill((s, k, v) => ini.SetKeyValue(s, k, v));
         return ini;
     }
 
@@ -233,31 +193,38 @@ public class CanonicalParityTests
     }
 
     [Fact]
-    public void TheCanonical_DecryptsUntilNowProcessList_ButLeavesCustomSitesVerbatim()
+    public void TheCanonical_DecryptsTheDatetimes_ButLeavesTheListsAndFlagsVerbatim()
     {
-        // Pin WHAT the wrappers must do: decrypt Until/HighWater/CoolOffUntil/
-        // Now/ProcessList, pass CustomSites through verbatim. If a wrapper
-        // started decrypting CustomSites, stopped decrypting ProcessList, or
-        // stopped decrypting the B4 HighWater / C2b CoolOffUntil fields, this
-        // exact string would change and the test fails loudly. (Mirrors
-        // BuildCanonical's pinned format test, but through the real reader, end
-        // to end.)
+        // Pin WHAT the wrappers must do, through the REAL reader, end to end. v10's
+        // decrypt set is exactly the datetimes: the globals HighWater/Now (and [Guard]
+        // HoldUntil) plus each slot's Until/StartAt/CoolOffUntil/ScheduleActiveUntil.
+        // Everything else - INCLUDING Sites, Apps and UrlPatterns - passes through
+        // verbatim. If a wrapper started decrypting a list, or stopped decrypting one of
+        // the datetimes, this exact string would change and the test fails loudly.
         Assert.Equal(
             Ver + "\n" +
-            "Until=" + UntilPlain + "\n" +
             "HighWater=" + HighWaterPlain + "\n" +
-            "CoolOffUntil=" + CoolOffUntilPlain + "\n" +
-            "ProcessList=" + ProcListPlain + "\n" +
-            "CustomSites=" + CustomSitesPlain + "\n" +
             "Now=" + NowPlain + "\n" +
-            "PartnerSalt=" + PartnerSaltPlain + "\n" +
-            "PartnerHash=" + PartnerHashPlain + "\n" +
-            "PartnerUnlockedAt=" + PartnerUnlockedAtPlain + "\n" +
-            "Committed=" + CommittedPlain + "\n" +
-            "ScheduleSpec=" + ScheduleSpecPlain + "\n" +
-            "ScheduleActiveUntil=" + ScheduleActiveUntilPlain + "\n" +
-            "CoolOffDuration=" + CoolOffDurationPlain + "\n" +
-            "AllSessionKill=" + AllSessionKillPlain + "\n",
+            "NextSlotId=" + OneSlot.NextSlotId + "\n" +
+            "SlotCount=1\n" +
+            "GuardHoldUntil=" + OneSlot.GuardHoldUntil + "\n" +
+            "GuardArmedCount=" + OneSlot.GuardArmedCount + "\n" +
+            "Slot1.Id=" + OneSlot.Id + "\n" +
+            "Slot1.StartAt=\n" +
+            "Slot1.DurationSeconds=\n" +
+            "Slot1.Until=" + UntilPlain + "\n" +
+            "Slot1.Sites=" + CustomSitesPlain + "\n" +
+            "Slot1.Apps=" + ProcListPlain + "\n" +
+            "Slot1.UrlPatterns=\n" +
+            "Slot1.AllSession=" + AllSessionKillPlain + "\n" +
+            "Slot1.ScheduleSpec=" + ScheduleSpecPlain + "\n" +
+            "Slot1.ScheduleActiveUntil=" + ScheduleActiveUntilPlain + "\n" +
+            "Slot1.CoolOffUntil=" + CoolOffUntilPlain + "\n" +
+            "Slot1.CoolOffDuration=" + CoolOffDurationPlain + "\n" +
+            "Slot1.PartnerSalt=" + PartnerSaltPlain + "\n" +
+            "Slot1.PartnerHash=" + PartnerHashPlain + "\n" +
+            "Slot1.PartnerUnlockedAt=" + PartnerUnlockedAtPlain + "\n" +
+            "Slot1.Committed=" + CommittedPlain + "\n",
             CliCanonical());
     }
 
@@ -280,87 +247,82 @@ public class CanonicalParityTests
     }
 
     [Fact]
-    public void NegativeContract_DecryptingCustomSites_DoesNotMatchTheCorrectCanonical()
+    public void NegativeContract_DecryptingTheSlotLists_DoesNotMatchTheCorrectCanonical()
     {
-        // The most likely future mistake, pinned as a contract: if a wrapper
-        // DECRYPTED CustomSites (instead of passing it through), it would build a
-        // different canonical, so a MAC over the correct canonical must NOT
-        // validate the wrong one. CustomSites here is deliberately a value that
-        // DOES decrypt to something else, to make the divergence concrete.
-        //
-        // Build the "wrong" canonical the way a buggy wrapper would: decrypt
-        // CustomSites too. (We encrypt a plaintext, store the CIPHERTEXT as
-        // CustomSites, and show that decrypting-vs-not yields different canonicals.)
+        // The most likely future mistake, pinned as a contract: if a wrapper DECRYPTED
+        // a slot's Sites or Apps (instead of passing it through), it would build a
+        // different canonical, so a MAC over the correct canonical must NOT validate the
+        // wrong one. Both values here are deliberately ones that DO decrypt to something
+        // else, to make the divergence concrete. (v10 widened this contract: under v9
+        // only CustomSites was plaintext-as-stored; now Sites, Apps AND UrlPatterns are.)
         var encryptedSites = new MonkMode.Simple3Des(Passphrase).EncryptData("decrypted-sites;");
 
-        var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // CustomSites VERBATIM (correct)
-        var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // CustomSites DECRYPTED (the bug)
+        var correct = OneSlot.Canonical(UntilPlain, ProcListEnc, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // lists VERBATIM (correct)
+        var buggySites = OneSlot.Canonical(UntilPlain, ProcListEnc, "decrypted-sites;", NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // Sites DECRYPTED (the bug)
+        var buggyApps = OneSlot.Canonical(UntilPlain, ProcListPlain, encryptedSites, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // Apps DECRYPTED (the bug)
+
+        Assert.NotEqual(correct, buggySites);
+        Assert.NotEqual(correct, buggyApps);
+
+        // And a MAC over the correct canonical must reject both - i.e. a reader that
+        // started decrypting either list would fail every MAC check.
+        var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(buggySites, macOverCorrect, Key));
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(buggyApps, macOverCorrect, Key));
+    }
+
+    [Fact]
+    public void NegativeContract_NotDecryptingTheSlotUntil_DoesNotMatchTheCorrectCanonical()
+    {
+        // The mirror mistake: a wrapper that STOPPED decrypting a slot's Until (the
+        // datetime that decides when the block ends) would put the ciphertext into the
+        // canonical instead of the plaintext, diverging from every other party. Pin that
+        // this breaks MAC agreement.
+        var correct = OneSlot.Canonical(UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // Until DECRYPTED (correct)
+        var buggy = OneSlot.Canonical(UntilEnc, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // Until CIPHERTEXT (the bug)
 
         Assert.NotEqual(correct, buggy);
-
-        // And a MAC over the correct canonical must reject the buggy one - i.e.
-        // a reader that started decrypting CustomSites would fail every MAC check.
         var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(buggy, macOverCorrect, Key));
     }
 
     [Fact]
-    public void NegativeContract_NotDecryptingProcessList_DoesNotMatchTheCorrectCanonical()
+    public void LiteralNullApps_IsJustAnOrdinaryValue_AcrossAllWrappers()
     {
-        // The mirror mistake: a wrapper that STOPPED decrypting [Process] List
-        // would put the ciphertext into the canonical instead of the plaintext,
-        // diverging from every other party. Pin that this breaks MAC agreement.
-        var correct = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListPlain, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // ProcessList DECRYPTED (correct)
-        var buggy = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, UntilPlain, ProcListEnc, CustomSitesPlain, NowPlain, HighWaterPlain, CoolOffUntilPlain, PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain, ScheduleSpecPlain, ScheduleActiveUntilPlain, CoolOffDurationPlain, AllSessionKillPlain);  // ProcessList CIPHERTEXT (the bug)
-
-        Assert.NotEqual(correct, buggy);
-        var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
-        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(buggy, macOverCorrect, Key));
-    }
-
-    [Fact]
-    public void NullProcessList_PassesThroughVerbatim_AcrossAllWrappers()
-    {
-        // An apps-only-absent block stores [Process] List = "null" (verbatim, not
-        // encrypted). Every wrapper must pass "null" through without trying to
-        // decrypt it (decrypting "null" as Base64 would fail-closed to "" and
-        // diverge). Pin the four wrappers still agree in this stored shape.
-        static void SetNullProc(Action<string, string, string> set)
-        {
-            set("Time", "Until", UntilEnc);
-            set("Time", "HighWater", HighWaterEnc);
-            set("Time", "CoolOffUntil", CoolOffUntilEnc);
-            set("CurrentTime", "Now", NowEnc);
-            set("Process", "List", "null");
-            set("User", "CustomSites", CustomSitesPlain);
-            set("Partner", "Salt", PartnerSaltPlain);
-            set("Partner", "Hash", PartnerHashPlain);
-            set("Partner", "UnlockedAt", PartnerUnlockedAtPlain);
-            set("Commit", "Committed", CommittedPlain);
-            set("Schedule", "Spec", ScheduleSpecPlain);
-            set("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
-            set("CoolOff", "Duration", CoolOffDurationPlain);
-            set("Process", "AllSession", AllSessionKillPlain);
-        }
+        // v9 stored [Process] List = "null" for "no apps" and every wrapper carried a
+        // "decrypt this UNLESS it is the literal null" special case - four places to get
+        // wrong. v10 (P9) retired the sentinel: Apps is never decrypted at all, so the
+        // string "null" is just an ordinary value that passes straight through, and "no
+        // apps" is "". Pin that no wrapper has quietly kept a special case: all four
+        // agree, and the value survives verbatim.
+        static void SetNullApps(Action<string, string, string> set) =>
+            OneSlot.WriteSlot1(set,
+                UntilEnc, "null", CustomSitesPlain, NowEnc, HighWaterEnc, CoolOffUntilEnc,
+                PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain,
+                ScheduleSpecPlain, ScheduleActiveUntilEnc, CoolOffDurationPlain, AllSessionKillPlain);
 
         var cliIni = new MonkMode.IniFile();
-        SetNullProc((s, k, v) => cliIni.SetKeyValue(s, k, v));
+        SetNullApps((s, k, v) => cliIni.SetKeyValue(s, k, v));
         var srvIni = new monkmode.IniFile();
-        SetNullProc((s, k, v) => srvIni.SetKeyValue(s, k, v));
+        SetNullApps((s, k, v) => srvIni.SetKeyValue(s, k, v));
         var guardIni = new mm_guard.IniFile();
-        SetNullProc((s, k, v) => guardIni.SetKeyValue(s, k, v));
+        SetNullApps((s, k, v) => guardIni.SetKeyValue(s, k, v));
         var notifyIni = new mm_notify.IniFile();
-        SetNullProc((s, k, v) => notifyIni.SetKeyValue(s, k, v));
+        SetNullApps((s, k, v) => notifyIni.SetKeyValue(s, k, v));
 
         var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
-        Assert.Contains("ProcessList=null\n", cli);
+        Assert.Contains("Slot1.Apps=null\n", cli);
         Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
         Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
         Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
+
+        // And the empty-apps shape (what v10 actually writes) also agrees everywhere.
+        var emptyCli = new MonkMode.IniFile();
+        OneSlot.WriteSlot1((s, k, v) => emptyCli.SetKeyValue(s, k, v),
+            UntilEnc, "", CustomSitesPlain, NowEnc, HighWaterEnc, CoolOffUntilEnc,
+            PartnerSaltPlain, PartnerHashPlain, PartnerUnlockedAtPlain, CommittedPlain,
+            ScheduleSpecPlain, ScheduleActiveUntilEnc, CoolOffDurationPlain, AllSessionKillPlain);
+        Assert.Contains("Slot1.Apps=\n", MonkMode.Blocker.CanonicalFromIni(emptyCli));
     }
 
     [Fact]
@@ -376,6 +338,21 @@ public class CanonicalParityTests
         // NOT read or validate that MAC here (that is the DPAPI seam, smoke-
         // tested) - we only compare CANONICALS, which are DPAPI-free. So this
         // stays inside the no-DPAPI fence for what it asserts.
+        //
+        // S1/S2 SEAM (v1.1): S1 moved the READERS to v10 but deliberately left the arm
+        // path alone - WriteConfig still emits the v9 single-block sections, which carry
+        // no [Slots] section, so every reader derives a SlotCount=0 canonical.
+        // !! That is NOT the fail-closed outcome, and a tree in this state must NEVER be
+        // installed. A config stamped by v9 BINARIES does freeze under v10 code (that is
+        // the ForwardMigration case, and it is genuinely fail-closed). But a config armed
+        // by THIS tree's own CLI is stamped with the same v10 wrapper the readers verify
+        // with, so macValid stays TRUE while every v9-located enforcement field sits
+        // OUTSIDE the canonical - uncovered, and therefore tamper-OPEN under a valid MAC
+        // (a forged [Partner] UnlockedAt or a back-dated [Time] Until would lift cleanly).
+        // S2 restores coverage for fresh arms; S3a moves the enforcement readers over.
+        // The thing worth pinning today is that all four readers still agree on it. When
+        // S2 rewrites the arm path to emit [Slot1], the SlotCount=0 assertion below
+        // fails LOUDLY and is the marker for restoring the field-level assertions.
         var iniPath = MonkMode.Blocker.IniPath();
         try
         {
@@ -398,6 +375,8 @@ public class CanonicalParityTests
             Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
+            Assert.StartsWith(Ver + "\n", cli);
+            Assert.Contains("SlotCount=0\n", cli);   // the S1/S2 seam - see above
         }
         finally
         {

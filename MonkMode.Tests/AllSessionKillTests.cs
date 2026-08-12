@@ -104,20 +104,18 @@ public class AllSessionKillCanonicalTests
         0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
     };
 
-    private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
-
     [Fact]
     public void AllSessionKillFlag_IsMacCovered_FlippingItBreaksTheMac()
     {
         // An armed all-session block (AllSessionKill="yes") stamps a MAC over that canonical;
         // a raw edit that flips it back to session-0-only (""/"no") no longer validates, so the
         // block FREEZES (fail-closed) rather than silently narrowing its kill scope. R6-shaped.
-        var armed = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "", "", "", "", "no", "", "", "", "yes");
+        var armed = OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "", "", "", "", "no", "", "", "", "yes");
         var mac = MonkMode.ConfigIntegrity.ComputeConfigMac(armed, Key);
         Assert.True(MonkMode.ConfigIntegrity.ConfigMacIsValid(armed, mac, Key));
 
-        var clearedToDefault = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "", "", "", "", "no", "", "", "", "");
-        var clearedToNo = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "", "", "", "", "no", "", "", "", "no");
+        var clearedToDefault = OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "", "", "", "", "no", "", "", "", "");
+        var clearedToNo = OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "", "", "", "", "no", "", "", "", "no");
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(clearedToDefault, mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(clearedToNo, mac, Key));
     }
@@ -195,7 +193,19 @@ public class AllSessionKillWriteConfigTests
             notifyIni.Load(iniPath);
 
             var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
-            Assert.Contains("AllSessionKill=yes\n", cli);
+            // S1/S2 SEAM (v1.1): S1 moved the readers to the v10 per-slot canonical but
+            // deliberately left the arm path on the v9 sections, so a WriteConfig'd ini
+            // has no [Slots] section and every reader derives SlotCount=0.
+            // !! NOT fail-closed - do NOT install a tree in this state. StampFreshMac
+            // stamps with the SAME v10 wrapper the readers verify with, so the stamp is
+            // self-consistent and macValid stays TRUE; the v9-located enforcement fields
+            // (Until, CustomSites, Process List/AllSession, Partner *, Committed, CoolOff,
+            // Schedule) are simply OUTSIDE the canonical and therefore UNCOVERED - i.e.
+            // tamper-OPEN under a valid MAC, not frozen. S2 restores coverage for fresh
+            // arms; S3a moves the enforcement readers. The four-reader agreement below is
+            // the half that still holds today. When S2 rewrites the arm path to emit
+            // [Slot1], this assertion fails LOUDLY and "Slot1.AllSession=yes\n" replaces it.
+            Assert.Contains("SlotCount=0\n", cli);
             Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));

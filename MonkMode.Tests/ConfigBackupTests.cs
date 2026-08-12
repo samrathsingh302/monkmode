@@ -85,12 +85,14 @@ public class ConfigBackupTests
     {
         var s = new MonkMode.Simple3Des(Passphrase);
         var ini = new MonkMode.IniFile();
-        ini.SetKeyValue("Time", "Until", s.EncryptData(UntilPlain));
-        ini.SetKeyValue("Time", "HighWater", s.EncryptData(HighWaterPlain));
+        // v10 slot shape: the datetimes encrypted, the lists plaintext-as-stored. The
+        // un-MAC'd housekeeping keys ([Time] TimeChanging, [User] Done) stay where they
+        // are - they are outside the canonical either way, and keeping them here is what
+        // makes this a realistic multi-section file for the structural-usability gate.
+        OneSlot.WriteSlot1((sec, k, v) => ini.SetKeyValue(sec, k, v),
+            s.EncryptData(UntilPlain), ProcListPlain, CustomSitesPlain, s.EncryptData(NowPlain),
+            s.EncryptData(HighWaterPlain), "", "", "", "", "no", "", "", "", "");
         ini.SetKeyValue("Time", "TimeChanging", "no");
-        ini.SetKeyValue("CurrentTime", "Now", s.EncryptData(NowPlain));
-        ini.SetKeyValue("Process", "List", s.EncryptData(ProcListPlain));
-        ini.SetKeyValue("User", "CustomSites", CustomSitesPlain);
         ini.SetKeyValue("User", "Done", "no");
         var canonical = MonkMode.Blocker.CanonicalFromIni(ini);
         ini.SetKeyValue("Integrity", "Mac", MonkMode.ConfigIntegrity.ComputeConfigMac(canonical, Key));

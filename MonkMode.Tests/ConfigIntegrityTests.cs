@@ -81,8 +81,12 @@ public class ConfigIntegrityTests
     // committed / no schedule / default cooling-off / session-0-only kill - the common
     // shape here; those fields have dedicated tests in PartnerCodeTests / CommitBlockTests /
     // ScheduleTests / CoolOffTests / AllSessionKillTests).
+    // v10: every one of those fields now lives in SLOT 1 of the two-level canonical.
+    // OneSlot.Canonical (SlotCanonicalTests.cs) renders exactly that, from the same
+    // argument list these MAC-coverage tests always used - the field moved, the fact
+    // being pinned ("flip it and the stamp stops validating") did not.
     private static string Canonical(string until) =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 12:00:00 p.m.", "", "", "", "", "", "", "", "", "");
+        OneSlot.Canonical(until, "chrome.exe;", "reddit.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 12:00:00 p.m.", "", "", "", "", "", "", "", "", "");
 
     [Fact]
     public void RoundTrip_ValidMac_Verifies()
@@ -147,57 +151,57 @@ public class ConfigIntegrityTests
         // The original carries non-empty [Schedule] tokens ("SS"/"SA") and a non-empty
         // C6b CoolOffDuration ("1800") so the schedule/duration cases below differ from
         // it in ONLY their one field.
-        var original = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", "");
+        var original = OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", "");
         var mac = MonkMode.ConfigIntegrity.ComputeConfigMac(original, Key);
 
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "b.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "b.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "evil.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "evil.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N2", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N2", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         // B4: a forged HighWater (the clock-forward-by-config attack) must not validate.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "9999-01-01", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "9999-01-01", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         // C2b: a forged CoolOffUntil (the skip-the-wait-by-config attack) must not validate.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "1970-01-01", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "1970-01-01", "PS", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         // C3b/R6: a swapped-in partner Hash (the attacker's own verifier) must not
         // validate - that is what makes "tampered hash = no code valid = freeze".
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "ATTACKER-HASH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "ATTACKER-HASH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         // C3b: a forged salt must not validate either.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "ATTACKER-SALT", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "ATTACKER-SALT", "PH", "", "no", "SS", "SA", "1800", ""), mac, Key));
         // C3b: a forged UnlockedAt (the raw-edit "I'm unlocked" exit-flag attack)
         // must not validate - so a non-empty UnlockedAt is only trusted under a
         // valid MAC, i.e. only if the service wrote it after verifying a code.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "2020-01-01 12:00:00 p.m.", "no", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "2020-01-01 12:00:00 p.m.", "no", "SS", "SA", "1800", ""), mac, Key));
         // C4/R6: flipping the Committed flag (un-committing to re-enable cooling-off)
         // must not validate - so a committed block can never be silently un-committed
         // (the raw edit freezes it instead).
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "yes", "SS", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "yes", "SS", "SA", "1800", ""), mac, Key));
         // C5b: a forged ScheduleSpec (rewriting the recurring-window rule) must not validate.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "EVIL-SPEC", "SA", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "EVIL-SPEC", "SA", "1800", ""), mac, Key));
         // C5b: a forged ScheduleActiveUntil (a past value to end an open window early)
         // must not validate - the converted deadline is as unforgeable as CoolOffUntil.
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "1970-01-01", "1800", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "1970-01-01", "1800", ""), mac, Key));
         // C6b: a forged CoolOffDuration (shortening the configured cooling-off wait by
         // raw edit) must not validate - so the duration is only trusted under a valid MAC.
         // (Defence in depth: even if it validated, the service's max(configured, floor)
         // clamp means a value below the floor can never shorten the wait below the floor.)
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "0", ""), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "0", ""), mac, Key));
         // D2c: flipping the AllSessionKill flag (original "" = session-0-only; forged "yes" to
         // widen, or a raw edit either way) must not validate - the flag is only trusted under a
         // valid MAC. (Defence in depth: it is a WIDEN-only union the service reads un-gated, so a
         // forged "yes" would only ever ADD kills; this pins it is nonetheless MAC-covered.)
         Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
-            MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", "yes"), mac, Key));
+            OneSlot.Canonical("U", "a.exe;", "x.com;", "N", "HW", "CO", "PS", "PH", "", "no", "SS", "SA", "1800", "yes"), mac, Key));
     }
 
     [Fact]
@@ -207,36 +211,60 @@ public class ConfigIntegrityTests
         // canonical this way; a change to the order, the tag, the separators or
         // the field names would silently break cross-party MAC agreement, so the
         // string is pinned literally and the test fails loudly on any drift.
-        var c = MonkMode.ConfigIntegrity.BuildCanonical(
-            Ver, "2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.", "2026-06-25 12:30:00 p.m.", "c2FsdA==", "aGFzaA==", "2026-06-25 1:00:00 p.m.", "yes", "v1;12345:0900-1700;sites=reddit.com;apps=", "2026-06-25 2:00:00 p.m.", "5400", "yes");
+        // v10: this is the ONE-slot shape (the two-slot skeleton, which also pins
+        // the ascending slot order, is SlotCanonicalTests.V10_ByteLiteral_TwoSlots).
+        var c = OneSlot.Canonical("2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.", "2026-06-25 12:30:00 p.m.", "c2FsdA==", "aGFzaA==", "2026-06-25 1:00:00 p.m.", "yes", "v1;12345:0900-1700;sites=reddit.com;apps=", "2026-06-25 2:00:00 p.m.", "5400", "yes");
         Assert.Equal(
-            "v9\n" +
-            "Until=2026-06-25 5:04:33 p.m.\n" +
+            "v10\n" +
             "HighWater=2026-06-25 11:00:00 a.m.\n" +
-            "CoolOffUntil=2026-06-25 12:30:00 p.m.\n" +
-            "ProcessList=chrome.exe;brave.exe;\n" +
-            "CustomSites=reddit.com;x.com;\n" +
             "Now=2026-06-25 12:00:00 p.m.\n" +
-            "PartnerSalt=c2FsdA==\n" +
-            "PartnerHash=aGFzaA==\n" +
-            "PartnerUnlockedAt=2026-06-25 1:00:00 p.m.\n" +
-            "Committed=yes\n" +
-            "ScheduleSpec=v1;12345:0900-1700;sites=reddit.com;apps=\n" +
-            "ScheduleActiveUntil=2026-06-25 2:00:00 p.m.\n" +
-            "CoolOffDuration=5400\n" +
-            "AllSessionKill=yes\n",
+            "NextSlotId=2\n" +
+            "SlotCount=1\n" +
+            "GuardHoldUntil=\n" +
+            "GuardArmedCount=1\n" +
+            "Slot1.Id=1\n" +
+            "Slot1.StartAt=\n" +
+            "Slot1.DurationSeconds=\n" +
+            "Slot1.Until=2026-06-25 5:04:33 p.m.\n" +
+            "Slot1.Sites=reddit.com;x.com;\n" +
+            "Slot1.Apps=chrome.exe;brave.exe;\n" +
+            "Slot1.UrlPatterns=\n" +
+            "Slot1.AllSession=yes\n" +
+            "Slot1.ScheduleSpec=v1;12345:0900-1700;sites=reddit.com;apps=\n" +
+            "Slot1.ScheduleActiveUntil=2026-06-25 2:00:00 p.m.\n" +
+            "Slot1.CoolOffUntil=2026-06-25 12:30:00 p.m.\n" +
+            "Slot1.CoolOffDuration=5400\n" +
+            "Slot1.PartnerSalt=c2FsdA==\n" +
+            "Slot1.PartnerHash=aGFzaA==\n" +
+            "Slot1.PartnerUnlockedAt=2026-06-25 1:00:00 p.m.\n" +
+            "Slot1.Committed=yes\n",
             c);
     }
 
     [Fact]
-    public void BuildCanonical_PassesNullAndEmptyTokensThroughVerbatim()
+    public void BuildCanonical_PassesEmptyTokensThroughVerbatim_AndTheNullSentinelIsJustAValue()
     {
-        // "null"/"" are stored verbatim (an apps-only or sites-only block; a ""
-        // CoolOffUntil = no cooling-off pending), so they must appear in the
-        // canonical unchanged - the input just has to be reproducible across
-        // parties, not interpreted.
-        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "U", "null", "", "N", "HW", "", "", "", "", "", "", "", "", "");
-        Assert.Equal("v9\nUntil=U\nHighWater=HW\nCoolOffUntil=\nProcessList=null\nCustomSites=\nNow=N\nPartnerSalt=\nPartnerHash=\nPartnerUnlockedAt=\nCommitted=\nScheduleSpec=\nScheduleActiveUntil=\nCoolOffDuration=\nAllSessionKill=\n", c);
+        // "" is stored verbatim (a sites-only block; a "" CoolOffUntil = no cooling-off
+        // pending), so an unset field must appear as a bare "Key=" line - the input just
+        // has to be reproducible across parties, not interpreted. Every one of the 16
+        // slot keys is ALWAYS emitted, so an absent key can never shorten one config's
+        // canonical into another's.
+        //
+        // v10 (P9) RETIRED the "null" no-apps sentinel: v9 stored [Process] List="null"
+        // and every wrapper special-cased "don't decrypt this one". v10 stores "" and
+        // Apps is never decrypted at all, so "null" is now just an ordinary string that
+        // passes straight through - pinned here so nobody reintroduces the special case.
+        var c = OneSlot.Canonical("U", "", "", "N", "HW", "", "", "", "", "", "", "", "", "");
+        Assert.Equal(
+            "v10\nHighWater=HW\nNow=N\nNextSlotId=2\nSlotCount=1\nGuardHoldUntil=\nGuardArmedCount=1\n" +
+            "Slot1.Id=1\nSlot1.StartAt=\nSlot1.DurationSeconds=\nSlot1.Until=U\nSlot1.Sites=\nSlot1.Apps=\n" +
+            "Slot1.UrlPatterns=\nSlot1.AllSession=\nSlot1.ScheduleSpec=\nSlot1.ScheduleActiveUntil=\n" +
+            "Slot1.CoolOffUntil=\nSlot1.CoolOffDuration=\nSlot1.PartnerSalt=\nSlot1.PartnerHash=\n" +
+            "Slot1.PartnerUnlockedAt=\nSlot1.Committed=\n", c);
+
+        var withNull = OneSlot.Canonical("U", "null", "", "N", "HW", "", "", "", "", "", "", "", "", "");
+        Assert.Contains("Slot1.Apps=null\n", withNull);
+        Assert.NotEqual(c, withNull);
     }
 
     [Fact]
@@ -292,10 +320,16 @@ public class ConfigIntegrityTests
     [MemberData(nameof(Untils))]
     public void AllFourCopies_ProduceIdenticalCanonical(string until)
     {
-        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM", "SS", "SA", "CD", "AS");
-        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM", "SS", "SA", "CD", "AS");
-        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM", "SS", "SA", "CD", "AS");
-        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM", "SS", "SA", "CD", "AS");
+        // Called on each copy DIRECTLY (not through the OneSlot shim), because the whole
+        // point is that the four byte-identical copies of BOTH v10 functions agree.
+        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1",
+            MonkMode.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
+        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1",
+            monkmode.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
+        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1",
+            mm_guard.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
+        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1",
+            mm_notify.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
         Assert.Equal(cli, srv);
         Assert.Equal(cli, guard);
         Assert.Equal(cli, notify);
@@ -305,7 +339,7 @@ public class ConfigIntegrityTests
     [MemberData(nameof(Untils))]
     public void AllFourCopies_ProduceIdenticalMac(string until)
     {
-        var c = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM", "SS", "SA", "CD", "AS");
+        var c = OneSlot.Canonical(until, "chrome.exe;", "reddit.com;", "N", "HW", "CO", "PS", "PH", "PU", "CM", "SS", "SA", "CD", "AS");
         var cli = MonkMode.ConfigIntegrity.ComputeConfigMac(c, Key);
         var srv = monkmode.ConfigIntegrity.ComputeConfigMac(c, Key);
         var guard = mm_guard.ConfigIntegrity.ComputeConfigMac(c, Key);
@@ -372,7 +406,7 @@ public class ConfigIntegrityTests
         // What the upgraded readers now build from the same values (an absent
         // CoolOffUntil, [Partner] fields, Committed, [Schedule] fields, the C6b
         // [CoolOff] Duration and the D2c AllSessionKill flag all read as "").
-        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw, "", "", "", "", "", "", "", "", "");
+        var currentCanonical = OneSlot.Canonical(until, proc, sites, now, hw, "", "", "", "", "", "", "", "", "");
         Assert.StartsWith(Ver + "\n", currentCanonical);   // the version tag really changed
         Assert.NotEqual(oldCanonical, currentCanonical);
 
@@ -389,14 +423,15 @@ public class ConfigIntegrityTests
     }
 
     [Fact]
-    public void ForwardMigration_V8SchemaMacUnderV9Code_FailsClosed_FreezesBlock()
+    public void ForwardMigration_V8SchemaMacUnderCurrentCode_FailsClosed_FreezesBlock()
     {
-        // The D2c instance of the R9 freeze: a block armed under v8 (C6b [CoolOff]
-        // Duration present, NO [Process] AllSession flag) runs under the upgraded v9
-        // binaries. The v9 readers build "v9\n...AllSessionKill=\n" from the same stored
-        // values, so the byte-exact old v8 stamp cannot validate it - macValid goes False
-        // and the block FREEZES (never silent-accept, never auto-lift). Mirrors
-        // ForwardMigration_OldSchemaMacUnderCurrentCode for the v8->v9 bump; op rule
+        // The D2c instance of the R9 freeze, kept as a REGRESSION pin across every later
+        // bump: a block armed under v8 (C6b [CoolOff] Duration present, NO [Process]
+        // AllSession flag) runs under upgraded binaries. The current readers build a
+        // different canonical from the same stored values, so the byte-exact old v8 stamp
+        // cannot validate it - macValid goes False and the block FREEZES (never
+        // silent-accept, never auto-lift). Mirrors
+        // ForwardMigration_OldSchemaMacUnderCurrentCode for the v8 tag; op rule
         // "arm after upgrading, not across an upgrade" carries over.
         const string until = "2026-12-31 11:59:59 p.m.";
         const string proc = "chrome.exe;";
@@ -430,11 +465,10 @@ public class ConfigIntegrityTests
             "CoolOffDuration=" + cd + "\n";
         var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
 
-        // What the upgraded v9 readers build from the same stored values (absent
-        // [Process] AllSession reads as ""). Same earlier values, so ONLY the version tag
-        // + the new AllSessionKill line differ - isolating the bump.
-        var currentCanonical = MonkMode.ConfigIntegrity.BuildCanonical(Ver, until, proc, sites, now, hw, co, psalt, phash, "", "yes", sspec, sactive, cd, "");
-        Assert.Equal("v9", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
+        // What the upgraded readers build from the same stored values, carried into
+        // slot 1 of the v10 two-level canonical.
+        var currentCanonical = OneSlot.Canonical(until, proc, sites, now, hw, co, psalt, phash, "", "yes", sspec, sactive, cd, "");
+        Assert.Equal("v10", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
         Assert.NotEqual(oldCanonical, currentCanonical);
 
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
@@ -456,6 +490,75 @@ public class ConfigIntegrityTests
                 monkmode.Service1.ScheduleActive("", storedHw), scheduleArmed: false));
         Assert.False(monkmode.Service1.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
         Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
+    }
+
+    [Fact]
+    public void ForwardMigration_V9SchemaMacUnderV10Code_FailsClosed_FreezesBlock()
+    {
+        // The v1.1 (multi-block) instance of the R9 freeze, and the one that matters
+        // OPERATIONALLY right now: there is a real v9 monkmode_settings.ini deployed on
+        // this machine. Under the v10 binaries the readers build a TWO-LEVEL canonical -
+        // and, because the v9 file has no [Slots] section at all, ParseSlotCount returns
+        // 0, so the v10 canonical carries the header and NO slot lines. Nothing about
+        // the v9 stamp can validate that => macValid False => the block FREEZES.
+        //
+        // This is the CORRECT behaviour and is why S1 deliberately implements NO
+        // migration: an old config is never silently re-blessed, and never auto-lifts.
+        // (Re-arming after the upgrade rewrites the file; the stale-v9 rule that makes
+        // a service-ABSENT rewrite possible is the arm path's business, not the
+        // canonical's.) Built as a raw literal, like every ForwardMigration test, so it
+        // stays independent of whatever BuildCanonical looks like later.
+        const string until = "2026-12-31 11:59:59 p.m.";
+        const string proc = "chrome.exe;";
+        const string sites = "reddit.com;";
+        const string now = "2026-06-25 12:00:00 p.m.";
+        const string hw = "2026-06-25 11:00:00 a.m.";
+
+        var oldCanonical =
+            "v9\n" +
+            "Until=" + until + "\n" +
+            "HighWater=" + hw + "\n" +
+            "CoolOffUntil=\n" +
+            "ProcessList=" + proc + "\n" +
+            "CustomSites=" + sites + "\n" +
+            "Now=" + now + "\n" +
+            "PartnerSalt=\n" +
+            "PartnerHash=\n" +
+            "PartnerUnlockedAt=\n" +
+            "Committed=no\n" +
+            "ScheduleSpec=\n" +
+            "ScheduleActiveUntil=\n" +
+            "CoolOffDuration=\n" +
+            "AllSessionKill=\n";
+        var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
+
+        // The v10 canonical the upgraded readers derive from that same v9 FILE: the
+        // encrypted globals still decrypt, but there is no [Slots] section, so
+        // ParseSlotCount => 0 => zero slot blocks.
+        var v10FromAV9File = MonkMode.ConfigIntegrity.BuildCanonical(Ver, hw, now, "", 0, "", "", "");
+        Assert.Equal("v10\nHighWater=" + hw + "\nNow=" + now + "\nNextSlotId=\nSlotCount=0\nGuardHoldUntil=\nGuardArmedCount=\n", v10FromAV9File);
+        Assert.NotEqual(oldCanonical, v10FromAV9File);
+
+        var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(v10FromAV9File, oldMac, Key);
+        Assert.False(macValid);
+
+        // ...and the same holds for the fully-populated v10 reading (a hand-migrated
+        // file): the version tag alone already breaks the stamp.
+        var v10Populated = OneSlot.Canonical(until, proc, sites, now, hw, "", "", "", "", "no", "", "", "", "");
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(v10Populated, oldMac, Key));
+
+        // End-to-end through the REAL gates: even with a genuinely past Until the
+        // block stays standing on the heartbeat, the shared exit and the guardian.
+        var pastUntil = new DateTime(2020, 1, 1, 12, 0, 0).ToString(new CultureInfo("en-CA"));
+        var storedHw = new DateTime(2030, 1, 1, 12, 0, 0).ToString(new CultureInfo("en-CA"));
+        Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
+            monkmode.Service1.ClassifyHeartbeat(macValid,
+                monkmode.Service1.BlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5),
+                monkmode.Service1.CoolOffElapsedTime("", storedHw),
+                monkmode.Service1.PartnerUnlocked(""),
+                monkmode.Service1.ScheduleActive("", storedHw), scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveBlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5, macValid));
+        Assert.False(mm_guard.Guardian.EffectiveBlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5, macValid));
     }
 }
 

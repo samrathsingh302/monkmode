@@ -74,37 +74,68 @@ Friend Module ConfigIntegrity
     ' accountability-code fields) -> v6 (C4: added the [Commit] Committed flag) ->
     ' v7 (C5b: added the [Schedule] Spec + ActiveUntil scheduled-window fields) ->
     ' v8 (C6b: added the [CoolOff] Duration configured-cooling-off-duration field) ->
-    ' v9 (D2c: added the [Process] AllSession all-session-app-kill flag).
+    ' v9 (D2c: added the [Process] AllSession all-session-app-kill flag) ->
+    ' v10 (v1.1 S1: the MULTI-BLOCK clean break - a two-level canonical, a global
+    ' header plus one 16-line block per armed slot; every v9 single-block field
+    ' moved into its slot; the "null" no-apps sentinel retired for "").
     ' The four copies MUST share this value or the parties would stamp/verify
     ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v9"
+    Friend Const CurrentSchemaVersion As String = "v10"
 
-    ' The canonical string the MAC is computed over: the schema version tag plus
-    ' one Key=Value line per protected field, vbLf-separated, in a FIXED order.
+    ' The hard ceiling on concurrent blocks (v1.1). Slots live in the ini as the
+    ' fixed sections [Slot1]..[Slot8], keyed by POSITION (ids live in the slot's Id
+    ' field), so a reader needs a bounded lookup and never a section enumeration.
+    ' ParseSlotCount clamps every stored count into [0, MaxSlots], so no config -
+    ' honest or forged - can make a reader loop past this bound.
+    Friend Const MaxSlots As Integer = 8
+
+    ' The canonical string the MAC is computed over: the schema version tag, then
+    ' the GLOBAL header lines, then one 16-line block per armed slot - vbLf-
+    ' separated (including after the LAST line), in a FIXED order.
     ' Every party (CLI writer, service/guardian/notifier readers) builds this from
     ' the DECRYPTED plaintext values and supplies CurrentSchemaVersion for the tag,
     ' so the input is byte-identical regardless of the ciphertext or who wrote it.
-    ' "null"/"" pass through as-is - the point is a stable, reproducible input, not
+    ' "" passes through as-is - the point is a stable, reproducible input, not
     ' interpretation. [Integrity] Key and [Integrity] Mac are deliberately NOT part
     ' of this (you can't MAC the MAC).
+    '
+    ' v10 (the multi-block clean break) made it TWO-LEVEL:
+    '   - BuildCanonical emits the header (HighWater, Now, NextSlotId, SlotCount,
+    '     GuardHoldUntil, GuardArmedCount) and then the caller-built slotBlock;
+    '   - BuildSlotCanonical emits the 16 "SlotN.Field=" lines for ONE slot, and
+    '     each wrapper concatenates pos = 1 To ParseSlotCount(...) of them,
+    '     ascending. There is still exactly ONE MAC over the WHOLE file: a per-slot
+    '     MAC would be a partial-lift vector (lift one block, keep the stamp valid).
+    '   - SlotCount is the CLAMPED count (ParseSlotCount), and the loop bound, so a
+    '     forged "[Slots] SlotCount=99" produces a canonical NO reader can match ->
+    '     MAC-invalid -> every reader freezes. Garbage/blank/negative clamps to 0
+    '     slots, which likewise cannot match a real stamp. The clamp never yields
+    '     "fewer slots to enforce" - it yields "nothing validates".
+    '   - Stale [SlotN] sections BEYOND SlotCount are therefore ignored by every
+    '     reader and contribute nothing: a stray section can never add authority,
+    '     and SlotCount is itself MAC-covered so it cannot be grown.
+    '   - Slot STATE is derived, never stored (PENDING = StartAt set + Until empty;
+    '     SCHEDULE = ScheduleSpec set; ACTIVE = Until set and not yet expired
+    '     against HighWater). A retired slot is REMOVED from the file, never
+    '     flagged - hence IniFile.RemoveSection.
     '
     ' B4 (clock-rollback hardening): the canonical includes HighWater - the
     ' monotonic high-water mark (an en-CA LOCAL datetime, same format as Until)
     ' that the service advances at most one tick at a time and never on a clock
     ' jump. It MUST be MAC-covered so an attacker who recovered the 3DES key can't
     ' forge a HighWater past Until to fake an expiry; covering it here is what
-    ' couples the value to the MAC. HighWater sits right after Until (the two are
-    ' paired: Until is the target, HighWater the trusted clock measured against it).
+    ' couples the value to the MAC. HighWater is GLOBAL (one trusted clock for every
+    ' slot) and leads the header; each slot's Until is the target measured against it.
     '
     ' C2b (cooling-off): the canonical includes CoolOffUntil - the cooling-off
     ' deadline (an en-CA LOCAL datetime like Until/HighWater; "" = no cooling-off
     ' pending). It MUST be MAC-covered or a raw ini edit could forge the deadline
     ' into the past for an instant lift. The SERVICE is its sole writer
     ' (HighWater_at_request + max(duration, floor)); the CLI's request channel is
-    ' a presence-only trigger file with zero timing authority (R2). CoolOffUntil
-    ' sits directly after HighWater so the [Time] datetimes stay grouped: Until =
-    ' block target, HighWater = trusted clock, CoolOffUntil = early-exit target.
+    ' a presence-only trigger file with zero timing authority (R2). v10: it is
+    ' PER-SLOT (each block cools off on its own deadline) and decrypted like the
+    ' slot's Until/StartAt/ScheduleActiveUntil.
     '
     ' C3b (partner code): the canonical also includes the [Partner] accountability-
     ' code fields - PartnerSalt (Base64 salt), PartnerHash (Base64 salted one-way
@@ -116,15 +147,14 @@ Friend Module ConfigIntegrity
     ' the block FREEZES (R6, automatic once they are in the canonical - never
     ' fail-open), and a raw-edited UnlockedAt likewise fails the MAC, so a non-empty
     ' UnlockedAt is only ever valid UNDER a valid MAC, i.e. only if the SERVICE wrote
-    ' it after verifying a correct code. They form a trailing [Partner] group after
-    ' the [CurrentTime] Now line (the [Time] datetimes stay grouped as before).
+    ' it after verifying a correct code. v10: PER-SLOT (each block has its own code),
+    ' the trailing group of the slot block before Committed.
     '
     ' The version is a caller-supplied PARAMETER (not a hardcoded literal) so it
     ' rides the same wrapper-supplied contract as every other field: each
     ' CanonicalFromIni wrapper passes CurrentSchemaVersion exactly as it passes the
-    ' decrypted Until/HighWater/ProcessList/Now - the uniform shape every Section-C
-    ' field will slot into. A bump is then one edit to CurrentSchemaVersion, pinned
-    ' loudly by the 4-copy parity + format tests.
+    ' decrypted HighWater/Now and the per-slot values. A bump is then one edit to
+    ' CurrentSchemaVersion, pinned loudly by the 4-copy parity + format tests.
     ' C4 (commit blocks): the canonical also includes Committed - the MAC-covered
     ' policy flag ("yes"=committed, "no"/absent=not) that disables self-serve
     ' cooling-off (the block becomes CODE-ONLY exit) while the partner code + expiry
@@ -133,15 +163,10 @@ Friend Module ConfigIntegrity
     ' -> the whole block FREEZES (cooling-off Ignored anyway), so an attacker can
     ' never un-commit. Set once at arm by the CLI, never mutated during the block.
     '
-    ' C3b/C4/C5b/C6b: partnerSalt/partnerHash/partnerUnlockedAt/committed/scheduleSpec/
-    ' scheduleActiveUntil/coolOffDuration are appended at the END of the PARAMETER list
-    ' (after coolOffUntil) and their LINES trail after Now= (the [Partner]/[Commit]
-    ' group, the [Schedule] group, then the [CoolOff] Duration line last) - mind that
-    ' the parameter order (until, processList, customSites, now, highWater, coolOffUntil,
-    ' partnerSalt, partnerHash, partnerUnlockedAt, committed, scheduleSpec,
-    ' scheduleActiveUntil, coolOffDuration, allSessionKill) is NOT the line order; every wrapper threads
-    ' them positionally, so the four copies must stay byte-identical (the parity tests
-    ' fail loudly on drift).
+    ' v10 ended the parameter-order-vs-line-order mismatch the v1->v9 appends had
+    ' accumulated: BuildSlotCanonical's parameter order IS its line order, and both
+    ' are the 16 keys in P7 order. Every wrapper still threads them POSITIONALLY, so
+    ' the four copies must stay byte-identical (the parity tests fail loudly on drift).
     '
     ' C5b (schedules): the canonical also includes the two [Schedule] fields -
     ' ScheduleSpec (the plaintext, MAC-covered recurring-window rule + its site/app
@@ -153,7 +178,7 @@ Friend Module ConfigIntegrity
     ' -> macValid=False -> the whole block FREEZES (B7, automatic once they are in the
     ' canonical), and the SERVICE is the sole writer of ScheduleActiveUntil (the
     ' window->duration conversion, HighWater-anchored) exactly as it is of CoolOffUntil.
-    ' They form a trailing [Schedule] group after Committed=.
+    ' v10: PER-SLOT - a schedule is one slot's rule, not the machine's.
     '
     ' C6b (configurable cooling-off duration): the canonical also includes CoolOffDuration
     ' - the CLI-configured cooling-off wait in SECONDS (plaintext-as-stored like Committed/
@@ -163,8 +188,7 @@ Friend Module ConfigIntegrity
     ' max(configured, floor). It MUST be MAC-covered: a raw edit to shorten it fails the
     ' MAC -> freeze (and even absent the freeze the compile-time floor clamps it up, so a
     ' tampered/0 value can only ever EXTEND the wait, never shorten below the floor).
-    ' Absent/blank/unparseable -> the floor. It trails after ScheduleActiveUntil (the
-    ' append-at-end rule every bump follows, keeping each schema bump a uniform edit).
+    ' Absent/blank/unparseable -> the floor. v10: PER-SLOT, beside that slot's CoolOffUntil.
     '
     ' D2c (all-session app-kill): the canonical also includes AllSessionKill - the [Process]
     ' AllSession policy flag ("yes" = the LocalSystem service kills blocked apps in EVERY session,
@@ -174,23 +198,70 @@ Friend Module ConfigIntegrity
     ' flip an armed all-session block back to session-0-only to run a blocked app in a second
     ' logged-in session; instead flipping it fails the MAC -> freeze. The service reads it UN-gated
     ' by macValid (a widen-only union that can never REMOVE a kill, matching the schedule app-kill
-    ' union), so a tampered "yes" only ever ADDS kills. It trails LAST, after CoolOffDuration.
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal until As String, ByVal processList As String, ByVal customSites As String, ByVal now As String, ByVal highWater As String, ByVal coolOffUntil As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal coolOffDuration As String, ByVal allSessionKill As String) As String
+    ' union), so a tampered "yes" only ever ADDS kills. v10: PER-SLOT.
+    '
+    ' v10 lists (P10): Sites/Apps keep the PackList/PackApps semantics (";"-separated,
+    ' trailing ";"); UrlPatterns uses "|" as its separator (both "|" and ";" are illegal
+    ' inside a pattern and are rejected at arm). All three are PLAINTEXT-as-stored - a
+    ' blocklist is not a secret, and the MAC is its protection - so v9's "decrypt the
+    ' [Process] List unless it is the literal "null"" special case is GONE: v10 stores an
+    ' empty string for "no apps". Removing that special case removes the last place the
+    ' four wrappers could disagree about WHEN to decrypt, and an empty app list can only
+    ' ever under-KILL, which is exactly what "no apps" means.
+    ' The GLOBAL header, then the caller-built slotBlock (already the concatenation of
+    ' BuildSlotCanonical(pos) for pos = 1 To slotCount, ascending). slotCount is typed
+    ' Integer precisely so a RAW ini string can never reach this line: the wrappers must
+    ' hand over the ParseSlotCount-CLAMPED value, which is also their loop bound, so the
+    ' printed count and the emitted blocks can never disagree.
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal highWater As String, ByVal now As String, ByVal nextSlotId As String, ByVal slotCount As Integer, ByVal guardHoldUntil As String, ByVal guardArmedCount As String, ByVal slotBlock As String) As String
         Return schemaVersion & vbLf &
-               "Until=" & until & vbLf &
                "HighWater=" & highWater & vbLf &
-               "CoolOffUntil=" & coolOffUntil & vbLf &
-               "ProcessList=" & processList & vbLf &
-               "CustomSites=" & customSites & vbLf &
                "Now=" & now & vbLf &
-               "PartnerSalt=" & partnerSalt & vbLf &
-               "PartnerHash=" & partnerHash & vbLf &
-               "PartnerUnlockedAt=" & partnerUnlockedAt & vbLf &
-               "Committed=" & committed & vbLf &
-               "ScheduleSpec=" & scheduleSpec & vbLf &
-               "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf &
-               "CoolOffDuration=" & coolOffDuration & vbLf &
-               "AllSessionKill=" & allSessionKill & vbLf
+               "NextSlotId=" & nextSlotId & vbLf &
+               "SlotCount=" & slotCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & vbLf &
+               "GuardHoldUntil=" & guardHoldUntil & vbLf &
+               "GuardArmedCount=" & guardArmedCount & vbLf &
+               slotBlock
+    End Function
+
+    ' The 16 lines for ONE slot at POSITION position (1-based, matching its [SlotN] ini
+    ' section). Exactly 16 keys, always emitted - "" when unset - so the shape is fixed
+    ' and eyeball-checkable, and so an absent key can never shorten the canonical into
+    ' another config's canonical. Parameter order IS line order (see the v10 note above).
+    Friend Function BuildSlotCanonical(ByVal position As Integer, ByVal id As String, ByVal startAt As String, ByVal durationSeconds As String, ByVal until As String, ByVal sites As String, ByVal apps As String, ByVal urlPatterns As String, ByVal allSession As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal coolOffUntil As String, ByVal coolOffDuration As String, ByVal partnerSalt As String, ByVal partnerHash As String, ByVal partnerUnlockedAt As String, ByVal committed As String) As String
+        Dim p As String = "Slot" & position.ToString(System.Globalization.CultureInfo.InvariantCulture) & "."
+        Return p & "Id=" & id & vbLf &
+               p & "StartAt=" & startAt & vbLf &
+               p & "DurationSeconds=" & durationSeconds & vbLf &
+               p & "Until=" & until & vbLf &
+               p & "Sites=" & sites & vbLf &
+               p & "Apps=" & apps & vbLf &
+               p & "UrlPatterns=" & urlPatterns & vbLf &
+               p & "AllSession=" & allSession & vbLf &
+               p & "ScheduleSpec=" & scheduleSpec & vbLf &
+               p & "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf &
+               p & "CoolOffUntil=" & coolOffUntil & vbLf &
+               p & "CoolOffDuration=" & coolOffDuration & vbLf &
+               p & "PartnerSalt=" & partnerSalt & vbLf &
+               p & "PartnerHash=" & partnerHash & vbLf &
+               p & "PartnerUnlockedAt=" & partnerUnlockedAt & vbLf &
+               p & "Committed=" & committed & vbLf
+    End Function
+
+    ' The stored "[Slots] SlotCount" -> the number of slot blocks every reader emits and
+    ' loops over. FAIL-CLOSED in the only direction that matters: blank, non-numeric,
+    ' negative or Nothing => 0, and anything above MaxSlots is clamped DOWN to MaxSlots.
+    ' Neither outcome is "enforce fewer blocks": the canonical a clamped/zeroed count
+    ' builds cannot match the stored MAC, so macValid goes False and EVERY reader
+    ' freezes (ClassifyHeartbeat Hold). Never throws - it runs inside the tick.
+    Friend Function ParseSlotCount(ByVal raw As String) As Integer
+        If raw Is Nothing Then Return 0
+        Dim n As Integer
+        If Not Integer.TryParse(raw.Trim(), System.Globalization.NumberStyles.Integer,
+                                System.Globalization.CultureInfo.InvariantCulture, n) Then Return 0
+        If n < 0 Then Return 0
+        If n > MaxSlots Then Return MaxSlots
+        Return n
     End Function
 
     ' HMAC-SHA256 of the canonical (Unicode bytes), Base64-encoded. The key is

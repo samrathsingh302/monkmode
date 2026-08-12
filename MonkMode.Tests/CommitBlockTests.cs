@@ -60,7 +60,6 @@ public class CommitBlockEndToEndTests
 {
     private static readonly CultureInfo EnCa = new("en-CA");
     private static readonly byte[] Key = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
-    private static readonly string Ver = MonkMode.ConfigIntegrity.CurrentSchemaVersion;
     private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
     private static readonly string HwText = Hw.ToString(EnCa);
     private static readonly string FutureUntil = Hw.AddHours(8).ToString(EnCa);
@@ -69,7 +68,7 @@ public class CommitBlockEndToEndTests
 
     // A committed armed config's canonical (Committed="yes", UnlockedAt="") + its MAC.
     private static string CommittedCanonical(string unlockedAt, string committed) =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, committed, "", "", "", "");
+        OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, committed, "", "", "", "");
 
     [Fact]
     public void CommittedBlock_RefusesCoolingOff_ButTheCodeStillExits_TheC4Seam()
