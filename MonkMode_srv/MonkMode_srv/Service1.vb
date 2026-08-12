@@ -64,6 +64,29 @@ Public Class Service1
 
     End Sub
 
+    ' TEST SEAM - the SetAttrHookForTests / AtomicHosts.RenameHookForTests pattern, and the
+    ' one thing standing between the unit suite and a LIVE enforcement tick.
+    '
+    ' InitializeComponent sets timer.Enabled = True, so merely CONSTRUCTING a Service1 starts
+    ' the 10s tick on a threadpool thread. In production that is harmless - a Service1 is only
+    ' ever constructed in order to be Run. In a unit test it is not: the tick writes
+    ' Application.StartupPath\monkmode_settings.ini (which under `dotnet test` IS the test-bin
+    ' config every CLI-writer test asserts over), re-asserts the read-only attribute on the
+    ' REAL hosts file, and would run the self-heals if it ever read a held block. It was
+    ' observed corrupting a sibling test: an unrelated heartbeat rewrote [CurrentTime] Now
+    ' underneath SlotArmTests' "a second arm never re-seeds the frame" assertion.
+    '
+    ' Tests call this the moment they construct one. PRODUCTION NEVER CALLS IT - Main() runs
+    ' ServiceBase.Run(New Service1()) and the timer must stay live there. It is deliberately
+    ' the narrowest possible seam (it cannot re-enable anything) rather than a change to when
+    ' production arms the timer; that larger fix is flagged in the handback, not taken here.
+    Friend Sub StopTimerForTests()
+        Try
+            timer.Enabled = False
+        Catch ex As Exception
+        End Try
+    End Sub
+
     'UserService overrides dispose to clean up the component list.
     Protected Overloads Overrides Sub Dispose(ByVal disposing As Boolean)
         If disposing Then
@@ -233,14 +256,43 @@ Public Class Service1
                 ' only, no HighWater input); the EffectiveExit below decides in the STORED frame
                 ' (storedHw - OnStart never advances the high-water mark).
                 Dim scheduleArmedAtStart As Boolean = ScheduleArmed(macValidAtStart, scheduleSpecAtStart)
-                If EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart, scheduleArmedAtStart) Then
-                    ' The ONLY OnStart path that may lift the block: a valid B7 MAC
-                    ' AND (a successfully parsed, genuinely past end time OR an
-                    ' elapsed cooling-off deadline OR a partner-verified code-unlock),
-                    ' measured against the trusted high-water mark. An unparseable
-                    ' Until or a tampered/invalid MAC keeps the block standing (fail
-                    ' closed).
-                    stopMe()
+
+                ' ---- v1.1 S3b: the BOOT-TIME slot pass (carried finding 3) ----
+                ' Before S3b the v9 twin ran its window re-evaluation at OnStart (isBoot:=True)
+                ' but the SLOTS were polled only on the 10s tick - so a reboot landing inside a
+                ' slot's window got its re-hold from the first tick, and the exit decision
+                ' below adjudicated BEFORE that. The slots therefore get the identical boot
+                ' treatment here: re-open any window the boot lands inside, activate any
+                ' PENDING slot whose start has arrived, and only then decide.
+                '
+                ' Everything is measured against the STORED HighWater - OnStart never advances
+                ' the mark (there is no monotonic anchor across a restart), so downtime is
+                ' never credited and a reboot only ever OVER-blocks. Both passes may Save via
+                ' PersistSlotField; that is safe because the one later OnStart save
+                ' (ShouldRestampOnStart) is inert here (newHw = storedHw), exactly as the v9
+                ' schedule re-hold above already relies on.
+                Dim slotsAtStart As List(Of SlotState) = LoadSlots(iniFile)
+                ProcessSlotScheduleWindows(slotsAtStart, "", DateTime.Now.ToString(culture), storedHw, 0, macValidAtStart, True)
+                ActivateDueSlots(slotsAtStart, storedHw, macValidAtStart)
+                Dim storedHwAsOf As DateTime = DateTime.MinValue
+                Dim parsedStoredHw As DateTime
+                If DateTime.TryParse(storedHw, culture, DateTimeStyles.None, parsedStoredHw) Then storedHwAsOf = parsedStoredHw
+                ' AnyBlockHeld answers Not macValid BEFORE the loop, so a frozen config holds
+                ' even with zero readable slots - and a PENDING slot counts as held, so a boot
+                ' can never tear down a block that has not started yet (P39). Grace 0 here,
+                ' matching OnStart's deliberately stricter expiry.
+                Dim slotsHoldAtStart As Boolean = AnyBlockHeld(slotsAtStart, storedHwAsOf, 0, macValidAtStart, storedHw)
+
+                If Not slotsHoldAtStart AndAlso EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart, scheduleArmedAtStart) Then
+                    ' The ONLY OnStart path that may tear the machine down, and it is now the
+                    ' boot twin of ClassifyTick: NO slot may be holding (which folds in every
+                    ' slot's own MAC-covered end, cooling-off, code and window) AND the v9
+                    ' residual must ALSO have exited. The residual keeps exactly the power it
+                    ' has in the tick - it can hold a teardown back, never cause one - so
+                    ' back-dating [Time] Until at boot no longer tears down a live slot.
+                    ' Fail-closed throughout: an invalid MAC makes slotsHoldAtStart True AND
+                    ' EffectiveExit False, so a tampered config can never teardown at boot.
+                    TeardownAll()
                 ElseIf ShouldRestampOnStart(macValidAtStart, newHw, storedHw) Then
                     ' CURRENTLY INERT (retained as a guard): since the B4 creep fix,
                     ' OnStart sets newHw = storedHw (it never advances - no monotonic
@@ -427,179 +479,261 @@ Public Class Service1
     ' Every successful write refreshes the C1b shadow backup so a later
     ' corrupt-then-restore carries the cooling-off state. Best-effort throughout;
     ' a throw never crashes the tick (the tick continues off the returned state).
-    Private Function ProcessCoolOffSignals(ByVal currentCoolOffUntil As String, ByVal highWaterText As String, ByVal macValid As Boolean, ByVal committed As Boolean) As String
-        Try
-            Dim requestPath As String = Application.StartupPath + "\" + CoolOffRequestFileName
-            Dim cancelPath As String = Application.StartupPath + "\" + CoolOffCancelFileName
-            Dim requestPresent As Boolean = System.IO.File.Exists(requestPath)
-            Dim cancelPresent As Boolean = System.IO.File.Exists(cancelPath)
-            ' Fast path: no triggers this tick (the overwhelmingly common case).
-            If Not requestPresent AndAlso Not cancelPresent Then Return currentCoolOffUntil
-
-            ' C4: `committed` is now the real MAC-covered flag (was the False C4 seam).
-            ' A committed block refuses a cooling-off Start (code-only exit); the
-            ' partner code still lifts it (ProcessPartnerCodeSignal, which does NOT
-            ' read committed). Cancel is still honoured (harmless on a committed block,
-            ' which never has a pending deadline to clear).
-            Select Case ClassifyCoolOffSignal(requestPresent, cancelPresent, currentCoolOffUntil <> "", committed, macValid)
-                Case CoolOffAction.Start
-                    ' The service is the SOLE deadline writer: trusted HighWater at the
-                    ' request + max(configured duration, floor). C6b: the configured
-                    ' duration is the MAC-covered [CoolOff] Duration field (CLI-written at
-                    ' arm). Read it off the RELOADED + MAC-validated ini below (never the
-                    ' pre-validation object) so a tampered value is caught by the freeze,
-                    ' and the floor clamp in ComputeCoolOffDeadline means it can only ever
-                    ' EXTEND, never shorten below the floor. An uncomputable deadline
-                    ' (unparseable HighWater) writes nothing and leaves the trigger for
-                    ' the next tick.
-                    Dim iniFile = New IniFile
-                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                    If Not ConfigMacIsValidForIni(iniFile) Then Return currentCoolOffUntil
-                    Dim configuredSeconds As Long = ParseConfiguredCoolOffSeconds(iniFile.GetKeyValue("CoolOff", "Duration"), MinCoolOffFloorSeconds)
-                    Dim deadline As String = ComputeCoolOffDeadline(highWaterText, configuredSeconds, MinCoolOffFloorSeconds)
-                    If deadline = "" Then Return currentCoolOffUntil
-                    iniFile.SetKeyValue("Time", "CoolOffUntil", encryptionW.EncryptData(deadline))
-                    RestampMacWithExistingKey(iniFile)
-                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-                    RefreshBackupFromValid(iniFile)
-                    Try
-                        System.IO.File.Delete(requestPath)
-                    Catch ex As Exception
-                    End Try
-                    Return deadline
-                Case CoolOffAction.Cancel
-                    Dim iniFile = New IniFile
-                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                    If Not ConfigMacIsValidForIni(iniFile) Then Return currentCoolOffUntil
-                    iniFile.SetKeyValue("Time", "CoolOffUntil", "")
-                    RestampMacWithExistingKey(iniFile)
-                    iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-                    RefreshBackupFromValid(iniFile)
-                    Try
-                        System.IO.File.Delete(requestPath)
-                    Catch ex As Exception
-                    End Try
-                    Try
-                        System.IO.File.Delete(cancelPath)
-                    Catch ex As Exception
-                    End Try
-                    Return ""
-                Case Else
-                    ' Ignore: no ini write. Delete any stale trigger (a request
-                    ' while one is already pending, a consumed request whose
-                    ' delete crashed, triggers against a frozen config) so it
-                    ' doesn't re-classify forever.
-                    Try
-                        System.IO.File.Delete(requestPath)
-                    Catch ex As Exception
-                    End Try
-                    Try
-                        System.IO.File.Delete(cancelPath)
-                    Catch ex As Exception
-                    End Try
-                    Return currentCoolOffUntil
-            End Select
-        Catch ex As Exception
-            Return currentCoolOffUntil
-        End Try
-        Return currentCoolOffUntil
-    End Function
-
-    ' C3b live wiring: the per-tick partner-code verify poll. Runs INSIDE tickLock
-    ' and only while TimeChanging="no" (the caller gates both, exactly like the
-    ' cooling-off poll), right after ProcessCoolOffSignals, and returns the
-    ' (possibly newly-set) [Partner] UnlockedAt so THIS tick's heartbeat decides off
-    ' the post-verify state. currentUnlockedAt is this tick's already-read UnlockedAt;
-    ' macValid is this tick's already-computed MAC validity. The candidate is read
-    ' from the trigger; the VERIFIER (Salt/Hash) is read from the RELOADED,
-    ' MAC-revalidated ini - the same bytes UnlockedAt is written onto (see below),
-    ' never a value captured earlier in the tick.
+    ' v1.1 S3b: the poll is now SLOT-ADDRESSED (P40). It walks the trigger names this tick
+    ' selected, groups them by the slot id they address, and runs the UNCHANGED pure
+    ' ClassifyCoolOffSignal matrix once per addressed slot - so slot A's request sets slot
+    ' A's own deadline and slot B is not touched. That is what kills the S2 under-block:
+    ' arming a second block while a cooling-off was pending used to subject the NEW block to
+    ' the OLD machine-wide deadline, so `arm 30d; unblock; arm 30d` lifted BOTH at ~1h.
+    ' There is no machine-wide deadline left to inherit.
     '
-    ' Consume-after-persist (crash-safe, mirroring ProcessCoolOffSignals): on a MATCH
-    ' the ini (UnlockedAt set + re-stamped) is SAVED and the C1b backup refreshed
-    ' BEFORE the trigger is deleted - a crash between them leaves the trigger, and the
-    ' next tick classifies alreadyUnlocked => Ignore and just deletes it (no lost
-    ' unlock, no double-set). On a miss/Ignore, just delete the trigger (no ini
-    ' write). Best-effort throughout; a throw never crashes the tick (it continues
-    ' off the returned UnlockedAt).
-    Private Function ProcessPartnerCodeSignal(ByVal currentUnlockedAt As String, ByVal macValid As Boolean) As String
+    ' An unknown/retired/garbage id deletes the trigger and changes nothing (P40) - a
+    ' routing hint carries zero authority, and freezing on junk would hand anyone a wedge.
+    ' The write goes through PersistSlotField (P36, the ONE per-slot writer), which reloads,
+    ' re-validates the MAC (never re-stamp bytes you did not just verify - the B7 rule) and
+    ' RE-LOCATES the slot by Id, so a retire landing between this tick's read and the write
+    ' cannot make it land in another block's section. Consume-after-persist is preserved: the
+    ' trigger is deleted only after a successful write, so a crash between them leaves the
+    ' trigger and the next tick classifies it Ignore (already pending) and just deletes it.
+    ' In-memory SlotState is updated on success so THIS tick's retire pass decides off the
+    ' post-signal state. Best-effort throughout; never throws (it runs inside the tick).
+    Private Sub ProcessCoolOffSignals(ByVal slots As List(Of SlotState), ByVal highWaterText As String, ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
+        ProcessCoolOffSignalsAt(Application.StartupPath, Application.StartupPath + "\monkmode_settings.ini",
+                                slots, highWaterText, macValid, triggerNames)
+    End Sub
+
+    ' The testable core with the state directory and config path made explicit (the
+    ' PersistSlotFieldAt / ProcessAddToHosts pattern), so unit tests drive the REAL channel
+    ' against test-owned files and never the deployed state zone.
+    Friend Sub ProcessCoolOffSignalsAt(ByVal stateDir As String, ByVal iniPath As String, ByVal slots As List(Of SlotState), ByVal highWaterText As String, ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
         Try
-            Dim codePath As String = Application.StartupPath + "\" + PartnerCodeFileName
-            Dim triggerPresent As Boolean = System.IO.File.Exists(codePath)
-            ' Fast path: no trigger this tick (the overwhelmingly common case).
-            If Not triggerPresent Then Return currentUnlockedAt
-
-            ' Read the candidate, length-capped: an over-large trigger is a memory/DoS
-            ' lever, not a real attempt, so it reads as "" (a non-matching attempt) and
-            ' is simply deleted. The service NEVER logs the candidate.
-            Dim candidate As String = ""
-            Try
-                Dim fi As New FileInfo(codePath)
-                If fi.Length <= PartnerCodeTriggerMaxBytes Then
-                    candidate = System.IO.File.ReadAllText(codePath)
+            If slots Is Nothing OrElse triggerNames Is Nothing OrElse triggerNames.Count = 0 Then Return
+            ' Group first: ClassifyCoolOffSignal decides on request AND cancel together
+            ' ("cancel wins" is only expressible if both are seen at once), so a per-file
+            ' loop would let a cancel lose to a request that happened to sort first.
+            Dim requested As New HashSet(Of String)(StringComparer.Ordinal)
+            Dim cancelled As New HashSet(Of String)(StringComparer.Ordinal)
+            Dim addressed As New List(Of String)
+            For Each name As String In triggerNames
+                Dim id As String = TriggerIdFromName(name, CoolOffRequestPrefix)
+                If id <> "" Then
+                    If requested.Add(id) AndAlso Not cancelled.Contains(id) Then addressed.Add(id)
+                    Continue For
                 End If
-            Catch ex As Exception
-                candidate = ""
-            End Try
-
-            Select Case ClassifyPartnerCodeSignal(triggerPresent, Not String.IsNullOrWhiteSpace(candidate), currentUnlockedAt <> "", macValid)
-                Case PartnerCodeAction.Verify
-                    ' TOCTOU re-validate (the heartbeat's #4 rule): macValid was computed
-                    ' on the tick's EARLIER read; RELOAD the ini and re-validate its MAC,
-                    ' then verify the candidate against - and write UnlockedAt onto - that
-                    ' SAME reloaded, just-revalidated object. The service is the sole
-                    ' [Partner] writer and this runs inside tickLock, so the verifier
-                    ' bytes and the write bytes are provably one consistent MAC-valid
-                    ' config (no split-read seam). Never mint a key - re-stamp with the
-                    ' EXISTING key (this modifies an existing block).
-                    Dim iniFile = New IniFile
-                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                    If Not ConfigMacIsValidForIni(iniFile) Then
-                        Try
-                            System.IO.File.Delete(codePath)
-                        Catch ex As Exception
-                        End Try
-                        Return currentUnlockedAt
-                    End If
-                    If ConfigIntegrity.PartnerCodeMatches(candidate, iniFile.GetKeyValue("Partner", "Salt"), iniFile.GetKeyValue("Partner", "Hash")) Then
-                        ' MATCH: set the MAC-covered UnlockedAt, re-stamp, save, refresh
-                        ' the backup - THEN delete the trigger (consume-after-persist).
-                        Dim unlockedAt As String = DateTime.Now.ToString(culture)
-                        iniFile.SetKeyValue("Partner", "UnlockedAt", unlockedAt)
-                        RestampMacWithExistingKey(iniFile)
-                        iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-                        RefreshBackupFromValid(iniFile)
-                        Try
-                            System.IO.File.Delete(codePath)
-                        Catch ex As Exception
-                        End Try
-                        Return unlockedAt
-                    Else
-                        ' A miss HOLDS the block: delete the trigger, NO ini write, and
-                        ' do NOT rotate/invalidate the code (only success rotates - else
-                        ' a user could grief-lock the partner's legitimate code by
-                        ' spamming misses, the PD6 availability concern).
-                        Try
-                            System.IO.File.Delete(codePath)
-                        Catch ex As Exception
-                        End Try
-                        Return currentUnlockedAt
-                    End If
-                Case Else
-                    ' Ignore (blank candidate, already unlocked, or a frozen config):
-                    ' delete any stale trigger so it doesn't re-classify forever; no
-                    ' ini write.
-                    Try
-                        System.IO.File.Delete(codePath)
-                    Catch ex As Exception
-                    End Try
-                    Return currentUnlockedAt
-            End Select
+                id = TriggerIdFromName(name, CoolOffCancelPrefix)
+                If id <> "" Then
+                    If cancelled.Add(id) AndAlso Not requested.Contains(id) Then addressed.Add(id)
+                End If
+            Next
+            For Each id As String In addressed
+                Dim requestPath As String = System.IO.Path.Combine(stateDir, CoolOffRequestPrefix + id)
+                Dim cancelPath As String = System.IO.Path.Combine(stateDir, CoolOffCancelPrefix + id)
+                Dim slot As SlotState = FindSlotById(slots, id)
+                If slot Is Nothing Then
+                    ' P40: unknown / retired / garbage id. Delete both, change NOTHING, do
+                    ' not freeze - the id never had authority, only routing.
+                    DeleteTriggerFile(requestPath)
+                    DeleteTriggerFile(cancelPath)
+                    Continue For
+                End If
+                Select Case ClassifyCoolOffSignal(requested.Contains(id), cancelled.Contains(id),
+                                                  slot.CoolOffUntil <> "", IsCommitted(slot.Committed), macValid)
+                    Case CoolOffAction.Start
+                        ' The service is the SOLE deadline writer: this slot's trusted
+                        ' HighWater at the request + max(its OWN configured duration, the
+                        ' compile-time floor). The floor clamp means a configured 0 can only
+                        ' ever EXTEND the wait. An uncomputable deadline (unparseable mark)
+                        ' writes nothing and leaves the trigger for the next tick.
+                        Dim deadline As String = ComputeCoolOffDeadline(highWaterText,
+                                                                        ParseConfiguredCoolOffSeconds(slot.CoolOffDuration, MinCoolOffFloorSeconds),
+                                                                        MinCoolOffFloorSeconds)
+                        If deadline = "" Then Continue For
+                        If PersistSlotFieldAt(iniPath, slot.Id, "CoolOffUntil", deadline, True) Then
+                            slot.CoolOffUntil = deadline
+                            DeleteTriggerFile(requestPath)
+                        End If
+                    Case CoolOffAction.Cancel
+                        ' A torn cancel leaves the deadline standing - cooling-off continues
+                        ' and the user re-cancels. Never an early lift.
+                        If PersistSlotFieldAt(iniPath, slot.Id, "CoolOffUntil", "", True) Then
+                            slot.CoolOffUntil = ""
+                            DeleteTriggerFile(requestPath)
+                            DeleteTriggerFile(cancelPath)
+                        End If
+                    Case Else
+                        ' Ignore: no write. Delete the stale triggers (a request while one is
+                        ' already pending, a consumed request whose delete crashed, a trigger
+                        ' against a frozen config) so they don't re-classify forever.
+                        DeleteTriggerFile(requestPath)
+                        DeleteTriggerFile(cancelPath)
+                End Select
+            Next
         Catch ex As Exception
-            Return currentUnlockedAt
         End Try
-        Return currentUnlockedAt
+    End Sub
+
+    ' The slot carrying this id, or Nothing. Ordinal Id comparison, matching
+    ' FindSlotPositionById's - the two must agree or a trigger could route to a slot the
+    ' writer then fails to locate. Pure + Shared.
+    Friend Shared Function FindSlotById(ByVal slots As List(Of SlotState), ByVal slotId As String) As SlotState
+        If slots Is Nothing Then Return Nothing
+        Dim wanted As String = If(slotId, "").Trim()
+        If wanted = "" Then Return Nothing
+        For Each s As SlotState In slots
+            If String.Equals(If(s.Id, "").Trim(), wanted, StringComparison.Ordinal) Then Return s
+        Next
+        Return Nothing
     End Function
+
+    ' Delete one trigger file, best-effort. A failed delete is harmless: the next tick
+    ' re-classifies it (Ignore, since the state it asked for is already applied) and tries
+    ' again. NEVER throws.
+    Private Shared Sub DeleteTriggerFile(ByVal path As String)
+        Try
+            System.IO.File.Delete(path)
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' P41: the trigger file NAMES on disk this tick, capped and ordinal-sorted. Enumerated
+    ' once per tick and shared by both pollers, so the cap is a single budget across the
+    ' whole channel rather than one per family. Best-effort: an unreadable directory yields
+    ' an empty list, which just defers every trigger to the next tick (fail-closed - a
+    ' deferred EXIT trigger holds the block ~10s longer). NEVER throws.
+    Private Function EnumerateTriggerFiles() As List(Of String)
+        Return EnumerateTriggerFilesIn(Application.StartupPath)
+    End Function
+
+    ' The testable core, with the state directory made explicit (the PersistSlotFieldAt /
+    ' ProcessAddToHosts pattern) so unit tests drive the real enumeration against a temp
+    ' directory and never the deployed state zone.
+    Friend Shared Function EnumerateTriggerFilesIn(ByVal stateDir As String) As List(Of String)
+        Dim names As New List(Of String)
+        Try
+            For Each pattern As String In New String() {CoolOffRequestPrefix & "*", CoolOffCancelPrefix & "*", PartnerCodePrefix & "*"}
+                For Each full As String In System.IO.Directory.GetFiles(stateDir, pattern)
+                    names.Add(System.IO.Path.GetFileName(full))
+                Next
+            Next
+        Catch ex As Exception
+            Return New List(Of String)
+        End Try
+        Return SelectTriggerFiles(names, MaxTriggerFilesPerTick)
+    End Function
+
+    ' Does this enumerated name address ANY trigger family? Pure + Shared.
+    Friend Shared Function TriggerAddressesAnyFamily(ByVal fileName As String) As Boolean
+        Return TriggerIdFromName(fileName, CoolOffRequestPrefix) <> "" OrElse
+               TriggerIdFromName(fileName, CoolOffCancelPrefix) <> "" OrElse
+               TriggerIdFromName(fileName, PartnerCodePrefix) <> "" OrElse
+               TriggerIdFromName(fileName, AddRequestPrefix) <> ""
+    End Function
+
+    ' Delete every enumerated name that resolves to NO family id. Two shapes reach here, and
+    ' both leak the P41 budget permanently if left alone:
+    '   * the UNSUFFIXED legacy names an older CLI dropped (monkmode_cooloff.request with no
+    '     id). The Win32 trailing-".*" glob quirk matches them - "prefix.*" also matches
+    '     "prefix" with nothing after it - so they are enumerated every tick forever, occupy
+    '     up to 3 of the 16 slots, and neither poller ever reaches its delete because
+    '     TriggerIdFromName returns "". At a full 8-slot load that can starve the tail, and
+    '     partner codes sort LAST.
+    '   * a bare "<prefix>" with a blank id, from a truncated write.
+    ' Deleting them is the over-blocking direction either way (they carry no authority and
+    ' nothing reads them), and it removes the "an old dist's `unblock` appears to do nothing,
+    ' forever" confusion - which would otherwise read as a real failure during a smoke.
+    ' Best-effort; never throws.
+    Friend Shared Sub PurgeUnaddressedTriggers(ByVal stateDir As String, ByVal triggerNames As List(Of String))
+        If triggerNames Is Nothing Then Return
+        For Each name As String In triggerNames
+            If TriggerAddressesAnyFamily(name) Then Continue For
+            DeleteTriggerFile(System.IO.Path.Combine(stateDir, name))
+        Next
+    End Sub
+
+    ' v1.1 S3b: SLOT-ADDRESSED (P40). A candidate submitted as monkmode_partner.code.<id> is
+    ' verified ONLY against slot <id>'s own MAC-covered PartnerSalt/PartnerHash, so holding
+    ' one block's code retires that block and NO other - the pre-S3b model verified every
+    ' candidate against the single machine-wide [Partner] verifier and lifted everything. The
+    ' CLI broadcasts the same candidate to every armed slot, which is safe precisely because
+    ' each slot verifies independently: only the owning slot can match.
+    '
+    ' The VERIFIER is read from the RELOADED, MAC-revalidated ini at the RE-LOCATED position -
+    ' never from the SlotState captured earlier in the tick - so the bytes the code is checked
+    ' against and the bytes UnlockedAt is written onto are provably one consistent MAC-valid
+    ' config (the heartbeat's #4 TOCTOU rule). Consume-after-persist is preserved: the trigger
+    ' is deleted only after the write lands, so a crash between them re-classifies next tick
+    ' as alreadyUnlocked => Ignore (no lost unlock, no double-set). A miss deletes the trigger,
+    ' writes nothing and does NOT rotate the code - only success rotates, or spamming misses
+    ' would grief-lock the partner's legitimate code (the PD6 availability concern). Runs
+    ' inside tickLock while TimeChanging="no" (the caller gates both). Never throws.
+    Private Sub ProcessPartnerCodeSignal(ByVal slots As List(Of SlotState), ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
+        ProcessPartnerCodeSignalAt(Application.StartupPath, Application.StartupPath + "\monkmode_settings.ini",
+                                   slots, macValid, triggerNames)
+    End Sub
+
+    ' The testable core with the state directory and config path made explicit.
+    Friend Sub ProcessPartnerCodeSignalAt(ByVal stateDir As String, ByVal iniPath As String, ByVal slots As List(Of SlotState), ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
+        Try
+            If slots Is Nothing OrElse triggerNames Is Nothing OrElse triggerNames.Count = 0 Then Return
+            For Each name As String In triggerNames
+                Dim id As String = TriggerIdFromName(name, PartnerCodePrefix)
+                If id = "" Then Continue For
+                Dim codePath As String = System.IO.Path.Combine(stateDir, PartnerCodePrefix + id)
+                Dim slot As SlotState = FindSlotById(slots, id)
+                If slot Is Nothing Then
+                    ' P40: unknown / retired / garbage id - delete, no state change, no freeze.
+                    DeleteTriggerFile(codePath)
+                    Continue For
+                End If
+
+                ' Read the candidate, length-capped: an over-large trigger is a memory/DoS
+                ' lever, not a real attempt, so it reads as "" (a non-matching attempt) and
+                ' is simply deleted. The service NEVER logs the candidate.
+                Dim candidate As String = ""
+                Try
+                    Dim fi As New FileInfo(codePath)
+                    If fi.Length <= TriggerMaxBytes Then
+                        candidate = System.IO.File.ReadAllText(codePath)
+                    End If
+                Catch ex As Exception
+                    candidate = ""
+                End Try
+
+                If ClassifyPartnerCodeSignal(True, Not String.IsNullOrWhiteSpace(candidate),
+                                             slot.PartnerUnlockedAt <> "", macValid) <> PartnerCodeAction.Verify Then
+                    ' Ignore: blank candidate, this slot already unlocked, or a frozen config.
+                    DeleteTriggerFile(codePath)
+                    Continue For
+                End If
+
+                Dim iniFile = New IniFile
+                iniFile.Load(iniPath)
+                If Not ConfigMacIsValidForIni(iniFile) Then
+                    DeleteTriggerFile(codePath)
+                    Continue For
+                End If
+                Dim pos As Integer = FindSlotPositionById(iniFile, id)
+                If pos = 0 Then
+                    ' Retired between this tick's read and now - nothing to unlock.
+                    DeleteTriggerFile(codePath)
+                    Continue For
+                End If
+                Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+                If ConfigIntegrity.PartnerCodeMatches(candidate, iniFile.GetKeyValue(sec, "PartnerSalt"), iniFile.GetKeyValue(sec, "PartnerHash")) Then
+                    ' MATCH: set THIS slot's MAC-covered PartnerUnlockedAt through the one
+                    ' per-slot writer (P36), then consume the trigger.
+                    Dim unlockedAt As String = DateTime.Now.ToString(culture)
+                    If PersistSlotFieldAt(iniPath, id, "PartnerUnlockedAt", unlockedAt, False) Then
+                        slot.PartnerUnlockedAt = unlockedAt
+                        DeleteTriggerFile(codePath)
+                    End If
+                Else
+                    DeleteTriggerFile(codePath)
+                End If
+            Next
+        Catch ex As Exception
+        End Try
+    End Sub
 
     ' C5b (b2) live wiring: the per-tick schedule window step - the sibling of
     ' ProcessCoolOffSignals/ProcessPartnerCodeSignal, polled AFTER them (inside tickLock
@@ -704,9 +838,22 @@ Public Class Service1
             Dim startEnc As String = ini.GetKeyValue(sec, "StartAt")
             Dim untilEnc As String = ini.GetKeyValue(sec, "Until")
             Dim schedEnc As String = ini.GetKeyValue(sec, "ScheduleActiveUntil")
+            ' v1.1 S3b: the per-slot cooling-off deadline, decrypted with the same
+            ' decrypt-BEFORE-macValid discipline as the other three datetimes - a garbled
+            ' ciphertext must THROW into the tick's Catch (fail-closed), never read as ""
+            ' (which would silently drop a pending cooling-off and, with it, nothing at all -
+            ' but the same read is what the RETIRE decision now consumes, so a silent "" is
+            ' the wrong kind of quiet).
+            Dim coolOffEnc As String = ini.GetKeyValue(sec, "CoolOffUntil")
             s.StartAt = If(startEnc = "", "", encryptionW.DecryptData(startEnc))
             s.UntilText = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
             s.ScheduleActiveUntil = If(schedEnc = "", "", encryptionW.DecryptData(schedEnc))
+            s.CoolOffUntil = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
+            s.CoolOffDuration = ini.GetKeyValue(sec, "CoolOffDuration")
+            s.PartnerSalt = ini.GetKeyValue(sec, "PartnerSalt")
+            s.PartnerHash = ini.GetKeyValue(sec, "PartnerHash")
+            s.PartnerUnlockedAt = ini.GetKeyValue(sec, "PartnerUnlockedAt")
+            s.Committed = ini.GetKeyValue(sec, "Committed")
             s.DurationSeconds = ini.GetKeyValue(sec, "DurationSeconds")
             s.Sites = SplitPackedList(ini.GetKeyValue(sec, "Sites"), ";"c)
             s.Apps = SplitPackedList(ini.GetKeyValue(sec, "Apps"), ";"c)
@@ -766,11 +913,19 @@ Public Class Service1
     ' re-stamped - it is already enforcing). Best-effort per slot: a failed persist leaves
     ' that slot's stored value alone and the next tick re-evaluates.
     '
-    ' DEFERRED (S3b): the issue-#2 lost-update guard the v9 path gets from
-    ' ScheduleSpecUnchangedSinceSnapshot has no per-slot equivalent yet. It is unreachable
-    ' today - no CLI writes a slot ScheduleSpec (WriteSlotSection always writes ""), so no
-    ' writer can change one under this tick - and PersistSlotField's Id re-locate already
-    ' stops the write landing in the wrong section.
+    ' STILL DEFERRED (past S3b): the issue-#2 lost-update guard the v9 path gets from
+    ' ScheduleSpecUnchangedSinceSnapshot has no per-slot equivalent. It stays unreachable -
+    ' no CLI writes a slot ScheduleSpec (WriteSlotSection always writes ""), so no writer can
+    ' change one under this tick - and PersistSlotField's Id re-locate already stops the write
+    ' landing in the wrong section. It becomes reachable only when `schedule` becomes a slot.
+    '
+    ' S3b (carried finding 6): a FAILED persist no longer narrows this tick's unions. The
+    ' in-memory value now follows the OVER-BLOCKING side regardless of whether the write
+    ' landed: an OPEN/EXTEND (target <> "") is adopted even if the persist failed, so the
+    ' slot's sites stay in the hosts/kill unions for this tick rather than being briefly
+    ' stripped by a self-heal that then has nothing to put them back; a CLEAR (target = "")
+    ' is adopted ONLY if it persisted, so a lost write leaves the window open one more tick.
+    ' Both directions cost at most one 10s tick and both err towards MORE blocked.
     Private Sub ProcessSlotScheduleWindows(ByVal slots As List(Of SlotState), ByVal lastNowText As String, ByVal nowText As String, ByVal newHwText As String, ByVal monoElapsedSeconds As Long, ByVal macValid As Boolean, ByVal isBoot As Boolean)
         Try
             If Not macValid OrElse slots Is Nothing Then Return
@@ -780,11 +935,398 @@ Public Class Service1
                 Dim openNow As List(Of ScheduleOpen) = EvaluateWindows(ParseSchedule(s.ScheduleSpec).Windows, lastNowText, nowText, monoElapsedSeconds, isBoot)
                 Dim target As String = NextScheduleActiveUntil(s.ScheduleActiveUntil, openNow, newHwText)
                 If target <> s.ScheduleActiveUntil Then
-                    If PersistSlotField(s.Id, "ScheduleActiveUntil", target, True) Then s.ScheduleActiveUntil = target
+                    Dim persisted As Boolean = PersistSlotField(s.Id, "ScheduleActiveUntil", target, True)
+                    If persisted OrElse target <> "" Then s.ScheduleActiveUntil = target
                 End If
             Next
         Catch ex As Exception
         End Try
+    End Sub
+
+    ' P29 live wiring: turn every PENDING slot whose start moment has arrived into an ACTIVE
+    ' one. The SERVICE computes Until = HighWater + DurationSeconds (ComputeSlotActivationUntil)
+    ' and persists it through the one per-slot writer; the CLI never stores an absolute end for
+    ' a `--start` block, because the wall clock runs on while the machine is off and an absolute
+    ' end would therefore UNDER-block after downtime.
+    '
+    ' Carried finding 4 (the activation/union interaction): activation does NOT change union
+    ' membership, by design. SlotContributesLists is SlotEnforcesNow OrElse SlotIsPending, so a
+    ' pending slot's sites are ALREADY in the hosts union, the kill union and the P37 snapshot
+    ' truth - the CLI wrote them into hosts and into the snapshot at arm time. Activation just
+    ' moves the slot from the PENDING arm of that OR to the ACTIVE arm; the entries never leave
+    ' the unions for even one tick, so the "stripped with nothing able to re-add them" bug S3a
+    ' caught cannot reappear here. Narrowing SlotContributesLists to SlotEnforcesNow would only
+    ' be safe if the arm-time hosts write moved to activation time too - it has NOT, so it must
+    ' NOT be narrowed. A pending slot therefore over-blocks from arm until its start; that is a
+    ' known, accepted over-block, and it is the fail-closed side.
+    '
+    ' In-memory state follows the PERSIST here (unlike the window step above): an un-persisted
+    ' activation must not read as started, or the next tick would re-activate off a LATER
+    ' HighWater and hand the block a longer run each time. A failed persist simply retries next
+    ' tick - the slot stays PENDING, stays in every union, and its start is delayed by <= 10s,
+    ' which lengthens the block rather than shortening it. Never throws.
+    Private Sub ActivateDueSlots(ByVal slots As List(Of SlotState), ByVal highWaterText As String, ByVal macValid As Boolean)
+        ActivateDueSlotsAt(Application.StartupPath + "\monkmode_settings.ini", slots, highWaterText, macValid)
+    End Sub
+
+    ' The testable core with the config path made explicit (the PersistSlotFieldAt pattern).
+    Friend Sub ActivateDueSlotsAt(ByVal iniPath As String, ByVal slots As List(Of SlotState), ByVal highWaterText As String, ByVal macValid As Boolean)
+        Try
+            If Not macValid OrElse slots Is Nothing Then Return
+            For Each s As SlotState In slots
+                If Not SlotStartDue(s, highWaterText) Then Continue For
+                Dim untilText As String = ComputeSlotActivationUntil(highWaterText, s.DurationSeconds)
+                If untilText = "" Then Continue For      ' fail-closed: stays PENDING, retried next tick
+                If PersistSlotFieldAt(iniPath, s.Id, "Until", untilText, True) Then s.UntilText = untilText
+            Next
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' Retire every slot whose own exit is due this tick, and report how many went. Each
+    ' RetireSlot re-reads the config for itself and addresses the slot by ID, so consecutive
+    ' retires compose correctly even though every one of them renumbers the positions. The
+    ' iteration is over a COPY because RetireSlot mutates the file the list came from.
+    ' macValid REQUIRED: a frozen config retires nothing (it is already enforcing). Returns 0
+    ' and changes nothing on any failure. Never throws.
+    Private Function RetireDueSlots(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal macValid As Boolean, ByVal highWaterText As String) As Integer
+        Dim retired As Integer = 0
+        Try
+            If Not macValid OrElse slots Is Nothing Then Return 0
+            For Each s As SlotState In New List(Of SlotState)(slots)
+                If SlotExitDue(s, asOf, ExpiryGraceSeconds, macValid, highWaterText) <> SlotAction.Retire Then Continue For
+                If RetireSlot(s.Id) Then retired += 1
+            Next
+        Catch ex As Exception
+        End Try
+        Return retired
+    End Function
+
+    ' ================= P38: RETIRE ONE SLOT, WITHOUT DISTURBING THE OTHERS =================
+    '
+    ' THE ORDER IS THE SAFETY PROPERTY, and it is:
+    '     (1) CONFIG   - compact the slot out, RemoveSection the freed trailing position,
+    '                    restamp SlotCount/Guard.ArmedCount, re-stamp the MAC, Save, refresh
+    '                    the C1b backup;
+    '     (2) SNAPSHOT - recompute monkmode_hosts.block from CONFIG TRUTH (re-read from disk,
+    '                    never from the tick's in-memory list);
+    '     (3) HOSTS    - rewrite the marker block to that same truth.
+    ' Snapshot-before-config is FORBIDDEN: the snapshot is the MAC-INDEPENDENT repair source
+    ' every self-heal reads, so narrowing it before the config agrees would let one tick strip
+    ' a still-armed slot's sites out of the only place that could put them back.
+    '
+    ' EVERY CRASH POINT OVER-BLOCKS:
+    '   * before (1): nothing happened at all. The slot is still armed, hosts still blocks it,
+    '     and the next tick re-classifies it Retire and starts over. Idempotent.
+    '   * between (1) and (2): the config no longer carries the slot, but the snapshot and
+    '     hosts still block its sites. Over-block. The next tick's P37 reconcile recomputes
+    '     the snapshot from the (already correct) config - and note the reverse order would
+    '     leave a NARROWED snapshot with the slot still armed, which is an UNDER-block.
+    '   * between (2) and (3): the snapshot is truth, hosts is still wide. Over-block.
+    '   * after (3): done.
+    ' A crash can therefore never end a block early, only end it late.
+    '
+    ' HOW LATE, HONESTLY. Hosts is NOT guaranteed to converge on the next tick. The per-tick
+    ' B2 self-heal goes through RepairHostsBlock, which returns Nothing whenever hosts already
+    ' CONTAINS the expected block - the exact property ExactHostsRewrite exists to escape. So
+    ' when the survivors' entry lines happen to be a contiguous substring of the wide block
+    ' (retiring the LAST slot in position order), a crashed retire leaves the retired slot's
+    ' sites blocked until the next retire or the whole-machine teardown. That is a rare double
+    ' fault (a crash inside the retire, AND that geometry) and it is a pure OVER-block, so it
+    ' is carried rather than fixed: making the hot-path self-heal compute an exact target every
+    ' 10s would trade a permanent per-tick cost against a fault that only over-blocks. The
+    ' non-crash path is exact, because step (3) uses ExactHostsRewrite.
+    '
+    ' WHAT IS DELIBERATELY NOT SHORTENED. [Slots] NextSlotId is never lowered (P17 - ids are
+    ' monotone and never reused, so a replayed monkmode_partner.code.<id> can never come to
+    ' address a different block). [Guard] HoldUntil is EXTEND-ONLY (P43) - only TeardownAll
+    ' clears it, so the guardian over-guards rather than standing down mid-block. The v9
+    ' [Time] Until mirror is likewise left at the guard horizon: it can no longer LIFT
+    ' anything (ClassifyTick demoted it to a hold), so leaving it long only over-blocks.
+    Friend Function RetireSlot(ByVal slotId As String) As Boolean
+        Return RetireSlotAt(Application.StartupPath + "\monkmode_settings.ini",
+                            Application.StartupPath + "\monkmode_hosts.block",
+                            hostDirS, slotId)
+    End Function
+
+    ' The testable core with every path made explicit (the PersistSlotFieldAt pattern), so the
+    ' retire matrix and the crash-point ordering tests drive the REAL code against test-owned
+    ' files and never the deployed config or the live hosts file. Returns True iff the config
+    ' was rewritten. NEVER throws (it runs inside the tick).
+    Friend Function RetireSlotAt(ByVal iniPath As String, ByVal snapshotPath As String, ByVal hostsPath As String, ByVal slotId As String) As Boolean
+        Try
+            ' ---------------- (1) CONFIG ----------------
+            Dim iniFile = New IniFile
+            iniFile.Load(iniPath)
+            ' A frozen config is never retired FROM: re-stamping over unverified bytes is the
+            ' B7 fail-open bug, and a tampered config is already enforcing (Hold).
+            If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            Dim count As Integer = ConfigIntegrity.ParseSlotCount(iniFile.GetKeyValue("Slots", "SlotCount"))
+            If count <= 0 Then Return False
+            Dim pos As Integer = FindSlotPositionById(iniFile, slotId)
+            If pos = 0 Then Return False        ' already retired, or never here: write NOTHING
+
+            ' Compact: every later slot slides down one position, then the freed TRAILING
+            ' section is removed outright. Removed, never flagged - a retired slot must leave
+            ' no state behind that a later reader could resurrect.
+            For p As Integer = pos To count - 1
+                CopySlotSection(iniFile, p + 1, p)
+            Next
+            iniFile.RemoveSection("Slot" & count.ToString(CultureInfo.InvariantCulture))
+
+            Dim remaining As Integer = count - 1
+            iniFile.SetKeyValue("Slots", "SlotCount", remaining.ToString(CultureInfo.InvariantCulture))
+            iniFile.SetKeyValue("Guard", "ArmedCount", CountGuardedSlots(iniFile, remaining).ToString(CultureInfo.InvariantCulture))
+            ' THE WEDGE THIS AVOIDS: the v9 [Time] Until mirror is the EXTEND-ONLY guard
+            ' horizon, i.e. the latest moment any slot COULD have held - so a slot armed
+            ' `--start +30d --for 1h` and then retired early by a partner code would leave the
+            ' mirror 30 days in the future. ClassifyTick consults the residual once the slot
+            ' set empties, so that future Until would HOLD the teardown back and the machine
+            ' would sit with hosts blocked and nothing armed for a month. The moment the last
+            ' slot goes, every block has genuinely exited and the mirror has no authority left
+            ' to represent, so it is neutralised here exactly as TeardownAll neutralises it.
+            If remaining = 0 Then NeutraliseV9Residual(iniFile)
+            ' The v9 list mirror is a PROJECTION of the slot set (the CLI maintains it at every
+            ' arm), and retire is the inverse of arm: without this, a finished 1-hour block's
+            ' apps would keep being killed for the whole life of an unrelated 30-day one - the
+            ' service's own kill loop AND the notifier's both take [Process] List as their base.
+            ' Narrowing it here is narrowing to CONFIG TRUTH, and the slot union still adds
+            ' every remaining slot's apps independently, so no remaining block loses a kill.
+            RefreshV9ListMirror(iniFile, remaining)
+            RestampMacWithExistingKey(iniFile)
+            iniFile.Save(iniPath)
+            Try
+                ConfigBackup.CopyIfSourceValid(iniPath,
+                                               System.IO.Path.Combine(System.IO.Path.GetDirectoryName(iniPath), ConfigBackup.BackupFileName),
+                                               ConfigMacIsValidForIni(iniFile))
+            Catch ex As Exception
+            End Try
+
+            ' ------------- (2) SNAPSHOT, from CONFIG TRUTH -------------
+            ' Re-read from disk deliberately: the caller's in-memory slot list is what a racing
+            ' CLI arm would NOT be in, so recomputing from the file is what makes an arm landing
+            ' during a retire safe - the arm's slot is on disk and is therefore in this union.
+            Dim after As New IniFile
+            after.Load(iniPath)
+            Dim highWater As String = ""
+            Try
+                Dim hwEnc As String = after.GetKeyValue("Time", "HighWater")
+                highWater = If(hwEnc = "", "", encryptionW.DecryptData(hwEnc))
+            Catch ex As Exception
+                highWater = ""
+            End Try
+            Dim asOf As DateTime = DateTime.MinValue
+            Dim parsedHw As DateTime
+            If DateTime.TryParse(highWater, culture, DateTimeStyles.None, parsedHw) Then asOf = parsedHw
+            Dim truthSites As List(Of String) = UnionSlotSites(LoadSlots(after), asOf, ExpiryGraceSeconds, True, highWater)
+            ' R1: with nothing left to block, LEAVE the snapshot and hosts exactly as they are.
+            ' Blanking a snapshot is what a torn-down block looks like, and the remaining slots
+            ' (an app-only or pending one) are still armed - so the honest choice is the
+            ' over-blocking one, and the whole-machine teardown is what removes the entries.
+            If truthSites.Count > 0 Then
+                Dim entries As String = BuildHostsEntries(truthSites)
+                If entries <> "" Then
+                    Dim expected As String = HostsMarker & vbCrLf & entries
+                    ReconcileHostsSnapshot(snapshotPath, True, truthSites)
+                    ' ---------------- (3) HOSTS ----------------
+                    WriteHostsMarkerBlock(hostsPath, expected)
+                End If
+            End If
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' Copy all 16 of a slot's keys from one position to another (the compaction step). Every
+    ' field is moved - SlotFieldNames is pinned equal to the canonical's line set, so a field
+    ' can never be silently dropped and leave the block MAC-stamped over a value it lost.
+    Private Shared Sub CopySlotSection(ByVal ini As IniFile, ByVal fromPos As Integer, ByVal toPos As Integer)
+        Dim src As String = "Slot" & fromPos.ToString(CultureInfo.InvariantCulture)
+        Dim dst As String = "Slot" & toPos.ToString(CultureInfo.InvariantCulture)
+        ini.AddSection(dst)
+        For Each key As String In SlotFieldNames
+            ini.SetKeyValue(dst, key, ini.GetKeyValue(src, key))
+        Next
+    End Sub
+
+    ' [Guard] ArmedCount: the slots that keep the guardian alive WITHOUT an open block of their
+    ' own - SCHEDULE slots (a rule waiting for its next window) and PENDING slots (StartAt set,
+    ' Until not yet computed). Byte-parity in SEMANTICS with the CLI's GuardedSlotCount, which
+    ' recomputes the same value at every arm; both read the RAW stored strings, so neither
+    ' needs to decrypt to count.
+    Private Shared Function CountGuardedSlots(ByVal ini As IniFile, ByVal slotCount As Integer) As Integer
+        Dim n As Integer = 0
+        For pos As Integer = 1 To slotCount
+            Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+            Dim spec As String = If(ini.GetKeyValue(sec, "ScheduleSpec"), "")
+            Dim startAt As String = If(ini.GetKeyValue(sec, "StartAt"), "")
+            Dim untilText As String = If(ini.GetKeyValue(sec, "Until"), "")
+            If spec <> "" OrElse (startAt <> "" AndAlso untilText = "") Then n += 1
+        Next
+        Return n
+    End Function
+
+    ' Recompute the v9 single-block list mirror as the union over the slots that remain, in the
+    ' CLI's exact encoding (apps encrypted with the "null" no-apps sentinel; sites plaintext).
+    ' Both keys sit OUTSIDE the v10 canonical, so this does not itself move the MAC - the
+    ' re-stamp that follows is for the SlotCount/ArmedCount/section changes.
+    Private Sub RefreshV9ListMirror(ByVal ini As IniFile, ByVal slotCount As Integer)
+        Dim sites As String = PackedSlotUnion(ini, slotCount, "Sites")
+        Dim apps As String = PackedSlotUnion(ini, slotCount, "Apps")
+        ini.AddSection("Process")
+        ini.SetKeyValue("Process", "List", If(apps = "", "null", encryptionW.EncryptData(apps)))
+        ini.AddSection("User")
+        ini.SetKeyValue("User", "CustomSites", If(sites = "", "null", sites))
+        ' [Commit] Committed is the OR-LATCH the CLI arm maintains ("yes if ANY slot is"), and
+        ' a latch that only ever goes on is wrong once slots start leaving. The CLI's exit gate
+        ' reads it, so a committed 1h block retiring beside an uncommitted 30d one would keep
+        ' refusing the survivor's cooling-off - "This block is COMMITTED" - for the whole 30
+        ' days, locking the user out of an exit they are entitled to until the next arm
+        ' happened to recompute it. Same union pattern as the two lists above: recompute from
+        ' the slots that remain. (The SERVICE is already correct - it reads each slot's own
+        ' Committed - so this is purely repairing what the CLI gate consumes.)
+        Dim anyCommitted As Boolean = False
+        For pos As Integer = 1 To slotCount
+            If IsCommitted(ini.GetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), "Committed")) Then
+                anyCommitted = True
+                Exit For
+            End If
+        Next
+        ini.AddSection("Commit")
+        ini.SetKeyValue("Commit", "Committed", If(anyCommitted, "yes", "no"))
+    End Sub
+
+    ' The ";"-packed union of one plaintext list key across the remaining slots, first-
+    ' occurrence order, deduped case-insensitively - the same shape (and trailing ";") the
+    ' CLI's UnionSlotList produces, so a mirror written here is indistinguishable from one
+    ' written at arm.
+    Private Shared Function PackedSlotUnion(ByVal ini As IniFile, ByVal slotCount As Integer, ByVal key As String) As String
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim parts As New List(Of String)
+        For pos As Integer = 1 To slotCount
+            For Each tok As String In If(ini.GetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), key), "").Split(";"c)
+                Dim s As String = tok.Trim()
+                If s <> "" AndAlso seen.Add(s) Then parts.Add(s)
+            Next
+        Next
+        If parts.Count = 0 Then Return ""
+        Return String.Join(";", parts) & ";"
+    End Function
+
+    ' The EXACT hosts target for a retire, as opposed to RepairHostsBlock's restore-only
+    ' semantics. RepairHostsBlock returns Nothing whenever hosts already CONTAINS the expected
+    ' text, which is right for a self-heal (never churn) but wrong for a SHRINK: retiring the
+    ' last slot in position order leaves the remaining entries as a literal prefix of what is
+    ' already in hosts, so the repair would no-op and the retired block's sites would stay
+    ' blocked until teardown. This computes the exact desired file instead, and returns Nothing
+    ' only when hosts is ALREADY exactly that. Data-loss safe by the same rule as every other
+    ' writer: StripMonkModeBlock touches only our marker block. Pure + Shared.
+    Friend Shared Function ExactHostsRewrite(ByVal hostsText As String, ByVal expectedBlock As String) As String
+        If String.IsNullOrWhiteSpace(expectedBlock) Then Return Nothing      ' never invent content
+        If hostsText Is Nothing Then hostsText = ""
+        Dim userContent As String = StripMonkModeBlock(hostsText)
+        Dim desired As String = If(userContent.Length = 0, expectedBlock, userContent & vbCrLf & expectedBlock)
+        If String.Equals(desired, hostsText, StringComparison.Ordinal) Then Return Nothing
+        Return desired
+    End Function
+
+    ' The thin file wrapper: clear read-only, write atomically, and ALWAYS re-assert read-only
+    ' in a Finally - a writable hosts is the fail-OPEN state the DNS client would read around.
+    ' Best-effort; never throws.
+    Friend Shared Sub WriteHostsMarkerBlock(ByVal hostsPath As String, ByVal expectedBlock As String)
+        Try
+            Dim hostsText As String = ""
+            If System.IO.File.Exists(hostsPath) Then hostsText = System.IO.File.ReadAllText(hostsPath)
+            Dim desired As String = ExactHostsRewrite(hostsText, expectedBlock)
+            If desired Is Nothing Then Return
+            If System.IO.File.Exists(hostsPath) Then SetAttr(hostsPath, vbNormal)
+            Try
+                AtomicHosts.WriteAtomic(hostsPath, desired)
+            Finally
+                Try
+                    If System.IO.File.Exists(hostsPath) Then SetAttr(hostsPath, vbReadOnly)
+                Catch ex As Exception
+                End Try
+            End Try
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' ================= P39: THE WHOLE-MACHINE TEARDOWN =================
+    '
+    ' Fires ONLY from ClassifyTick's TeardownAll arm, i.e. only at SlotCount = 0 with the v9
+    ' residual also exited. The ORDER DELIBERATELY INVERTS the pre-S3b one (which stripped
+    ' hosts first and marked the config afterwards):
+    '     (1) persist the ZERO-SLOT config;
+    '     (2) delete the hosts snapshot;
+    '     (3) the existing stopMe() body, from the hosts strip onward.
+    ' Crash points:
+    '   * before (1): nothing changed; the next tick re-decides TeardownAll and starts over.
+    '   * between (1) and (2): the config says nothing is armed, but hosts is still blocked
+    '     and the snapshot still exists. OVER-block. The next tick reads a zero-slot config
+    '     with an exited residual, classifies TeardownAll again and runs to completion.
+    '   * between (2) and (3): hosts still blocked, snapshot gone - still an over-block, and
+    '     still convergent for the same reason.
+    ' The OLD order had the fatal window the other way round: hosts stripped, config still
+    ' armed, so the next tick's B2 self-heal RESURRECTED a torn-down block from the snapshot.
+    ' Nothing here can under-block, and nothing can wedge, because every intermediate state
+    ' re-enters TeardownAll.
+    '
+    ' (1) also clears the v9 residual's holding fields. They are all outside the v10 canonical,
+    ' so writing them cannot move the MAC - but leaving a future [Time] Until or an armed
+    ' [Schedule] Spec behind would make the next tick's residual HOLD and a half-finished
+    ' teardown could then never complete (hosts blocked forever with nothing armed). This is
+    ' also what S4 needs: the guardian's raw floor must see zero slot keys AND no v9 hold, or
+    ' it never stands down.
+    Friend Function PersistZeroSlotConfigAt(ByVal iniPath As String) As Boolean
+        Try
+            Dim iniFile = New IniFile
+            iniFile.Load(iniPath)
+            Dim macValid As Boolean = ConfigMacIsValidForIni(iniFile)
+            For p As Integer = 1 To ConfigIntegrity.MaxSlots
+                iniFile.RemoveSection("Slot" & p.ToString(CultureInfo.InvariantCulture))
+            Next
+            iniFile.AddSection("Slots")
+            iniFile.SetKeyValue("Slots", "SlotCount", "0")
+            ' NextSlotId is NOT reset (P17: ids never restart, even across a teardown).
+            iniFile.AddSection("Guard")
+            iniFile.SetKeyValue("Guard", "HoldUntil", "")
+            iniFile.SetKeyValue("Guard", "ArmedCount", "0")
+            ' The v9 residual, neutralised so an interrupted teardown always converges.
+            NeutraliseV9Residual(iniFile)
+            iniFile.SetKeyValue("Process", "List", "null")
+            iniFile.SetKeyValue("User", "CustomSites", "null")
+            ' B7: only ever re-stamp bytes just verified. Unreachable with an invalid MAC
+            ' (ClassifyTick Holds), and if it were reached the stale MAC would freeze the
+            ' config rather than bless it - the fail-closed side.
+            If macValid Then RestampMacWithExistingKey(iniFile)
+            iniFile.Save(iniPath)
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' Clear every v9 mirror field that can HOLD (the residual's four inputs). All of them sit
+    ' OUTSIDE the v10 canonical, so this cannot move the MAC - the caller's re-stamp is for
+    ' the slot/SlotCount changes. Called at exactly the two moments the mirror stops
+    ' representing anything: the last slot retiring, and the whole-machine teardown. Never
+    ' called while a slot survives, because until then the mirror's job is to over-block.
+    Private Sub NeutraliseV9Residual(ByVal ini As IniFile)
+        ini.SetKeyValue("Time", "Until", encryptionW.EncryptData(ScheduleOnlyExpiredUntil))
+        ini.SetKeyValue("Time", "CoolOffUntil", "")
+        ini.SetKeyValue("Schedule", "Spec", "")
+        ini.SetKeyValue("Schedule", "ActiveUntil", "")
+    End Sub
+
+    Private Sub TeardownAll()
+        PersistZeroSlotConfigAt(Application.StartupPath + "\monkmode_settings.ini")
+        Try
+            System.IO.File.Delete(Application.StartupPath + "\monkmode_hosts.block")
+        Catch ex As Exception
+        End Try
+        stopMe()
     End Sub
 
     ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
@@ -865,11 +1407,11 @@ Public Class Service1
         Dim prevTickWallNow As String = ""
         Dim tickWallNow As String = ""
         Dim monoElapsedSeconds As Long = 0
-        ' C4: whether THIS block is committed (self-serve cooling-off disabled = code-
-        ' only exit). Only consulted under macValid (a frozen config Ignores cooling-off
-        ' regardless), and under macValid the MAC-covered flag is authentic. Default
-        ' not-committed on a failed read - harmless, since a failed read => not macValid.
-        Dim iniCommitted As Boolean = False
+        ' v1.1 S3b: the v9 machine-wide [Commit] Committed read is GONE from the tick. The
+        ' cooling-off poll is slot-addressed now and reads each slot's OWN MAC-covered
+        ' Committed flag, so a machine-wide one had no consumer left - and keeping a dead read
+        ' of an enforcement field would misrepresent what the tick actually adjudicates on.
+        ' The CLI still maintains the v9 key ("yes if ANY slot is") for its `unblock` warning.
         ' D2c: whether THIS block kills blocked apps in EVERY session (not just session 0).
         ' Default FALSE = the current session-0-only kill = fail-safe: a tick that couldn't read
         ' the flag never widens (the block still holds - hosts stay locked, the deadline never
@@ -929,8 +1471,6 @@ Public Class Service1
             ' NOT read from the ini (the stored [CurrentTime] Now is stale across a reboot) but
             ' from the in-memory lastTickWallNow anchor captured below.
             iniScheduleSpec = iniFile.GetKeyValue("Schedule", "Spec")
-            ' C4: read the [Commit] Committed policy flag ("yes"=committed). MAC-covered.
-            iniCommitted = IsCommitted(iniFile.GetKeyValue("Commit", "Committed"))
             iniProcessList = iniFile.GetKeyValue("Process", "List")
             If StrComp("null", iniProcessList) <> 0 Then
                 iniProcessList = encryptionW.DecryptData(iniProcessList)
@@ -1013,7 +1553,14 @@ Public Class Service1
         ' this tick's heartbeat below decides off it - a cancel processed here
         ' wins over an elapse the same tick (fail-closed: stay blocked).
         If StrComp("no", iniTimeChanging) = 0 Then
-            iniCoolOffUntil = ProcessCoolOffSignals(iniCoolOffUntil, newHw, macValid, iniCommitted)
+            ' P41: one capped, ordinal-sorted enumeration of the trigger zone per tick, shared
+            ' by both pollers - so a directory stuffed with trigger files cannot stall the tick,
+            ' and the surplus is simply deferred (fail-closed: a deferred exit trigger holds).
+            Dim triggerNames As List(Of String) = EnumerateTriggerFiles()
+            ' Clear anything the glob picked up that addresses no slot at all (legacy
+            ' unsuffixed names), or it occupies the per-tick budget for ever.
+            PurgeUnaddressedTriggers(Application.StartupPath, triggerNames)
+            ProcessCoolOffSignals(slots, newHw, macValid, triggerNames)
             ' C3b: poll the partner-code trigger AFTER cooling-off (still inside
             ' tickLock + the TimeChanging="no" guard). Running it after ProcessCoolOff-
             ' Signals is what makes a valid code beat a same-tick --cancel: UnlockedAt
@@ -1021,7 +1568,7 @@ Public Class Service1
             ' cancel landed the same tick (a partner-authorised exit is authoritative
             ' over the user's own change-of-mind about the slow path). Returns the
             ' post-verify UnlockedAt so THIS tick's heartbeat decides off it.
-            iniPartnerUnlockedAt = ProcessPartnerCodeSignal(iniPartnerUnlockedAt, macValid)
+            ProcessPartnerCodeSignal(slots, macValid, triggerNames)
             ' C5b (b2): poll the schedule windows AFTER cooling-off + code (still inside
             ' tickLock + the TimeChanging="no" guard). The FIRST step that can WRITE a
             ' non-empty [Schedule] ActiveUntil - the window->duration conversion (§6.1):
@@ -1033,9 +1580,32 @@ Public Class Service1
             ' tick; OnStart re-evaluates with isBoot:=True). No Spec => inert fast path.
             iniScheduleActiveUntil = ProcessScheduleWindows(iniScheduleActiveUntil, iniScheduleSpec, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
             ' v1.1 S3a: the same window->duration conversion, once per SLOT that carries a
-            ' rule, persisted through PersistSlotField. Inert on every slot armed today (the
-            ' CLI writes ScheduleSpec="" until S3b), so this is machinery + tests for now.
+            ' rule, persisted through PersistSlotField. Still inert on every slot the CLI can
+            ' arm today (WriteSlotSection writes ScheduleSpec=""), so this remains machinery +
+            ' tests until `schedule` becomes a slot.
             ProcessSlotScheduleWindows(slots, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
+            ' P29: PENDING -> ACTIVE, before the retire pass so a slot that starts and a slot
+            ' that ends in the same tick are both handled. A just-activated slot has
+            ' Until = HighWater + duration, which is strictly in the future, so it can never
+            ' be activated and retired in one tick.
+            ActivateDueSlots(slots, newHw, macValid)
+            ' P38: retire every slot whose OWN exit is due. Each retire rewrites the config,
+            ' the snapshot and hosts to the post-retire truth, so the slots the tick reasons
+            ' over below must be RE-READ from disk afterwards - the in-memory list still holds
+            ' the retired slot and its stale positions.
+            If RetireDueSlots(slots, newHwAsOf, macValid, newHw) > 0 Then
+                Try
+                    Dim reloaded = New IniFile
+                    reloaded.Load(Application.StartupPath + "\monkmode_settings.ini")
+                    ' Re-derive macValid too: the retire re-stamped, so a failure to re-validate
+                    ' here means something else moved the file, and the fold below must freeze.
+                    macValid = ConfigMacIsValidForIni(reloaded)
+                    slots = LoadSlots(reloaded)
+                Catch ex As Exception
+                    ' Fail-closed: keep enforcing off the pre-retire list (which is a SUPERSET
+                    ' of the truth) and let the next tick read a clean config.
+                End Try
+            End If
         End If
 
         ' C5b (b3-i/b3-ii): the effective schedule state for THIS tick's ENFORCEMENT, computed
@@ -1329,10 +1899,22 @@ Public Class Service1
             ' AndAlso ParseSchedule(Spec) yields >=1 window); the guardian uses its cheaper
             ' Spec-non-empty over-approximation (Guardian.ScheduleArmed, no 4th parser copy).
             Dim scheduleArmedNow As Boolean = ScheduleArmed(macValid, iniScheduleSpec)
-            Select Case ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt), ScheduleActive(iniScheduleActiveUntil, newHw), scheduleArmedNow)
-                Case HeartbeatAction.Lift
-                    stopMe()
-                Case HeartbeatAction.Restamp
+            ' v1.1 S3b: this is now the V9 RESIDUAL, not the machine's exit decision. Every
+            ' input to it - [Time] Until, [Time] CoolOffUntil, [Partner] UnlockedAt,
+            ' [Schedule] ActiveUntil/Spec - sits OUTSIDE the v10 canonical and is therefore
+            ' raw-editable under a valid MAC. ClassifyTick consumes its Lift as a NECESSARY
+            ' condition for teardown and never as a sufficient one, so back-dating [Time]
+            ' Until can no longer tear anything down: with slots armed it is ignored outright,
+            ' and with none armed it only withdraws a hold the empty slot set had already
+            ' withdrawn. Its Restamp/Hold arms still HOLD - which is what keeps the v9
+            ' schedule-only shape (SlotCount = 0, an armed [Schedule] Spec) working unchanged.
+            Dim residual As HeartbeatAction = ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt), ScheduleActive(iniScheduleActiveUntil, newHw), scheduleArmedNow)
+            Select Case ClassifyTick(macValid, slots.Count, residual)
+                Case TickAction.TeardownAll
+                    ' P39: nothing is armed any more - config first, then the snapshot, then
+                    ' the existing stopMe() teardown from the hosts strip onward.
+                    TeardownAll()
+                Case TickAction.Restamp
                     Dim iniFile = New IniFile
                     iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
                     ' #4 (audit P2->P3) TOCTOU FIX: macValid (above) was computed on
@@ -1369,11 +1951,12 @@ Public Class Service1
                         ' overwrite the good backup with a bad primary.
                         RefreshBackupFromValid(iniFile)
                     End If
-                Case HeartbeatAction.Hold
+                Case TickAction.Hold
                     ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
                     ' Fail CLOSED - do NOT re-stamp (that would re-bless the tamper and
-                    ' let it lift next tick: the B7 bypass) and do NOT lift. The block
-                    ' stays frozen until re-armed from the CLI / removed via unblock --force.
+                    ' let it lift next tick: the B7 bypass), do NOT retire any slot and do
+                    ' NOT tear down. Frozen until re-armed from the CLI / removed via
+                    ' unblock --force.
             End Select
         End If
         Finally
@@ -1554,10 +2137,9 @@ Public Class Service1
     ' the channel. In Application.StartupPath (MonkMode's own state zone).
     Friend Const PartnerCodeFileName As String = "monkmode_partner.code"
 
-    ' Cap the trigger read: a code is ~11 chars, so an over-large trigger file is a
-    ' memory/DoS lever, not a real attempt. A file above this reads as a
-    ' non-matching attempt (candidate stays "" => Ignore => the trigger is deleted).
-    Friend Const PartnerCodeTriggerMaxBytes As Long = 4096
+    ' v1.1 S3b: the read cap moved to the SHARED TriggerMaxBytes (see the P40/P41 block) so
+    ' the content-bearing `partner.code.<id>` and `add.request.<id>` channels are capped by
+    ' one constant instead of two that could drift.
 
     ' The compile-time FLOOR: the shortest cooling-off the service will ever
     ' grant, in seconds - THE one new C2b security parameter, pinned by a unit
@@ -1998,7 +2580,30 @@ Public Class Service1
         Public AllSession As String = ""
         Public ScheduleSpec As String = ""
         Public ScheduleActiveUntil As String = ""  ' decrypted
+        ' v1.1 S3b: the four EXIT fields, all MAC-covered, all per slot. Until S3b the
+        ' exit was adjudicated off the v9 machine-wide mirror ([Time] CoolOffUntil,
+        ' [Partner] UnlockedAt/Salt/Hash, [Commit] Committed), which sits OUTSIDE the v10
+        ' canonical - so one block's cooling-off deadline lifted every block, and one
+        ' block's code addressed all of them. Read per slot, they are tamper-evident AND
+        ' independent.
+        Public CoolOffUntil As String = ""         ' decrypted; "" = no cooling-off pending
+        Public CoolOffDuration As String = ""      ' plaintext seconds, as stored
+        Public PartnerSalt As String = ""
+        Public PartnerHash As String = ""
+        Public PartnerUnlockedAt As String = ""    ' plaintext, as stored; "" = not code-unlocked
+        Public Committed As String = ""
     End Class
+
+    ' The 16 per-slot key names, in BuildSlotCanonical's LINE order. The slot compaction a
+    ' retire performs (P38) copies a whole section field-by-field, so it needs the field set
+    ' spelled out exactly once; a key missing here would be silently DROPPED by a compaction
+    ' and the canonical would then be built over "" for it - a MAC that no longer matches the
+    ' block the user armed. Pinned equal to BuildSlotCanonical's emitted lines by a unit test,
+    ' so adding a 17th field to the canonical without adding it here fails loudly.
+    Friend Shared ReadOnly SlotFieldNames As String() = {
+        "Id", "StartAt", "DurationSeconds", "Until", "Sites", "Apps", "UrlPatterns",
+        "AllSession", "ScheduleSpec", "ScheduleActiveUntil", "CoolOffUntil", "CoolOffDuration",
+        "PartnerSalt", "PartnerHash", "PartnerUnlockedAt", "Committed"}
 
     ' Split one stored packed list into its entries (trimmed, empties dropped). Sites/Apps
     ' are ";"-packed with a trailing ";" (Blocker.PackList/PackApps); UrlPatterns is
@@ -2161,6 +2766,192 @@ Public Class Service1
             If String.Equals(stored, wanted, StringComparison.Ordinal) Then Return pos
         Next
         Return 0
+    End Function
+
+    ' ======== v1.1 S3b: the EXIT moves onto the slots (the classifier split) ========
+    '
+    ' THE HOLE THIS CLOSES. S3a moved WHAT is blocked and WHETHER THE MACHINERY STAYS UP onto
+    ' the slots, but the LIFT still ran through ClassifyHeartbeat/EffectiveExit over the v9
+    ' mirror keys - [Time] Until, [Time] CoolOffUntil, [Partner] UnlockedAt, [Schedule]
+    ' ActiveUntil/Spec - and NOT ONE of those is inside the v10 canonical. Back-dating
+    ' [Time] Until with a text editor left macValid TRUE and tore the whole machine down.
+    '
+    ' THE SPLIT. Two decisions where there was one:
+    '   * ClassifySlot - per SLOT, off that slot's own MAC-covered fields. Retire removes
+    '     THAT slot (P38) and disturbs no other.
+    '   * ClassifyTick - per MACHINE. Teardown fires ONLY at SlotCount = 0 (P39).
+    ' The v9 residual keeps exactly ONE power in ClassifyTick: it can HOLD a teardown back,
+    ' never cause one. A raw edit to any v9 key is therefore now an OVER-block at worst -
+    ' which is the whole point of the slice.
+
+    Friend Enum SlotAction
+        Retire   ' this slot's own exit is due: compact it out of the config (P38)
+        Hold     ' keep it: not due, frozen config, open window, or an armed schedule
+    End Enum
+
+    ' The per-slot exit gate. DEFINED as ClassifyHeartbeat's Lift arm rather than re-derived,
+    ' deliberately: the heartbeat trichotomy is the attacked, pinned core (macValid freeze,
+    ' the SD1 open-window hard hold, the c2 between-windows hold, and the Lift <=>
+    ' EffectiveExit equivalence), and a second hand-written copy of that logic is exactly how
+    ' two gates drift apart. Restamp and Hold both mean "keep this slot"; only Lift retires
+    ' it. Pure + Shared; the per-slot Retire <=> SlotEffectiveExit equivalence is pinned by a
+    ' test that derives the two INDEPENDENTLY.
+    Friend Shared Function ClassifySlot(ByVal macValid As Boolean, ByVal slotExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean, ByVal scheduleArmed As Boolean) As SlotAction
+        If ClassifyHeartbeat(macValid, slotExpired, coolOffElapsed, codeUnlocked, scheduleActive, scheduleArmed) = HeartbeatAction.Lift Then
+            Return SlotAction.Retire
+        End If
+        Return SlotAction.Hold
+    End Function
+
+    ' The per-slot twin of EffectiveExit: may THIS slot end? Threads the slot's own four
+    ' MAC-covered exit fields through the SHARED EffectiveExit body (so the service, the
+    ' guardian's parity copy and OnStart still cannot drift), with the slot's own Spec
+    ' driving the between-windows hold. Fail-closed on every axis by inheritance: an invalid
+    ' MAC, an unparseable Until, an unparseable cooling-off deadline and an open window all
+    ' read as "does not exit". A PENDING slot (Until = "") likewise never exits on time - but
+    ' it CAN exit on a verified partner code or a completed cooling-off, which is correct: a
+    ' block you scheduled for tomorrow must still be cancellable by the authorised exits.
+    ' Pure + Shared.
+    Friend Shared Function SlotEffectiveExit(ByVal slot As SlotState, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
+        If slot Is Nothing Then Return False
+        Return EffectiveExit(slot.UntilText, slot.CoolOffUntil, slot.PartnerUnlockedAt,
+                             slot.ScheduleActiveUntil, highWaterText, graceSeconds, macValid,
+                             ScheduleArmed(macValid, slot.ScheduleSpec))
+    End Function
+
+    ' The live per-slot derivation the tick and OnStart take: read the slot's own state into
+    ' ClassifySlot. asOf is the trusted high-water mark (never DateTime.Now). Pure + Shared.
+    Friend Shared Function SlotExitDue(ByVal slot As SlotState, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As SlotAction
+        If slot Is Nothing Then Return SlotAction.Hold
+        Return ClassifySlot(macValid,
+                            SlotExpired(slot, asOf, graceSeconds),
+                            CoolOffElapsedTime(slot.CoolOffUntil, highWaterText),
+                            PartnerUnlocked(slot.PartnerUnlockedAt),
+                            ScheduleActive(slot.ScheduleActiveUntil, highWaterText),
+                            ScheduleArmed(macValid, slot.ScheduleSpec))
+    End Function
+
+    ' What the WHOLE MACHINE does this tick, once every due slot has been retired.
+    Friend Enum TickAction
+        TeardownAll   ' nothing is armed any more: run the P39 whole-machine teardown
+        Restamp       ' something is still armed: advance Now/HighWater and re-stamp
+        Hold          ' INVALID MAC: freeze - neither re-stamp nor tear anything down
+    End Enum
+
+    ' P39: the teardown gate. THREE things must all be true before a single byte of
+    ' enforcement is undone:
+    '   * the MAC is valid (an invalid one freezes, exactly as ClassifyHeartbeat does);
+    '   * remainingSlotCount = 0 - and PENDING slots are counted, so a teardown can never
+    '     eat a block that has not started yet;
+    '   * the v9 residual has ALSO exited. This is the load-bearing demotion: `residual` is
+    '     ClassifyHeartbeat over the v9 mirror keys, and its Lift is now merely NECESSARY,
+    '     never sufficient. Back-dating [Time] Until while any slot is armed changes
+    '     nothing at all; with no slots armed it still only removes a HOLD that the empty
+    '     slot set had already removed. And the v9 schedule-only shape (SlotCount = 0, a
+    '     [Schedule] Spec armed) keeps working unchanged, because its residual Restamps.
+    ' Pure + Shared.
+    Friend Shared Function ClassifyTick(ByVal macValid As Boolean, ByVal remainingSlotCount As Integer, ByVal residual As HeartbeatAction) As TickAction
+        If Not macValid Then Return TickAction.Hold
+        If remainingSlotCount > 0 Then Return TickAction.Restamp
+        If residual <> HeartbeatAction.Lift Then Return TickAction.Restamp
+        Return TickAction.TeardownAll
+    End Function
+
+    ' ---- P29: PENDING -> ACTIVE ----
+    '
+    ' A `--start` slot stores StartAt (absolute wall-clock, encrypted) + DurationSeconds
+    ' (plaintext) and NO Until; the SERVICE computes the end at activation. Storing an
+    ' absolute Until at arm time would UNDER-BLOCK after downtime - the wall clock runs on
+    ' while the machine is off, so a 1h block armed for tonight and booted tomorrow would
+    ' already be over. Refused.
+
+    ' Has this PENDING slot's start moment arrived? Measured against the trusted HighWater,
+    ' never DateTime.Now, so: a clock rolled FORWARD cannot start (and therefore cannot
+    ' finish) a block early - HighWater refuses the jump; a clock rolled BACK before the
+    ' start merely delays it (permitted-cancel-equivalent); and machine-off across the start
+    ' moment yields the FULL duration measured from the moment HighWater catches up. Fail-
+    ' closed: an unparseable StartAt or HighWater is NOT due, so the slot stays PENDING - and
+    ' a PENDING slot still contributes its sites to every union, so "not due" over-blocks.
+    ' Pure + Shared.
+    Friend Shared Function SlotStartDue(ByVal slot As SlotState, ByVal highWaterText As String) As Boolean
+        If Not SlotIsPending(slot) Then Return False
+        Dim ca As New CultureInfo("en-CA")
+        Dim startAt As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(slot.StartAt, ca, DateTimeStyles.None, startAt) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return startAt <= highWater
+    End Function
+
+    ' The Until an activation persists: HighWater_now + DurationSeconds, in the SHAPE of
+    ' ComputeCoolOffDeadline (same frame, same fail-closed "" on an unparseable mark) so the
+    ' two service-computed deadlines are derived identically. "" means "no deadline
+    ' computable" => write NOTHING => the slot stays PENDING and is retried next tick, which
+    ' over-blocks (a pending slot's sites are already enforced) and never lifts. Pure +
+    ' Shared.
+    Friend Shared Function ComputeSlotActivationUntil(ByVal highWaterText As String, ByVal durationSecondsText As String) As String
+        Dim seconds As Long
+        If Not Long.TryParse(If(durationSecondsText, "").Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, seconds) Then Return ""
+        If seconds <= 0 Then Return ""
+        Dim ca As New CultureInfo("en-CA")
+        Dim highWater As DateTime
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return ""
+        Return highWater.AddSeconds(seconds).ToString(ca)
+    End Function
+
+    ' ---- P40/P41: the SLOT-ADDRESSED trigger channel ----
+    '
+    ' Every trigger now carries the id of the slot it addresses. The id is a ROUTING HINT
+    ' with ZERO authority: an unknown, retired or garbage id deletes the trigger and changes
+    ' nothing (no freeze - a freeze would let anyone wedge the machine by dropping junk), and
+    ' a code is verified ONLY against the addressed slot's own MAC-covered Salt/Hash, so
+    ' possessing slot A's code lifts slot A and nothing else. P17's never-reused ids are what
+    ' make that safe: a replayed monkmode_partner.code.<id> can never come to address a
+    ' different block.
+
+    Friend Const CoolOffRequestPrefix As String = "monkmode_cooloff.request."
+    Friend Const CoolOffCancelPrefix As String = "monkmode_cooloff.cancel."
+    Friend Const PartnerCodePrefix As String = "monkmode_partner.code."
+    ' P40: declared here so the four names live in one place. NOT consumed yet - `add` stays
+    ' CLI-side until P42/S5 makes it service-adjudicated; declaring the name early is what
+    ' stops S5 inventing a fifth spelling.
+    Friend Const AddRequestPrefix As String = "monkmode_add.request."
+
+    ' The shared cap on a content-bearing trigger read (was PartnerCodeTriggerMaxBytes; the
+    ' `add` channel needs the same cap, so it is now one constant). A code is ~11 chars and a
+    ' site list is short: anything above this is a memory/DoS lever, not a real request, so it
+    ' reads as blank (=> Ignore => the trigger is deleted, no state change).
+    Friend Const TriggerMaxBytes As Long = 4096
+
+    ' P41: how many trigger files one tick will consume. 2 x MaxSlots, so every armed slot can
+    ' have both a request and a cancel in flight. The surplus is LEFT ON DISK for the next
+    ' tick rather than deleted: deferring an EXIT trigger is fail-closed (the block simply
+    ' holds ~10s longer) and deferring an `add` delays a widen by <= 10s. The cap exists so a
+    ' directory stuffed with 100k trigger files cannot stall the enforcement tick.
+    Friend Const MaxTriggerFilesPerTick As Integer = 16
+
+    ' The id a trigger file name addresses, or "" if it is not one of ours. Ordinal-
+    ' case-insensitive prefix match (Windows file names are case-insensitive), and the
+    ' remainder is taken VERBATIM apart from trimming - it is only ever compared to a stored
+    ' Id, never parsed, so no numeric interpretation can widen it. Pure + Shared.
+    Friend Shared Function TriggerIdFromName(ByVal fileName As String, ByVal prefix As String) As String
+        If fileName Is Nothing OrElse prefix Is Nothing Then Return ""
+        If Not fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then Return ""
+        Return fileName.Substring(prefix.Length).Trim()
+    End Function
+
+    ' P41: the names this tick will consume - sorted ORDINAL (so the selection is
+    ' deterministic and a starved trigger eventually leads the list) and capped. Pure +
+    ' Shared so the cap is unit-pinned without a directory full of files.
+    Friend Shared Function SelectTriggerFiles(ByVal names As List(Of String), ByVal maxPerTick As Integer) As List(Of String)
+        Dim selected As New List(Of String)
+        If names Is Nothing Then Return selected
+        Dim sorted As New List(Of String)(names)
+        sorted.Sort(StringComparer.Ordinal)
+        For Each n As String In sorted
+            If selected.Count >= maxPerTick Then Exit For
+            selected.Add(n)
+        Next
+        Return selected
     End Function
 
     ' The effective app-kill set for this tick (design §6.3, the app-kill UNION / SD2). It is
@@ -3566,6 +4357,22 @@ Public Class Service1
         ' fresh one - rotate-on-use). Best-effort.
         Try
             System.IO.File.Delete(Application.StartupPath + "\" + PartnerCodeFileName)
+        Catch ex As Exception
+        End Try
+
+        ' v1.1 S3b: and every SLOT-ADDRESSED trigger (P40). The unsuffixed deletes above are
+        ' kept only to clear a legacy file an old CLI may have left; the live channel is
+        ' <prefix><id>, and leaving one behind would have the NEXT block's arm inherit a
+        ' cooling-off request or a stale candidate the moment it takes that id's successor.
+        Try
+            For Each pattern As String In New String() {CoolOffRequestPrefix & "*", CoolOffCancelPrefix & "*", PartnerCodePrefix & "*", AddRequestPrefix & "*"}
+                For Each stale As String In System.IO.Directory.GetFiles(Application.StartupPath, pattern)
+                    Try
+                        System.IO.File.Delete(stale)
+                    Catch ex As Exception
+                    End Try
+                Next
+            Next
         Catch ex As Exception
         End Try
 

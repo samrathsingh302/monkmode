@@ -60,6 +60,15 @@ Module Blocker
     ' service copies (Service1.CoolOff*FileName), like SnapshotName/BackupFileName.
     Public Const CoolOffRequestFileName As String = "monkmode_cooloff.request"
     Public Const CoolOffCancelFileName As String = "monkmode_cooloff.cancel"
+    ' v1.1 S3b (P40): the live channel is SLOT-ADDRESSED - <prefix><id>. The unsuffixed names
+    ' above survive only so the `unblock --force` escape hatch can still clear a legacy file
+    ' an older build left behind; nothing reads them any more. Parity-pinned with the service
+    ' copies (Service1.CoolOffRequestPrefix / CoolOffCancelPrefix / PartnerCodePrefix), like
+    ' every other cross-assembly literal - a drift here silently breaks the exit channel.
+    Public Const CoolOffRequestPrefix As String = "monkmode_cooloff.request."
+    Public Const CoolOffCancelPrefix As String = "monkmode_cooloff.cancel."
+    Public Const PartnerCodePrefix As String = "monkmode_partner.code."
+    Public Const AddRequestPrefix As String = "monkmode_add.request."
     ' C3b: the ONE content-bearing partner-code trigger the CLI drops in AppDir()
     ' (unblock --code). Unlike the cooling-off triggers, its CONTENT is read - but
     ' as a verified ATTEMPT the service KDF-checks against a MAC-covered verifier
@@ -282,20 +291,112 @@ Module Blocker
         End Try
     End Function
 
+    ' v1.1 S3b: the PER-SLOT commit flag, for the `unblock --id N` exit gate. The v9
+    ' [Commit] Committed above is the machine-wide LATCH ("yes if ANY slot is"), and a latch is
+    ' the wrong thing to gate ONE block's exit on: with a committed 1h block beside an
+    ' uncommitted 30d one, the latch would refuse the survivor's cooling-off for a month after
+    ' the committed block ended. RefreshV9ListMirror now recomputes the latch as slots retire,
+    ' but an addressed exit should not consult a union at all - it should read the block it
+    ' names. Same fail-safe stance as BlockIsCommitted: MAC-gated, False on any read failure
+    ' (this is a CLI WARNING gate with zero enforcement authority - the service adjudicates).
+    Public Function SlotIsCommitted(ByVal slotId As Integer) As Boolean
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            If Not ConfigMacIsValidForIni(ini) Then Return False
+            Dim wanted As String = slotId.ToString(CultureInfo.InvariantCulture)
+            For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+                If String.Equals(If(ini.GetKeyValue(SlotSection(pos), "Id"), "").Trim(), wanted, StringComparison.Ordinal) Then
+                    Return String.Equals(If(ini.GetKeyValue(SlotSection(pos), "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+                End If
+            Next
+            Return False
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' P33: one line per armed slot for the "name the one you mean" refusal -
+    '   "  <id>  <state>  ends <when>  (<n> sites, <n> apps)"
+    ' Display-only and fail-SOFT throughout (an unreadable end renders "?"), exactly like
+    ' BuildSlotSummaries: a refusal message must never throw over a live block. State is the
+    ' P16 DERIVED one - PENDING (StartAt set, no Until yet), SCHEDULE (a rule), else ACTIVE.
+    Public Function ArmedSlotLines() As List(Of String)
+        Dim lines As New List(Of String)
+        Try
+            If Not File.Exists(IniPath()) Then Return lines
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+                Dim sec As String = SlotSection(pos)
+                Dim id As String = If(ini.GetKeyValue(sec, "Id"), "?")
+                Dim startAt As DateTime = SlotDate(ini, pos, "StartAt")
+                Dim ends As DateTime = SlotDate(ini, pos, "Until")
+                Dim state As String, whenText As String
+                If If(ini.GetKeyValue(sec, "ScheduleSpec"), "") <> "" Then
+                    state = "SCHEDULE"
+                    whenText = "when its window closes"
+                ElseIf startAt > DateTime.MinValue AndAlso ends = DateTime.MinValue Then
+                    state = "PENDING"
+                    ' The end is not computed until the service activates it (P29), so show the
+                    ' PLANNED end - StartAt + DurationSeconds - purely for the user to tell two
+                    ' blocks apart. Zero authority; "?" if the duration is unreadable.
+                    Dim secs As Long
+                    If Long.TryParse(If(ini.GetKeyValue(sec, "DurationSeconds"), ""),
+                                     NumberStyles.Integer, CultureInfo.InvariantCulture, secs) AndAlso secs > 0 Then
+                        whenText = startAt.AddSeconds(secs).ToString() & " (starts " & startAt.ToString() & ")"
+                    Else
+                        whenText = "? (starts " & startAt.ToString() & ")"
+                    End If
+                Else
+                    state = "ACTIVE"
+                    whenText = If(ends > DateTime.MinValue, ends.ToString(), "?")
+                End If
+                Dim siteCount As Integer = CountPacked(ini.GetKeyValue(sec, "Sites"))
+                Dim appCount As Integer = CountPacked(ini.GetKeyValue(sec, "Apps"))
+                lines.Add("  " & id & "  " & state & "  ends " & whenText &
+                          "  (" & siteCount.ToString(CultureInfo.InvariantCulture) & " sites, " &
+                          appCount.ToString(CultureInfo.InvariantCulture) & " apps)")
+            Next
+        Catch
+        End Try
+        Return lines
+    End Function
+
+    ' Entries in a ";"-packed list (trimmed, empties dropped) - the display counter for
+    ' ArmedSlotLines. Fail-soft: anything unreadable counts as 0.
+    Private Function CountPacked(ByVal packed As String) As Integer
+        Dim n As Integer = 0
+        For Each tok As String In If(packed, "").Split(";"c)
+            If tok.Trim() <> "" Then n += 1
+        Next
+        Return n
+    End Function
+
     ' D5 (rich status): the MONOTONIC cooling-off remaining for `status` - CoolOffUntil - HighWater
     ' (the SAME active-time countdown the service enforces via the B4 mark; NOT the wall clock).
     ' Nothing when no cooling-off is pending ([Time] CoolOffUntil empty), the MAC is invalid
     ' (tampered/frozen - never a misleading countdown, like BlockIsCommitted), the deadline has
     ' already passed (about to lift), or anything is unreadable. Display-only: ZERO enforcement
     ' authority. Best-effort; never throws.
+    ' v1.1 S3b: cooling-off is PER SLOT now (the machine-wide [Time] CoolOffUntil is no
+    ' longer written by anyone), so this reports the SOONEST pending deadline across the
+    ' armed slots - the next moment a block would lift. Display-only, so a soonest-wins
+    ' summary is the honest one-line answer; the per-block breakdown belongs to `status`.
     Public Function CoolOffPendingRemaining() As TimeSpan?
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
             If Not ConfigMacIsValidForIni(ini) Then Return Nothing
-            Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
-            If coolOffEnc = "" Then Return Nothing
-            Return CoolOffRemainingFrom(enc.DecryptData(coolOffEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+            Dim highWater As String = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))
+            Dim soonest As TimeSpan? = Nothing
+            For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+                Dim coolOffEnc As String = ini.GetKeyValue(SlotSection(pos), "CoolOffUntil")
+                If coolOffEnc = "" Then Continue For
+                Dim remaining As TimeSpan? = CoolOffRemainingFrom(enc.DecryptData(coolOffEnc), highWater)
+                If remaining.HasValue AndAlso (Not soonest.HasValue OrElse remaining.Value < soonest.Value) Then soonest = remaining
+            Next
+            Return soonest
         Catch
             Return Nothing
         End Try
@@ -1741,6 +1842,16 @@ Module Blocker
             Catch
             End Try
         Else
+            ' v1.1 S3b - THE STRUCTURAL BACKSTOP FOR A LIVE BYPASS. The fresh-scaffold branch
+            ' below builds a BRAND-NEW IniFile and stamps a fresh VALID MAC over it, so with
+            ' slots armed it would delete every [SlotN] section and silently lift every running
+            ' block - a one-command teardown. DoSchedule refuses first (and its guard is now
+            ' AnySlotArmed, which does not consult the SCM), but the refusal lives in the
+            ' command and the writer is Public and test-driven, so the writer must refuse too.
+            ' Fail-SAFE: AnySlotArmed reads an unreadable config as ARMED, so a read failure
+            ' costs the user a re-run rather than costing them their blocks.
+            ' (The real fix is making a schedule a SLOT of its own - deferred; see the handback.)
+            If AnySlotArmed() Then Return
             ' Fresh schedule-only scaffold (WriteConfig's field set, minus the manual duration +
             ' partner code): the past-Until sentinel, a seeded HighWater/Now, empty manual site/app
             ' lists (the schedule's own live in the Spec), and the Spec. StampFreshMac mints the key
@@ -2236,15 +2347,20 @@ Module Blocker
     ' off the monotonic HighWater and consumes the file - nothing the CLI writes
     ' here (content, timestamps) carries any timing authority (R2). Same
     ' file-drop channel shape as add_to_hosts, but in MonkMode's own AppDir zone.
-    Public Sub RequestCoolOff()
-        File.WriteAllText(Path.Combine(AppDir(), CoolOffRequestFileName), "")
+    ' v1.1 S3b (P40): addressed at ONE slot. The id is a routing hint with no authority - the
+    ' service verifies it against its own slot list and deletes an unknown one without
+    ' changing any state - but it is what makes cooling-off PER BLOCK. Before S3b there was
+    ' one machine-wide deadline, so `arm 30d; unblock; arm 30d` silently subjected the second
+    ' block to the first's ~1h wait and lifted BOTH (the S2 under-block, P2).
+    Public Sub RequestCoolOff(ByVal slotId As Integer)
+        File.WriteAllText(Path.Combine(AppDir(), CoolOffRequestPrefix & slotId.ToString(CultureInfo.InvariantCulture)), "")
     End Sub
 
     ' Drop the cooling-off CANCEL trigger: the service clears any pending
     ' CoolOffUntil (back into the block) and consumes both triggers. Cancel WINS
     ' over a simultaneous request (fail-closed: stay blocked).
-    Public Sub CancelCoolOff()
-        File.WriteAllText(Path.Combine(AppDir(), CoolOffCancelFileName), "")
+    Public Sub CancelCoolOff(ByVal slotId As Integer)
+        File.WriteAllText(Path.Combine(AppDir(), CoolOffCancelPrefix & slotId.ToString(CultureInfo.InvariantCulture)), "")
     End Sub
 
     ' C3b: drop the partner-code ATTEMPT trigger carrying the candidate code. Unlike
@@ -2258,9 +2374,36 @@ Module Blocker
     ' because the submitter already knows the code they typed, rotate-on-use burns a
     ' used one, and the service never logs it and deletes the trigger after
     ' adjudication (success or failure).
-    Public Sub RequestPartnerCode(ByVal code As String)
-        File.WriteAllText(Path.Combine(AppDir(), PartnerCodeFileName), code)
+    '
+    ' v1.1 S3b (P40): addressed at ONE slot, and the CLI BROADCASTS the same candidate to
+    ' every armed slot (DoUnblock) because the partner is given a code, not a block number.
+    ' That is safe precisely because each slot verifies independently against its OWN
+    ' MAC-covered PartnerSalt/PartnerHash: a candidate can match at most one slot, so a code
+    ' for block A retires block A and leaves every other block fully enforced.
+    Public Sub RequestPartnerCode(ByVal slotId As Integer, ByVal code As String)
+        File.WriteAllText(Path.Combine(AppDir(), PartnerCodePrefix & slotId.ToString(CultureInfo.InvariantCulture)), code)
     End Sub
+
+    ' The ids of every armed slot, ascending by position - what the `unblock` surface
+    ' addresses its triggers at. Fail-SOFT (an unreadable config yields an empty list): the
+    ' cost is one re-run of the command, and dropping a trigger at a guessed id would only
+    ' ever be deleted by the service anyway. Never throws.
+    Public Function ArmedSlotIds() As List(Of Integer)
+        Dim ids As New List(Of Integer)
+        Try
+            If Not File.Exists(IniPath()) Then Return ids
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            Dim count As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+            For pos As Integer = 1 To count
+                Dim id As Integer
+                If Integer.TryParse(If(ini.GetKeyValue(SlotSection(pos), "Id"), ""),
+                                    NumberStyles.Integer, CultureInfo.InvariantCulture, id) Then ids.Add(id)
+            Next
+        Catch
+        End Try
+        Return ids
+    End Function
 
     ' B7: recompute [Integrity] Mac over the current canonical using the already
     ' stored [Integrity] Key (DPAPI-unprotected). Used when a writer changes a

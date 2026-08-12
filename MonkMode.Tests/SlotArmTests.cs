@@ -112,7 +112,7 @@ public class SlotArmTests
             var srv = new monkmode.IniFile(); srv.Load(MonkMode.Blocker.IniPath());
             var guard = new mm_guard.IniFile(); guard.Load(MonkMode.Blocker.IniPath());
             var notify = new mm_notify.IniFile(); notify.Load(MonkMode.Blocker.IniPath());
-            Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srv));
+            Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srv));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guard));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notify));
 

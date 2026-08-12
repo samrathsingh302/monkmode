@@ -746,7 +746,7 @@ public class CoolOffWriteConfigTests
             guardIni.Load(iniPath);
             var notifyIni = new mm_notify.IniFile();
             notifyIni.Load(iniPath);
-            Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
+            Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
         }

@@ -383,7 +383,7 @@ public class PersistSlotFieldTests
             // The service holds an id that is no longer at ANY position (retired, or moved
             // out from under this tick). The write must be refused outright: writing "at the
             // position we last saw it" would set another slot's field.
-            var svc = new monkmode.Service1();
+            var svc = MonkMode.Tests.TestSvc.New();
             Assert.False(svc.PersistSlotFieldAt(path, "99", "CoolOffUntil", "2027-01-01 00:00:00", true));
             Assert.Equal(before, File.ReadAllBytes(path));      // not one byte touched
         }
@@ -398,7 +398,7 @@ public class PersistSlotFieldTests
         {
             ArmTwoSlots();
             var path = MonkMode.Blocker.IniPath();
-            var svc = new monkmode.Service1();
+            var svc = MonkMode.Tests.TestSvc.New();
 
             // Encrypted field on slot 2 (id 2 lives at position 2).
             Assert.True(svc.PersistSlotFieldAt(path, "2", "CoolOffUntil", "2027-01-01 00:00:00", true));
@@ -419,7 +419,7 @@ public class PersistSlotFieldTests
             var guardIni = new mm_guard.IniFile(); guardIni.Load(path);
             var notifyIni = new mm_notify.IniFile(); notifyIni.Load(path);
             var canonical = MonkMode.Blocker.CanonicalFromIni(cliIni);
-            Assert.Equal(canonical, new monkmode.Service1().CanonicalFromIni(srvIni));
+            Assert.Equal(canonical, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
             Assert.Equal(canonical, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(canonical, new mm_notify.Form1().CanonicalFromIni(notifyIni));
         }
@@ -441,7 +441,7 @@ public class PersistSlotFieldTests
             ini.Save(path);
             var tampered = File.ReadAllBytes(path);
 
-            Assert.False(new monkmode.Service1().PersistSlotFieldAt(path, "1", "PartnerUnlockedAt", "x", false));
+            Assert.False(MonkMode.Tests.TestSvc.New().PersistSlotFieldAt(path, "1", "PartnerUnlockedAt", "x", false));
             Assert.Equal(tampered, File.ReadAllBytes(path));
         }
         finally { Wipe(); }
@@ -471,7 +471,7 @@ public class PersistSlotFieldTests
         try
         {
             ArmTwoSlots();
-            var slots = new monkmode.Service1().LoadSlots(Reload());
+            var slots = MonkMode.Tests.TestSvc.New().LoadSlots(Reload());
             Assert.Equal(2, slots.Count);
             Assert.Equal("1", slots[0].Id);
             Assert.Equal(new[] { "reddit.com" }, slots[0].Sites.ToArray());

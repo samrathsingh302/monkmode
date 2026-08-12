@@ -174,7 +174,7 @@ public class CanonicalParityTests
     // their field/InitializeComponent setup (no OnStart / no Form.Show), so they
     // touch no hosts/registry/SCM/DPAPI - inside the fence.
     private static string CliCanonical() => MonkMode.Blocker.CanonicalFromIni(CliIni());
-    private static string ServiceCanonical() => new monkmode.Service1().CanonicalFromIni(ServiceIni());
+    private static string ServiceCanonical() => MonkMode.Tests.TestSvc.New().CanonicalFromIni(ServiceIni());
     private static string GuardianCanonical() => mm_guard.Program.CanonicalFromIni(GuardianIni());
     private static string NotifierCanonical() => new mm_notify.Form1().CanonicalFromIni(NotifierIni());
 
@@ -312,7 +312,7 @@ public class CanonicalParityTests
 
         var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
         Assert.Contains("Slot1.Apps=null\n", cli);
-        Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
+        Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
         Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
         Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
 
@@ -371,7 +371,7 @@ public class CanonicalParityTests
             notifyIni.Load(iniPath);
 
             var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
-            Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
+            Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
             Assert.StartsWith(Ver + "\n", cli);

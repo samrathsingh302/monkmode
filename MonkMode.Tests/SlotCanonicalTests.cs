@@ -187,7 +187,7 @@ public class SlotCanonicalTests
         Assert.Equal(canonical, MonkMode.Blocker.CanonicalFromIni(withStray));
         Assert.DoesNotContain("Slot3.", canonical);
         // And every other reader agrees the stray is invisible.
-        Assert.Equal(canonical, new monkmode.Service1().CanonicalFromIni(SrvCopy(withStray)));
+        Assert.Equal(canonical, MonkMode.Tests.TestSvc.New().CanonicalFromIni(SrvCopy(withStray)));
     }
 
     [Fact]

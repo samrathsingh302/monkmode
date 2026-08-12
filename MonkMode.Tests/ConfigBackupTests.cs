@@ -249,7 +249,7 @@ public class ConfigBackupTests
             // key => macValid would read TRUE => the block is liftable, not frozen.
             var srvIni = new monkmode.IniFile();
             srvIni.Load(primaryPath);
-            var restoredCanonical = new monkmode.Service1().CanonicalFromIni(srvIni);
+            var restoredCanonical = MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni);
             Assert.Equal(canonical, restoredCanonical);
             Assert.True(monkmode.ConfigIntegrity.ConfigMacIsValid(restoredCanonical, mac, Key));
         }
@@ -287,7 +287,7 @@ public class ConfigBackupTests
             var stillIni = new monkmode.IniFile();
             stillIni.Load(primaryPath);
             Assert.True(monkmode.ConfigIntegrity.ConfigMacIsValid(
-                new monkmode.Service1().CanonicalFromIni(stillIni), mac, Key));
+                MonkMode.Tests.TestSvc.New().CanonicalFromIni(stillIni), mac, Key));
         }
         finally
         {
@@ -356,7 +356,7 @@ public class ConfigBackupTests
 
             var fromBackup = MonkMode.Blocker.CanonicalFromIni(cliIni);
             Assert.Equal(cliCanonical, fromBackup);
-            Assert.Equal(cliCanonical, new monkmode.Service1().CanonicalFromIni(srvIni));
+            Assert.Equal(cliCanonical, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
             Assert.Equal(cliCanonical, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cliCanonical, new mm_notify.Form1().CanonicalFromIni(notifyIni));
 

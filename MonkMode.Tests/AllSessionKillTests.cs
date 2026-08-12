@@ -205,7 +205,7 @@ public class AllSessionKillWriteConfigTests
             // enforcement READERS onto the slots; that is what actually closes it.
             // The v9 [Process] AllSession mirror is still written and is still checked above.
             Assert.Contains("Slot1.AllSession=yes\n", cli);
-            Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
+            Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
         });

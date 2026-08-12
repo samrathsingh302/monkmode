@@ -575,20 +575,21 @@ Module Program
         ' so a first schedule also goes through the accountability-model explanation.
         If Not Blocker.SetupIsComplete() Then Return SetupRequired()
 
-        ' SD-c1: a manual `--for` block and a schedule are mutually exclusive in C5b.
+        ' SD-c1: a manual `--for` block and a schedule are mutually exclusive.
         '
-        ' v1.1 S2 note - this refusal DELIBERATELY SURVIVES the slice that deleted DoBlock's.
-        ' `block` is now slot-aware, but `schedule` is not: WriteScheduleConfig still writes
-        ' the v9 schedule-only shape, and its fresh-scaffold branch builds a BRAND NEW ini -
-        ' which, with slots armed, would delete every [SlotN] section and stamp a fresh valid
-        ' MAC over the result, silently lifting every running block. Deleting the refusal
-        ' before schedules become slots (S3b) would therefore turn `monkmode schedule` into a
-        ' one-command bypass, so it stands until S3b makes a schedule a slot of its own.
-        ' BlockIsActive reads the v9 [Time] Until mirror, which ArmSlot maintains as the MAX
-        ' over all slots, so it already means "any slot is armed" - the guard is slot-aware
-        ' even though the writer behind it is not.
-        If Blocker.BlockIsActive() Then
-            Console.Error.WriteLine("A manual block is active. Finish or exit it before setting a schedule.")
+        ' v1.1 S3b - THE GUARD MADE SOUND. It still stands, because WriteScheduleConfig's
+        ' fresh-scaffold branch builds a BRAND-NEW ini: with slots armed it would delete every
+        ' [SlotN] section and stamp a fresh VALID MAC over the result, silently lifting every
+        ' running block. But S2's guard was BlockIsActive() ALONE, and BlockIsActive short-
+        ' circuits False the moment the service is not RUNNING - so on a registered-but-
+        ' STOPPED machine with slots armed (exactly the state this machine sits in between
+        ' blocks) `monkmode schedule` could still wipe them. AnySlotArmed() answers the real
+        ' question - does the CONFIG carry slots - without consulting the SCM at all, and
+        ' fail-SAFE (an unreadable config reads as ARMED). The two are OR'd, so the v9
+        ' schedule-only shape (no slots, service running) is still caught by the old arm.
+        ' WriteScheduleConfig refuses independently as the structural backstop.
+        If Blocker.AnySlotArmed() OrElse Blocker.BlockIsActive() Then
+            Console.Error.WriteLine("A block is armed. Finish or exit it before setting a schedule.")
             Return 3
         End If
 
@@ -728,10 +729,33 @@ Module Program
     Private Function DoUnblock(ByVal args As String()) As Integer
         Dim forced As Boolean = HasFlag(args, "--force")
         If Not forced Then
+            ' v1.1 S3b: the exit surface is SLOT-ADDRESSED (P40), so this needs the ids.
+            ' `--id <N>` (P35's flag name, shared with `add` and `schedule`) targets ONE block.
+            ' Read BEFORE the liveness check so "nothing armed" is decided off the config, not
+            ' off whether the service happens to be up.
+            Dim armedIds As List(Of Integer) = Blocker.ArmedSlotIds()
+            Dim targetArg As String = GetOption(args, "--id")
+            Dim explicitId As Boolean = targetArg <> ""
+            If explicitId Then
+                Dim wanted As Integer
+                If Not Integer.TryParse(targetArg.Trim(), wanted) OrElse Not armedIds.Contains(wanted) Then
+                    Console.Error.WriteLine("No armed block #" & targetArg.Trim() & ". Run 'monkmode status' to see the armed blocks.")
+                    Return 1
+                End If
+                armedIds = New List(Of Integer) From {wanted}
+            End If
             ' The cooling-off surface (bare request / --cancel). Only meaningful
             ' against an active block - the service only polls while it runs.
-            If Not Blocker.BlockIsActive() Then
+            If armedIds.Count = 0 AndAlso Not Blocker.BlockIsActive() Then
                 Console.Error.WriteLine("No active block to unblock.")
+                Return 1
+            End If
+            ' v1.1 S3b: every exit trigger is now ADDRESSED at a slot, so with no armed slots
+            ' there is nothing to address. Say so rather than dropping nothing and reporting
+            ' success - the one shape that reaches here is a v9 schedule-only block, which by
+            ' design holds at full strength through its window and has no early exit at all.
+            If armedIds.Count = 0 Then
+                Console.Error.WriteLine("No block slot to address. A scheduled block holds until its window closes and cannot be ended early.")
                 Return 1
             End If
             ' C3b: partner-code attempt. Drop the ONE content-bearing trigger with
@@ -747,23 +771,58 @@ Module Program
                     Console.Error.WriteLine("Provide the code:  monkmode unblock --code <CODE>")
                     Return 1
                 End If
-                Blocker.RequestPartnerCode(code)
-                Console.WriteLine("Code submitted. If it's correct the block lifts within ~10s; if not, the block stays fully enforced.")
+                ' BROADCAST, deliberately - and NOT what P33 governs. The partner is handed a
+                ' code, not a block number, so requiring --id here would make the documented
+                ' exit unusable. It is safe because each slot KDF-verifies the candidate
+                ' against its OWN MAC-covered PartnerSalt/PartnerHash: it can match at most
+                ' one - the block that minted it - and every other block stays fully enforced.
+                ' Contrast the bare cooling-off request below, where a broadcast would start a
+                ' real countdown on blocks the user never named.
+                For Each id As Integer In armedIds
+                    Blocker.RequestPartnerCode(id, code)
+                Next
+                Console.WriteLine("Code submitted. If it's correct that block lifts within ~10s; if not, every block stays fully enforced.")
                 Return 0
             End If
             If HasFlag(args, "--cancel") Then
-                Blocker.CancelCoolOff()
+                ' Also a broadcast, and also not P33's business: a cancel puts blocks BACK
+                ' into full enforcement, so addressing more of them than the user meant is
+                ' the over-blocking direction. Refusing it would be the fail-open one.
+                For Each id As Integer In armedIds
+                    Blocker.CancelCoolOff(id)
+                Next
                 Console.WriteLine("Cooling-off cancel requested. Any pending cooling-off is cleared within ~10s; the block continues to its normal end.")
                 Return 0
             End If
+
+            ' P33 - THE ONE PATH THAT MUST REFUSE. A bare `unblock` starts a REAL countdown
+            ' that ENDS a block, so it may never be aimed at a block the user did not name.
+            ' The failure this prevents is concrete: with a 1h focus block and a 30d
+            ' commitment armed, habit-typing `unblock` meaning the short one would start the
+            ' ~1h cooling-off on BOTH, and the 30d block would lift within the hour. Refusing
+            ' to begin an exit is also the fail-closed direction, so this costs nothing.
+            ' With exactly one armed slot, bare `unblock` still targets it - v1.0's feel.
+            If BareUnblockIsAmbiguous(explicitId, armedIds.Count) Then
+                Console.Error.WriteLine("More than one block is active. Name the one you mean:  monkmode unblock --id <N>")
+                For Each line As String In Blocker.ArmedSlotLines()
+                    Console.Error.WriteLine(line)
+                Next
+                Return 1
+            End If
+
             ' C4: a committed block has NO self-serve cooling-off - refuse the request
             ' with an actionable message instead of dropping a trigger the service would
             ' just Ignore. The partner code (verified service-side) is the intended exit.
-            If Blocker.BlockIsCommitted() Then
+            ' v1.1 S3b: read the ADDRESSED slot's own flag, never the machine-wide v9 latch.
+            ' The latch is "yes if ANY slot is", so gating one block's exit on it locks the
+            ' survivor out of an exit it is entitled to for as long as it runs.
+            If Blocker.SlotIsCommitted(armedIds(0)) Then
                 Console.Error.WriteLine("This block is COMMITTED: self-serve cooling-off is disabled. The only early exit is the accountability code:  monkmode unblock --code <CODE>")
                 Return 1
             End If
-            Blocker.RequestCoolOff()
+            For Each id As Integer In armedIds
+                Blocker.RequestCoolOff(id)
+            Next
             Console.WriteLine("Cooling-off requested. The block stays FULLY enforced while the service counts down ~1 hour of active machine time; it then lifts itself.")
             Console.WriteLine("Changed your mind? Run:  monkmode unblock --cancel")
             Return 0
@@ -824,6 +883,21 @@ Module Program
                                                        File.Delete(Path.Combine(Blocker.AppDir(), Blocker.PartnerCodeFileName))
                                                    Catch
                                                    End Try
+                                                   ' v1.1 S3b: and every SLOT-ADDRESSED trigger (P40) - the
+                                                   ' three unsuffixed deletes above only clear a legacy file
+                                                   ' an older build left. A surviving <prefix><id> would be
+                                                   ' inherited by whatever block next takes that id.
+                                                   Try
+                                                       For Each pattern As String In New String() {Blocker.CoolOffRequestPrefix & "*", Blocker.CoolOffCancelPrefix & "*", Blocker.PartnerCodePrefix & "*", Blocker.AddRequestPrefix & "*"}
+                                                           For Each stale As String In Directory.GetFiles(Blocker.AppDir(), pattern)
+                                                               Try
+                                                                   File.Delete(stale)
+                                                               Catch
+                                                               End Try
+                                                           Next
+                                                       Next
+                                                   Catch
+                                                   End Try
                                                End Sub)
         Step_("Removing the Safe Mode registration", Sub() Blocker.RemoveSafeBootKeys())
         ' B5a: restore the user's prior browser DoH policy (or remove our lingering
@@ -837,6 +911,19 @@ Module Program
     End Function
 
     ' ---------- helpers ----------
+
+    ' P33 (PURE): must a bare `unblock` (no --id) refuse rather than start a cooling-off?
+    ' Yes as soon as more than one block is armed. A cooling-off request starts a REAL
+    ' countdown that ENDS a block, so it may never be aimed at a block the user did not name:
+    ' with a 1h focus block and a 30d commitment armed, habit-typing `unblock` meaning the
+    ' short one would otherwise start the ~1h clock on BOTH and the 30d block would lift
+    ' within the hour. With exactly one armed slot it targets that one, so a single-block
+    ' machine feels exactly like v1.0. Refusing to BEGIN an exit is the fail-closed direction,
+    ' so the refusal costs nothing in safety. Pure + Friend so the rule is unit-pinned rather
+    ' than only reachable through the console path.
+    Friend Function BareUnblockIsAmbiguous(ByVal explicitId As Boolean, ByVal armedCount As Integer) As Boolean
+        Return Not explicitId AndAlso armedCount > 1
+    End Function
 
     ' C6a: the shared "run setup first" refusal for the arm paths (block/schedule). A
     ' distinct exit code (4) so a script can tell "not set up" apart from a usage error (1)
