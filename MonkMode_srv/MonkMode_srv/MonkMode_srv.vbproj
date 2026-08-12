@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <MyType>Console</MyType>
     <RootNamespace>monkmode</RootNamespace>
@@ -19,12 +19,21 @@
          (DebugView-capturable) on every config read/write; TRACE is on by default in
          Release. Off here compiles those calls out entirely. -->
     <DefineTrace>false</DefineTrace>
-    <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
+    <!-- S0b (.NET 10 retarget): WFO1000 is a WinForms designer-serialization analyzer added in
+         .NET 9 (skipped by this repo's 8 -> 10 jump); it ships as an ERROR and fires on the
+         `Friend WithEvents timer/adder` fields, because VB surfaces WithEvents as properties and
+         ServiceBase derives from Component. It guards against the WinForms DESIGNER leaking
+         property data - a LocalSystem service has no designer, so it protects nothing here. The
+         documented fix (DesignerSerializationVisibility) can't attach to a WithEvents field
+         without rewriting `timer`/`adder` into explicit properties, i.e. re-wiring the Handles
+         clauses of the 10s enforcement tick and the hosts self-heal watcher. NoWarn is
+         Microsoft's own documented suppression and changes zero IL. -->
+    <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022,WFO1000</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.11" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
   </ItemGroup>
 
   <ItemGroup>

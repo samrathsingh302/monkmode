@@ -28,20 +28,20 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
-#     Framework-dependent build (needs the .NET 8 desktop runtime on the target
+#     Framework-dependent build (needs the .NET 10 desktop runtime on the target
 #     machine). Smaller output; the default.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1 -SelfContained
-#     Self-contained win-x64 build (bundles the .NET 8 runtime - runs on a machine
+#     Self-contained win-x64 build (bundles the .NET 10 runtime - runs on a machine
 #     with NO .NET installed). Larger output; this is the payload tools\install.ps1
 #     copies to C:\Program Files\MonkMode\ (slice H1).
 #
 # Then (from an elevated prompt):  dist\monkmode.exe block --sites reddit.com --for 2h
 
 param(
-    # Bundle the .NET 8 runtime into dist\ (self-contained win-x64) so the target
+    # Bundle the .NET 10 runtime into dist\ (self-contained win-x64) so the target
     # machine needs no .NET installed. Off = framework-dependent (the original
-    # behaviour), which needs the .NET 8 desktop runtime present.
+    # behaviour), which needs the .NET 10 desktop runtime present.
     [switch]$SelfContained
 )
 
@@ -54,7 +54,7 @@ $candidates = @((Get-Command dotnet -ErrorAction SilentlyContinue).Source,
     Where-Object { $_ -and (Test-Path $_) }
 $dotnet = $candidates | Where-Object { (& $_ --list-sdks) -match '^\d+\.' } |
     Select-Object -First 1
-if (-not $dotnet) { throw "No dotnet with an SDK installed was found. Install the .NET 8 SDK." }
+if (-not $dotnet) { throw "No dotnet with an SDK installed was found. Install the .NET 10 SDK." }
 
 $root = Split-Path $PSScriptRoot -Parent
 $dist = Join-Path $root 'dist'

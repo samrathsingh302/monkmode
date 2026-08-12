@@ -6,7 +6,7 @@ House doctrine, defaults and the session ritual load from the global `~/.claude/
 A personal, tamper-resistant website/app self-control blocker for Windows — Samrath's own fork of Cold Turkey (GPLv3), rebranded and being hardened on his own machine. Goal: once a block starts it can't be casually removed before its timer expires. Done = defeat casual→determined bypasses (B1–B9); B10 offline/admin is honestly out of scope.
 
 ## Stack & layout
-- VB.NET / .NET 8 (net8.0-windows), SDK-style projects. Solution: `MonkMode.sln` (4 projects + `MonkMode.Tests`). No GUI — it's a CLI.
+- VB.NET / **.NET 10 LTS** (`net10.0-windows`; MM_notify + Tests carry the `10.0.17763.0` platform suffix — retargeted from .NET 8 by v1.1 slice S0b, 12/08/2026; SDK 10.0.400 installed user-scoped beside 8.0.422; support ends 11/2028), SDK-style projects. Solution: `MonkMode.sln` (4 projects + `MonkMode.Tests`). No GUI — it's a CLI.
 - `MonkMode/` → `monkmode.exe` (CLI: writes hosts + config, installs/starts the service + SCM recovery, registers the notifier).
 - `MonkMode_srv/` → `MonkMode_srv.exe` (**LocalSystem service `MONKMODE`**, `CanStop=False`, 10s timer — the enforcement core; inherited logic preserved, hardened via tested fail-closed gates: B2 hosts self-heal, B1 guardian spawn, B3 SafeBoot self-register).
 - `MM_notify/` → `mm_notify.exe` (user-session notifier: app-kill, clock-change comp, tray-toast at expiry).

@@ -1,0 +1,1 @@
+- [.NET SDK install vs build-server lock](dotnet-sdk-install-build-server-lock.md) — new-SDK install into ~/.dotnet fails while MSBuild/Roslyn nodes hold dotnet.exe; `build-server shutdown` first

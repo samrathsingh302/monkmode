@@ -14,13 +14,13 @@
 
   <PropertyGroup>
     <!-- D4b: matched to MM_notify's versioned TFM. MM_notify now targets
-         net8.0-windows10.0.17763.0 (WinRT toast APIs); a project on the default net8.0-windows
+         net10.0-windows10.0.17763.0 (WinRT toast APIs); a project on the default net10.0-windows
          (platform 7.0) CANNOT reference one on 10.0.17763, so this consumer is bumped to match.
-         The other three referenced projects stay on plain net8.0-windows - a higher-platform
+         The other three referenced projects stay on plain net10.0-windows - a higher-platform
          consumer referencing lower-platform dependencies is allowed (only the reverse fails).
          The tests remain pure: no WinRT is called from here (the versioned TFM only widens what
          COULD be reached, it changes no existing test). -->
-    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -30,10 +30,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
-    <PackageReference Include="xunit" Version="2.5.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+    <PackageReference Include="coverlet.collector" Version="10.0.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
   </ItemGroup>
 
   <ItemGroup>

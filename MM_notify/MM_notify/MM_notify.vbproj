@@ -7,11 +7,11 @@
          Windows.Data.Xml.Dom) AND Microsoft.Toolkit.Uwp.Notifications' send/manage APIs
          (ToastNotificationManagerCompat.Show) are present - without them a toast can only be
          BUILT, never delivered. This is the notifier ONLY: the CLI, service and guardian stay
-         on plain net8.0-windows (they show no toasts), so dist\ / publish is unaffected. The
+         on plain net10.0-windows (they show no toasts), so dist\ / publish is unaffected. The
          test project is bumped to the SAME versioned TFM (it references this assembly; a lower
-         platform version can't reference a higher one). SDK.BuildTools-free path: the .NET 8 SDK
+         platform version can't reference a higher one). SDK.BuildTools-free path: the .NET 10 SDK
          supplies the 10.0.17763 ref pack automatically, no extra install. -->
-    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <MyType>WindowsFormsWithCustomSubMain</MyType>
     <StartupObject>mm_notify.Program</StartupObject>
@@ -31,8 +31,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.11" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
     <!-- D4b: persistent Action-Centre toasts for an UNPACKAGED WinForms exe. This package
          (MIT, GPLv3-compatible, free) is Microsoft's documented route for Win32 non-MSIX apps:
          ToastNotificationManagerCompat lazily + idempotently registers the AUMID, a per-user
