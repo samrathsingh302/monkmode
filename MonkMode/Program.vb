@@ -253,6 +253,48 @@ Module Program
             Return 1
         End If
 
+        ' P55 (v1.1): optional --urls attaches per-slot URL patterns to THIS block. Parsed
+        ' up front so a bad list fails before any side effect. Inert this slice - the
+        ' patterns are stored MAC-covered and the browser watcher consumes them later.
+        Dim urlPatterns As String = "", urlErr As String = ""
+        If Not Blocker.TryBuildUrlPatterns(GetOption(args, "--urls"), urlPatterns, urlErr) Then
+            Console.Error.WriteLine(urlErr)
+            Return 1
+        End If
+
+        ' P26/P27/P28 (v1.1): optional --start delays this block. A PENDING slot stores
+        ' StartAt + a DURATION (never an absolute end - see P29), and the SERVICE computes
+        ' its end at activation. Parsed BEFORE the end, because `--for` on a delayed block
+        ' measures its duration from the START, not from now (2h starting in 90m = 2h of
+        ' blocking; the other reading would silently shorten the block).
+        Dim armNow As DateTime = DateTime.Now
+        Dim startArg As String = GetOption(args, "--start")
+        Dim startAt As DateTime? = Nothing
+        If startArg <> "" Then
+            Dim parsedStart As DateTime, startErr As String = ""
+            If Not TryParseStart(startArg, armNow, parsedStart, startErr) Then
+                Console.Error.WriteLine(startErr)
+                Return 1
+            End If
+            ' P27: an unbounded PENDING slot would squat one of the 8 slots indefinitely.
+            If parsedStart > armNow.AddDays(MaxStartDelayDays) Then
+                Console.Error.WriteLine("--start can be at most " & MaxStartDelayDays & " days ahead.")
+                Return 1
+            End If
+            ' P28 (consented taste default): a start already in the past is not an error -
+            ' it means "now". The slot is written ACTIVE (Until set, StartAt empty), never
+            ' PENDING, so nothing waits on a moment that has already gone.
+            If parsedStart <= armNow Then
+                Console.WriteLine("--start is in the past - starting now.")
+            Else
+                startAt = parsedStart
+            End If
+        End If
+
+        ' The moment the enforcement window opens: the start for a PENDING block, now for
+        ' an immediate one. Both --for and the 60s floor are anchored on it.
+        Dim windowStart As DateTime = If(startAt.HasValue, startAt.Value, armNow)
+
         Dim untilDate As DateTime
         Dim untilArg As String = GetOption(args, "--until")
         Dim forArg As String = GetOption(args, "--for")
@@ -268,13 +310,21 @@ Module Program
                 Console.Error.WriteLine("Could not understand --for '" & forArg & "'. Try 2h, 90m, 1d12h.")
                 Return 1
             End If
-            untilDate = DateTime.Now.Add(span)
+            untilDate = windowStart.Add(span)
         Else
             Console.Error.WriteLine("Specify a duration with --for or --until.")
             Return 1
         End If
 
-        If untilDate <= DateTime.Now.AddSeconds(60) Then
+        ' P27: an --until at or before the start is a contradiction, not a zero-length block.
+        If untilDate <= windowStart AndAlso startAt.HasValue Then
+            Console.Error.WriteLine("The block must start before it ends.")
+            Return 1
+        End If
+
+        ' The 60s floor, re-anchored on the ENFORCEMENT window (identical to the pre-v1.1
+        ' check for an immediate block, where windowStart is now). Message unchanged.
+        If untilDate <= windowStart.AddSeconds(60) Then
             Console.Error.WriteLine("The block must end at least a minute in the future.")
             Return 1
         End If
@@ -299,35 +349,14 @@ Module Program
             Return 2
         End If
 
-        ' SD-c1: schedules and manual `--for` blocks are mutually exclusive in C5b (so the armed
-        ' config is always manual-only OR schedule-only and the past-Until sentinel + scheduleArmed
-        ' lifecycle stay unambiguous). Refuse a manual block while a schedule is armed - note a
-        ' schedule-only block reads as `BlockIsActive()`=False (its Until is the past sentinel), so
-        ' THIS guard, not the BlockIsActive check below, is what protects an armed schedule from
-        ' being overwritten by `block`.
-        If Blocker.ScheduleIsArmed() Then
-            Console.Error.WriteLine("A schedule is armed. Clear it first with 'monkmode schedule --clear', then start a manual block.")
-            Return 3
-        End If
+        ' v1.1 S2: the two "you already have a block" refusals that stood here are GONE -
+        ' `block` now ARMS A NEW SLOT beside whatever is already running (the SD-c1
+        ' schedule refusal and the BlockIsActive refusal both existed only because v1.0
+        ' had a single machine-wide block a second arm would have overwritten). The only
+        ' arm refusals left are the cap (P34) and a frozen config, both raised by ArmSlot
+        ' BEFORE it touches anything. `add` and `schedule` keep their own refusals until
+        ' schedules become slots (S3b).
 
-        If Blocker.BlockIsActive() Then
-            Dim ends As DateTime = Blocker.ActiveBlockEnd()
-            Console.WriteLine("A block is already active (" & Humanize(ends.Subtract(DateTime.Now)) & " left, until " & ends.ToString() & ").")
-            Console.WriteLine("You can't start a new block or shorten this one. Use 'monkmode add --sites ...' to add sites.")
-            Return 3
-        End If
-
-        If domains.Count > 0 Then
-            Blocker.WriteHostsBlock(domains)
-        Else
-            ' Apps-only block: remove any stale snapshot from an earlier block,
-            ' otherwise the service's B2 repair would resurrect the OLD sites
-            ' into hosts for the lifetime of this block.
-            Try
-                File.Delete(Blocker.SnapshotPath())
-            Catch
-            End Try
-        End If
         ' C4: `--commit` arms a COMMITTED block (self-serve cooling-off disabled = the
         ' partner code + expiry are the only exits). The flag is MAC-covered from birth.
         Dim committed As Boolean = HasFlag(args, "--commit")
@@ -336,10 +365,34 @@ Module Program
         ' not just session 0. MAC-covered from birth; a widen-only policy (fail-closed: it can
         ' only ADD kills). No-op if no apps are blocked (nothing to kill), noted below only then.
         Dim allSessionKill As Boolean = HasFlag(args, "--all-session-kill")
-        ' C3b: WriteConfig mints a fresh partner code and returns the plaintext ONCE
-        ' (stored only as a salted, MAC-covered hash). Shown once below; never logged.
-        ' C6b: coolOffSeconds (0 = default floor) is written MAC-covered from birth.
-        Dim partnerCode As String = Blocker.WriteConfig(domains, apps, untilDate, committed, coolOffSeconds, allSessionKill)
+
+        ' v1.1 S2: CONFIG FIRST, then the snapshot, then hosts. ArmSlot appends this block
+        ' as a new slot (or refuses without side effects), mints its own partner code and
+        ' returns it ONCE - only a salted, MAC-covered hash is ever persisted.
+        Dim arm As Blocker.ArmResult = Blocker.ArmSlot(domains, apps, urlPatterns, startAt, untilDate,
+                                                       Blocker.ServiceIsInstalled(),
+                                                       committed, coolOffSeconds, allSessionKill)
+        If arm.Outcome = Blocker.ArmOutcome.CapReached Then
+            Console.Error.WriteLine("All " & MonkMode.ConfigIntegrity.MaxSlots & " block slots are in use. End or wait out one of these first:")
+            For Each line As String In arm.SlotSummaries
+                Console.Error.WriteLine(line)
+            Next
+            Return Blocker.ExitCapReached
+        ElseIf arm.Outcome = Blocker.ArmOutcome.Frozen Then
+            ' B7: the stored config failed its integrity check. Re-stamping it would
+            ' re-bless a tamper, so MonkMode refuses to change anything at all.
+            Console.Error.WriteLine("The current MonkMode configuration failed its integrity check, so it is frozen and cannot be added to.")
+            Console.Error.WriteLine("Wait for the running block(s) to end, or use 'monkmode unblock --force' once they have.")
+            Return Blocker.ExitArmFailed
+        ElseIf Not arm.Ok Then
+            Console.Error.WriteLine("Could not arm the block right now (the service was writing). Try again.")
+            Return Blocker.ExitArmFailed
+        End If
+
+        ' The hosts block is the UNION over every armed slot, so arming a second block can
+        ' never unblock the first one's sites. A fresh rewrite discards the stale snapshot.
+        Blocker.WriteArmHostsBlock(domains, arm.FreshRewrite)
+        Dim partnerCode As String = arm.PartnerCode
         ' B5a: snapshot the user's current browser DoH policy BEFORE the service
         ' starts and forces it off, so teardown restores the pre-block state (no
         ' data loss). Must precede InstallAndStart - the service sets the policy in
@@ -358,9 +411,15 @@ Module Program
         ' swallows every error and never throws, so a stats failure can't perturb the block just armed
         ' above). COUNTS only (no site/app names) land in the plaintext file; the block is already fully
         ' armed, so this has ZERO enforcement authority - it is pure telemetry for `monkmode stats`.
-        Stats.RecordBlockStart(DateTime.Now, untilDate, domains.Count, apps.Count, committed, coolOffSeconds)
+        ' The recorded start is the ENFORCEMENT window's start (now, or the --start moment),
+        ' so a delayed block's planned time is the block, not the wait before it.
+        Stats.RecordBlockStart(windowStart, untilDate, domains.Count, apps.Count, committed, coolOffSeconds)
 
-        Console.WriteLine("MonkMode is now active until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
+        If startAt.HasValue Then
+            Console.WriteLine("Block #" & arm.Id & " is scheduled to start " & startAt.Value.ToString() & " and run until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(startAt.Value)) & ").")
+        Else
+            Console.WriteLine("Block #" & arm.Id & " is now active until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
+        End If
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
         ' D2c: confirm the all-session widening, but only when there are apps to kill (the flag is a
@@ -506,6 +565,17 @@ Module Program
         If Not Blocker.SetupIsComplete() Then Return SetupRequired()
 
         ' SD-c1: a manual `--for` block and a schedule are mutually exclusive in C5b.
+        '
+        ' v1.1 S2 note - this refusal DELIBERATELY SURVIVES the slice that deleted DoBlock's.
+        ' `block` is now slot-aware, but `schedule` is not: WriteScheduleConfig still writes
+        ' the v9 schedule-only shape, and its fresh-scaffold branch builds a BRAND NEW ini -
+        ' which, with slots armed, would delete every [SlotN] section and stamp a fresh valid
+        ' MAC over the result, silently lifting every running block. Deleting the refusal
+        ' before schedules become slots (S3b) would therefore turn `monkmode schedule` into a
+        ' one-command bypass, so it stands until S3b makes a schedule a slot of its own.
+        ' BlockIsActive reads the v9 [Time] Until mirror, which ArmSlot maintains as the MAX
+        ' over all slots, so it already means "any slot is armed" - the guard is slot-aware
+        ' even though the writer behind it is not.
         If Blocker.BlockIsActive() Then
             Console.Error.WriteLine("A manual block is active. Finish or exit it before setting a schedule.")
             Return 3
@@ -849,6 +919,40 @@ Module Program
         Return span.TotalSeconds > 0
     End Function
 
+    ' P27 (v1.1): the furthest ahead a --start may be. An unbounded PENDING slot would squat
+    ' one of the 8 slots indefinitely, so an absurd start is refused at arm time. Over-refusing
+    ' at arm time is never fail-open - nothing is armed, and the user just retypes the command.
+    Friend Const MaxStartDelayDays As Integer = 30
+
+    ' P26 (v1.1, pure): parse --start into an absolute start time.
+    ' A token that parses as a DURATION is a DELAY from `nowRef` - the identical grammar to
+    ' --for ("90m" / "2h" / "1d12h" / a bare number of minutes), with a leading "+" accepted
+    ' and stripped. Anything else is tried as an ABSOLUTE datetime with the identical
+    ' two-culture parse --until uses. Failing both is an error, never a guess: a misread start
+    ' would arm a block at the wrong time, so the CLI refuses and says what it accepts.
+    ' `nowRef` is passed in (not read here) so the whole grammar is unit-testable.
+    Friend Function TryParseStart(ByVal raw As String, ByVal nowRef As DateTime, ByRef startAt As DateTime, ByRef errorMsg As String) As Boolean
+        startAt = DateTime.MinValue
+        errorMsg = ""
+        Dim tok As String = If(raw, "").Trim()
+        If tok <> "" Then
+            Dim durationTok As String = If(tok.StartsWith("+"), tok.Substring(1).Trim(), tok)
+            Dim span As TimeSpan
+            If TryParseDuration(durationTok, span) Then
+                startAt = nowRef.Add(span)
+                Return True
+            End If
+            Dim absolute As DateTime
+            If DateTime.TryParse(tok, CultureInfo.CurrentCulture, DateTimeStyles.None, absolute) _
+               OrElse DateTime.TryParse(tok, CultureInfo.InvariantCulture, DateTimeStyles.None, absolute) Then
+                startAt = absolute
+                Return True
+            End If
+        End If
+        errorMsg = "Could not understand --start '" & tok & "'. Try ""+90m"", ""2h"", or ""2026-08-10 07:00""."
+        Return False
+    End Function
+
     ' C6c: parse an optional --cooloff argument (shared by `setup` and `block`) into seconds,
     ' applying the same duration grammar (TryParseDuration) and the shared 365d sanity cap
     ' (Blocker.MaxCoolOffSeconds). Returns True with seconds=0 when --cooloff is ABSENT (each
@@ -932,7 +1036,7 @@ Module Program
     ' D5: the flags `block` accepts (for the UnknownOptions typo warning). One list, so a new block
     ' flag is added in exactly one place alongside its DoBlock handling.
     Friend Function BlockOptionNames() As String()
-        Return New String() {"--sites", "--preset", "--apps", "--app-preset", "--for", "--until", "--file", "--commit", "--cooloff", "--all-session-kill"}
+        Return New String() {"--sites", "--preset", "--apps", "--app-preset", "--for", "--until", "--file", "--commit", "--cooloff", "--all-session-kill", "--urls", "--start"}
     End Function
 
     ' D5 follow-up (pure): the BOOLEAN "--flag=value" tokens in args - an on/off flag (--commit,

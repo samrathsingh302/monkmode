@@ -339,20 +339,19 @@ public class CanonicalParityTests
         // tested) - we only compare CANONICALS, which are DPAPI-free. So this
         // stays inside the no-DPAPI fence for what it asserts.
         //
-        // S1/S2 SEAM (v1.1): S1 moved the READERS to v10 but deliberately left the arm
-        // path alone - WriteConfig still emits the v9 single-block sections, which carry
-        // no [Slots] section, so every reader derives a SlotCount=0 canonical.
-        // !! That is NOT the fail-closed outcome, and a tree in this state must NEVER be
-        // installed. A config stamped by v9 BINARIES does freeze under v10 code (that is
-        // the ForwardMigration case, and it is genuinely fail-closed). But a config armed
-        // by THIS tree's own CLI is stamped with the same v10 wrapper the readers verify
-        // with, so macValid stays TRUE while every v9-located enforcement field sits
-        // OUTSIDE the canonical - uncovered, and therefore tamper-OPEN under a valid MAC
-        // (a forged [Partner] UnlockedAt or a back-dated [Time] Until would lift cleanly).
-        // S2 restores coverage for fresh arms; S3a moves the enforcement readers over.
-        // The thing worth pinning today is that all four readers still agree on it. When
-        // S2 rewrites the arm path to emit [Slot1], the SlotCount=0 assertion below
-        // fails LOUDLY and is the marker for restoring the field-level assertions.
+        // v1.1 S2: the arm path emits the v10 [Slot1] section, so what this test compares is
+        // a genuine two-level canonical - the global header plus one 16-line slot block -
+        // and every enforcement field the CLI wrote is INSIDE it, i.e. MAC-covered.
+        // (S1 shipped the four readers on v10 while the writer still emitted only the v9
+        // single-block sections. In that window macValid stayed TRUE - the writer stamped
+        // with the same v10 wrapper - while every v9-located field sat outside the canonical
+        // and was therefore uncovered, tamper-OPEN rather than frozen.)
+        // !! S2 closed that only for slot DATA, NOT for ENFORCEMENT - DO NOT ARM OR DEPLOY
+        // THIS TREE UNTIL S3a. The service still reads the v9 mirror keys, which remain
+        // outside the canonical: a raw edit to [Time] Until, [Time] CoolOffUntil, [User]
+        // CustomSites, [Process] List, [Commit] Committed or [Partner] Hash/UnlockedAt keeps
+        // macValid TRUE and is not tamper-evident. S3a moves the enforcement READERS onto the
+        // slots - that is what actually closes it, and only then can the v9 mirror sections go.
         var iniPath = MonkMode.Blocker.IniPath();
         try
         {
@@ -376,7 +375,19 @@ public class CanonicalParityTests
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
             Assert.StartsWith(Ver + "\n", cli);
-            Assert.Contains("SlotCount=0\n", cli);   // the S1/S2 seam - see above
+            // Field-level coverage, end to end from the REAL write path: one slot, its id,
+            // its packed site/app lists and its end - every one of them inside the canonical
+            // the MAC is computed over, and byte-identical across all four readers above.
+            Assert.Contains("NextSlotId=2\n", cli);
+            Assert.Contains("SlotCount=1\n", cli);
+            Assert.Contains("Slot1.Id=1\n", cli);
+            Assert.Contains("Slot1.Sites=reddit.com;x.com;\n", cli);
+            Assert.Contains("Slot1.Apps=chrome.exe;brave.exe;\n", cli);
+            Assert.Contains("Slot1.Until=" + until.ToString(new System.Globalization.CultureInfo("en-CA")) + "\n", cli);
+            Assert.Contains("Slot1.Committed=no\n", cli);
+            // Exactly ONE slot block: 16 "Slot1." lines and no "Slot2." line at all.
+            Assert.Equal(16, cli.Split('\n').Count(l => l.StartsWith("Slot1.")));
+            Assert.DoesNotContain("Slot2.", cli);
         }
         finally
         {

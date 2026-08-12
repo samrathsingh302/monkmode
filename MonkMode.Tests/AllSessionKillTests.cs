@@ -193,19 +193,18 @@ public class AllSessionKillWriteConfigTests
             notifyIni.Load(iniPath);
 
             var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
-            // S1/S2 SEAM (v1.1): S1 moved the readers to the v10 per-slot canonical but
-            // deliberately left the arm path on the v9 sections, so a WriteConfig'd ini
-            // has no [Slots] section and every reader derives SlotCount=0.
-            // !! NOT fail-closed - do NOT install a tree in this state. StampFreshMac
-            // stamps with the SAME v10 wrapper the readers verify with, so the stamp is
-            // self-consistent and macValid stays TRUE; the v9-located enforcement fields
-            // (Until, CustomSites, Process List/AllSession, Partner *, Committed, CoolOff,
-            // Schedule) are simply OUTSIDE the canonical and therefore UNCOVERED - i.e.
-            // tamper-OPEN under a valid MAC, not frozen. S2 restores coverage for fresh
-            // arms; S3a moves the enforcement readers. The four-reader agreement below is
-            // the half that still holds today. When S2 rewrites the arm path to emit
-            // [Slot1], this assertion fails LOUDLY and "Slot1.AllSession=yes\n" replaces it.
-            Assert.Contains("SlotCount=0\n", cli);
+            // S2 (v1.1): the arm path now writes the v10 [Slot1] section, so the all-session
+            // flag rides Slot1.AllSession INSIDE the canonical the readers verify with - i.e.
+            // the slot DATA is MAC-covered again.
+            // !! DO NOT ARM OR DEPLOY THIS TREE UNTIL S3a. S2 did NOT close the S1 hole for
+            // ENFORCEMENT: the service still reads the v9 mirror keys ([Time] Until/CoolOffUntil,
+            // [User] CustomSites, [Process] List, [Commit] Committed, [Partner] Hash/UnlockedAt),
+            // and those keys are OUTSIDE the canonical, so an edit to them leaves macValid TRUE
+            // and is not tamper-evident - editing [Time] Until into the past still tears the
+            // whole block down. Slot data covered != enforcement covered. S3a moves the
+            // enforcement READERS onto the slots; that is what actually closes it.
+            // The v9 [Process] AllSession mirror is still written and is still checked above.
+            Assert.Contains("Slot1.AllSession=yes\n", cli);
             Assert.Equal(cli, new monkmode.Service1().CanonicalFromIni(srvIni));
             Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
             Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));

@@ -480,16 +480,10 @@ public class SetupConfigTests
 
             var ini = new MonkMode.IniFile(); ini.Load(MonkMode.Blocker.IniPath());
             Assert.Equal("5400", ini.GetKeyValue("CoolOff", "Duration"));
-            // S1/S2 SEAM (v1.1): the inherit seam this test owns - default -> WriteConfig ->
-            // the stored key - is proven above. The "and it is MAC-covered" corollary is
-            // temporarily untrue: S1 moved the readers to the v10 per-slot canonical while
-            // the arm path still writes v9 sections, so every reader derives SlotCount=0.
-            // !! NOT fail-closed - do NOT install a tree in this state. The writer stamps
-            // with the same v10 wrapper the readers verify with, so macValid stays TRUE
-            // while the v9-located enforcement fields are UNCOVERED - tamper-open, not
-            // frozen. S2 rewrites the arm path, this assertion fails LOUDLY, and
-            // "Slot1.CoolOffDuration=5400\n" replaces it.
-            Assert.Contains("SlotCount=0\n", MonkMode.Blocker.CanonicalFromIni(ini));
+            // ...and the inherited default is MAC-COVERED, on the v10 per-slot canonical the
+            // arm path has written since S2 (v1.1): an inherited wait is protected exactly
+            // like an explicitly typed --cooloff one.
+            Assert.Contains("Slot1.CoolOffDuration=5400\n", MonkMode.Blocker.CanonicalFromIni(ini));
         }
         finally { WipeSetup(); WipeEnforcement(); }
     }
@@ -694,12 +688,10 @@ public class SetupConfigTests
             // [User] CustomSites is the PackList form (";"-joined + trailing ";"), MAC-covered by the v8
             // enforcement canonical - the default is now enforced identically to a hand-typed --sites list.
             Assert.Equal("reddit.com;x.com;", ini.GetKeyValue("User", "CustomSites"));
-            // S1/S2 SEAM (v1.1): as in SetupDefault_FlowsIntoBlockCoolOffDuration - the
-            // inherit seam is proven by the stored key above; the canonical carries no
-            // slot until S2 rewrites the arm path, when this fails LOUDLY and
-            // "Slot1.Sites=reddit.com;x.com;\n" replaces it. That interim state is NOT
-            // fail-closed (macValid TRUE, enforcement fields uncovered) - must-never-install.
-            Assert.Contains("SlotCount=0\n", MonkMode.Blocker.CanonicalFromIni(ini));
+            // ...and, as in SetupDefault_FlowsIntoBlockCoolOffDuration, the inherited list is
+            // MAC-covered on the v10 per-slot canonical the arm path has written since S2 -
+            // enforced identically to a hand-typed --sites list, right down to the MAC.
+            Assert.Contains("Slot1.Sites=reddit.com;x.com;\n", MonkMode.Blocker.CanonicalFromIni(ini));
         }
         finally { WipeSetup(); WipeEnforcement(); }
     }

@@ -399,16 +399,8 @@ Module Blocker
     End Function
 
     Public Sub WriteHostsBlock(ByVal domains As IEnumerable(Of String))
-        Dim path As String = HostsPath()
-        ClearReadOnly(path)
-        Dim existing As String = ""
-        If File.Exists(path) Then existing = File.ReadAllText(path)
-        Dim baseText As String = StripOurBlock(existing)
         Dim block As String = BuildMonkModeBlock(domains)
-        ' C1: atomic write (temp + rename) so a crash mid-write can never blank or
-        ' half-write hosts and lose the user's own entries. Read-only was cleared
-        ' above, so the rename can replace the target.
-        AtomicHosts.WriteAtomic(path, baseText & vbCrLf & block)
+        WriteHostsFile(block)
         ' Persist the exact block just written so the service can restore it if
         ' hosts is tampered with mid-block (B2 self-heal). Best-effort: a failed
         ' snapshot write must not abort DoBlock between the hosts write and the
@@ -418,6 +410,71 @@ Module Blocker
             File.WriteAllText(SnapshotPath(), block)
         Catch
         End Try
+    End Sub
+
+    ' Replace our marker block in hosts with `block` (already marker + entry lines).
+    ' C1: atomic write (temp + rename) so a crash mid-write can never blank or
+    ' half-write hosts and lose the user's own entries; read-only is cleared first
+    ' so the rename can replace the target.
+    Private Sub WriteHostsFile(ByVal block As String)
+        Dim path As String = HostsPath()
+        ClearReadOnly(path)
+        Dim existing As String = ""
+        If File.Exists(path) Then existing = File.ReadAllText(path)
+        Dim baseText As String = StripOurBlock(existing)
+        AtomicHosts.WriteAtomic(path, baseText & vbCrLf & block)
+    End Sub
+
+    ' v1.1 S2 (PURE): the arm-time snapshot UNION. With several slots armed, the single
+    ' MonkMode hosts block must cover EVERY slot's sites, so a new arm merges its entry
+    ' lines into the block already on disk rather than replacing it - otherwise arming a
+    ' second block would silently unblock the first one's sites (the under-block sin).
+    ' First-occurrence order, deduped verbatim (BuildHostsEntries already normalised and
+    ' expanded both sides), marker line re-emitted once at the top.
+    Friend Function UnionHostsBlock(ByVal existingBlock As String, ByVal newEntries As String) As String
+        Dim seen As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim sb As New System.Text.StringBuilder
+        For Each source As String In New String() {If(existingBlock, ""), If(newEntries, "")}
+            For Each raw As String In source.Split(New String() {vbCrLf, vbLf}, StringSplitOptions.None)
+                Dim line As String = raw.Trim()
+                If line = "" OrElse line = Marker Then Continue For
+                If seen.Add(line) Then sb.Append(line).Append(vbCrLf)
+            Next
+        Next
+        Return Marker & vbCrLf & sb.ToString()
+    End Function
+
+    ' The live half of the union: read the existing snapshot, add this arm's entries,
+    ' write the SNAPSHOT first and hosts second (the service's B2 self-heal repairs hosts
+    ' FROM the snapshot, so a crash between the two leaves the repair source already
+    ' widened - it can only over-restore, never drop another slot's sites).
+    ' `freshArm` = ArmSlot took the fresh-rewrite path, i.e. the previous config was
+    ' discarded, so its snapshot is stale and is NOT merged in.
+    Public Sub WriteArmHostsBlock(ByVal domains As IEnumerable(Of String), ByVal freshArm As Boolean)
+        Dim newEntries As String = BuildHostsEntries(domains)
+        Dim existingBlock As String = ""
+        If Not freshArm Then
+            Try
+                If File.Exists(SnapshotPath()) Then existingBlock = File.ReadAllText(SnapshotPath())
+            Catch
+            End Try
+        End If
+        If freshArm AndAlso newEntries = "" Then
+            ' Apps-only FIRST block: drop any stale snapshot so the service's B2 repair
+            ' can't resurrect a previous block's sites, and leave hosts untouched (the
+            ' pre-v1.1 behaviour for an apps-only arm).
+            Try
+                File.Delete(SnapshotPath())
+            Catch
+            End Try
+            Return
+        End If
+        Dim block As String = UnionHostsBlock(existingBlock, newEntries)
+        Try
+            File.WriteAllText(SnapshotPath(), block)
+        Catch
+        End Try
+        WriteHostsFile(block)
     End Sub
 
     ' ---- D1a: site presets (named category -> domains, INPUT sugar only) ----
@@ -637,102 +694,536 @@ Module Blocker
         Return String.Join(";", parts) & ";"
     End Function
 
-    ' C3b: WriteConfig now also mints the partner accountability code. It generates
-    ' a random code, stores ONLY its salted one-way hash (plaintext-in-ini,
-    ' MAC-covered) plus an empty UnlockedAt exit flag, and RETURNS the plaintext
-    ' ONCE for the caller to show. The plaintext is NEVER persisted (not the ini,
-    ' the C1b backup, the snapshot, or any log). Rotate-on-use: each arm mints a
-    ' FRESH code (a used code dies with its block at stopMe()), so a code the user
-    ' saw themselves entering can't be banked for the next block.
-    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime, Optional ByVal committed As Boolean = False, Optional ByVal coolOffSeconds As Long = 0, Optional ByVal allSessionKill As Boolean = False) As String
-        Dim ini As New IniFile
-        Dim appList As String = PackApps(apps)
-        Dim siteList As String = PackList(domains)
+    ' ================= v1.1 S2: arming a SLOT (the multi-block writer) =================
+    '
+    ' v1.0 had exactly one block per machine, so `block` REWROTE the whole config every
+    ' time. v1.1 gives the machine up to MaxSlots concurrent blocks living in the fixed
+    ' sections [Slot1]..[Slot8] (by POSITION; ids live in each slot's Id field), so a new
+    ' arm must APPEND beside the existing ones and must NEVER re-seed the machine frame -
+    ' [Time] HighWater / [CurrentTime] Now are the monotonic clock EVERY slot's expiry is
+    ' measured against (see advancing-monotonic-highwater). Re-seeding them at a second
+    ' arm would hand the running slots a fresh, later clock and could lift them early, so
+    ' the append path simply never touches those two keys: only the FRESH-scaffold path
+    ' writes them, and it only runs when there is nothing to preserve. That is the whole
+    ' guarantee, and Arm2_PreservesSlot1_And_DoesNotReseed_HighWater_Or_Now pins it.
+    '
+    ' The v9 SINGLE-BLOCK sections ([Process] List/AllSession, [User] CustomSites,
+    ' [Time] Until, [Partner] *, [Commit] Committed, [CoolOff] Duration) are still
+    ' written, because the service/guardian/notifier ENFORCEMENT readers still read them
+    ' (S3a moves them onto the slots). While both shapes coexist the v9 copy is a
+    ' deliberately OVER-BLOCKING projection of the slot set - the union of every slot's
+    ' sites/apps, the MAX of every slot's end, "committed" if ANY slot is committed - so
+    ' a v9 reader can only ever enforce MORE than the slots ask for, never less.
+
+    ' What an arm attempt ended as. Reference type so the C# unit tests
+    ' (InternalsVisibleTo) can inspect it, matching Service1's result objects.
+    Friend Enum ArmOutcome
+        Armed = 0
+        CapReached = 1          ' P34: all MaxSlots slots in use - refuse, exit 3
+        WriteRace = 2           ' the confirm-loop never saw its own write land - exit 2
+        Frozen = 3              ' MAC-invalid config we may not re-stamp (B7) - exit 2
+    End Enum
+
+    Friend Class ArmResult
+        Public Outcome As ArmOutcome = ArmOutcome.Armed
+        Public Id As Integer = 0
+        Public Position As Integer = 0
+        Public PartnerCode As String = ""
+        Public FreshRewrite As Boolean = False
+        ' P34: one human line per slot in use, for the cap refusal message.
+        Public SlotSummaries As New List(Of String)
+        Public ReadOnly Property Ok As Boolean
+            Get
+                Return Outcome = ArmOutcome.Armed
+            End Get
+        End Property
+    End Class
+
+    ' The confirm-loop budget: the CLI and the SERVICE both write this ini, and neither
+    ' holds a lock on it, so an arm can lose its write to a tick that saved a slightly
+    ' older in-memory copy. Rather than lock (a wedged CLI must never be able to stall
+    ' the enforcement tick), we RE-READ after saving and retry a bounded number of times.
+    ' Bounded because "could not arm" is the safe failure: nothing was armed, nothing was
+    ' torn down, and the user simply runs the command again.
+    Friend Const ArmAttempts As Integer = 5
+    Friend Const ArmRetryMs As Integer = 250
+
+    ' Exit codes the arm refusals map to (0/1/2/3/4 across the whole CLI).
+    Friend Const ExitCapReached As Integer = 3
+    Friend Const ExitArmFailed As Integer = 2
+
+    ' P18 (PURE): does this arm take the FRESH-REWRITE path instead of appending?
+    ' Yes ONLY when the service is ABSENT *and* the stored config is unusable - either
+    ' MAC-invalid, or a pre-v1.1 file with no [Slots] section at all (which is exactly
+    ' the deployed machine's state, since uninstall leaves the v9 ini in place by design).
+    '
+    ' "ABSENT" means NOT REGISTERED - NOT "registered but stopped". A stopped MONKMODE is
+    ' auto-start and can be brought up by SCM recovery or a reboot at any moment, so
+    ' treating it as absent would let a full fresh rewrite race a service that is about to
+    ' run and read the file. With the service PRESENT the freeze semantics stand
+    ' UNCONDITIONALLY: an unusable config is refused, never rewritten.
+    '
+    ' PURE + the presence flag INJECTED (the ShouldKillLeftoverNotifier pattern) so the
+    ' unit tests pin the truth table without ever touching the SCM.
+    Friend Function ShouldFreshRewrite(ByVal serviceInstalled As Boolean,
+                                       ByVal macValid As Boolean,
+                                       ByVal hasSlotsSection As Boolean,
+                                       ByVal slotCount As Integer) As Boolean
+        If serviceInstalled Then Return False
+        If Not macValid Then Return True
+        If slotCount <= 0 AndAlso Not hasSlotsSection Then Return True
+        Return False
+    End Function
+
+    ' P17 (PURE): the id this arm takes. `Id` is the stored [Slots] NextSlotId, but never
+    ' below one past the highest id already present, so an id can NEVER be reused even if
+    ' NextSlotId were somehow behind (a retire REMOVES its section and lowers the highest
+    ' present id; NextSlotId is MAC-covered and monotone, so it still leads). Reuse would
+    ' let a replayed monkmode_partner.code.<id> trigger address a DIFFERENT block.
+    Friend Function NextIdForArm(ByVal storedNextSlotId As String, ByVal highestExistingId As Integer) As Integer
+        Dim n As Integer
+        If storedNextSlotId Is Nothing OrElse
+           Not Integer.TryParse(storedNextSlotId.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, n) Then n = 0
+        Return Math.Max(Math.Max(n, highestExistingId + 1), 1)
+    End Function
+
+    ' P55 (PURE): the per-slot --urls cap. At most MaxUrlPatterns patterns, each at most
+    ' MaxUrlPatternChars, and neither "|" (the stored separator) nor ";" may appear INSIDE
+    ' a pattern. Refuses (never truncates): an over-long or mis-separated list is a typo,
+    ' and silently keeping a subset is the under-block sin TryExpandPresets also refuses.
+    Friend Const MaxUrlPatterns As Integer = 32
+    Friend Const MaxUrlPatternChars As Integer = 200
+
+    Friend Function TryBuildUrlPatterns(ByVal urlsArg As String, ByRef packed As String, ByRef errorMsg As String) As Boolean
+        packed = ""
+        errorMsg = ""
+        If urlsArg Is Nothing OrElse urlsArg.Trim() = "" Then Return True
+        Dim parts As New List(Of String)
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        ' Comma is the ONLY argument separator: ";" is illegal inside a pattern, so splitting
+        ' on it would silently reinterpret a bad pattern as two good ones instead of refusing.
+        For Each raw As String In urlsArg.Split(","c)
+            Dim p As String = raw.Trim()
+            If p = "" Then Continue For
+            If p.Contains("|") OrElse p.Contains(";") Then
+                errorMsg = "--urls pattern '" & p & "' contains '|' or ';', which are not allowed in a URL pattern."
+                Return False
+            End If
+            If p.Length > MaxUrlPatternChars Then
+                errorMsg = "--urls pattern '" & p.Substring(0, 40) & "...' is longer than " & MaxUrlPatternChars & " characters."
+                Return False
+            End If
+            If seen.Add(p) Then parts.Add(p)
+        Next
+        If parts.Count > MaxUrlPatterns Then
+            errorMsg = "Too many --urls patterns (" & parts.Count & "); at most " & MaxUrlPatterns & " per block."
+            Return False
+        End If
+        packed = String.Join("|", parts)
+        Return True
+    End Function
+
+    ' The section name for a slot POSITION (1-based), matching [Slot1]..[Slot8].
+    Private Function SlotSection(ByVal position As Integer) As String
+        Return "Slot" & position.ToString(CultureInfo.InvariantCulture)
+    End Function
+
+    ' A slot's stored encrypted datetime as a DateTime, or MinValue when absent/
+    ' unreadable/unparseable. Fail-SOFT by design: every caller folds the result into a
+    ' MAX, and the one place it feeds ([Guard] HoldUntil / the v9 [Time] Until mirror) is
+    ' EXTEND-ONLY, so an unreadable value can only fail to EXTEND the guard - it can never
+    ' shorten it. (A genuinely corrupt slot field also fails the MAC, so the arm freezes
+    ' long before this is reached.)
+    Private Function SlotDate(ByVal ini As IniFile, ByVal position As Integer, ByVal key As String) As DateTime
+        Try
+            Dim raw As String = ini.GetKeyValue(SlotSection(position), key)
+            If raw Is Nothing OrElse raw = "" Then Return DateTime.MinValue
+            Dim dt As DateTime
+            If DateTime.TryParse(enc.DecryptData(raw), CA, DateTimeStyles.None, dt) Then Return dt
+        Catch
+        End Try
+        Return DateTime.MinValue
+    End Function
+
+    ' P43: the latest moment ANY armed slot still holds - max over slots of
+    ' {Until, CoolOffUntil, ScheduleActiveUntil, StartAt + DurationSeconds}. This is the
+    ' value [Guard] HoldUntil (and, until S3a, the v9 [Time] Until mirror) is extended to.
+    Private Function SlotHorizon(ByVal ini As IniFile, ByVal slotCount As Integer) As DateTime
+        Dim best As DateTime = DateTime.MinValue
+        For pos As Integer = 1 To slotCount
+            For Each key As String In New String() {"Until", "CoolOffUntil", "ScheduleActiveUntil"}
+                Dim dt As DateTime = SlotDate(ini, pos, key)
+                If dt > best Then best = dt
+            Next
+            Dim startAt As DateTime = SlotDate(ini, pos, "StartAt")
+            If startAt > DateTime.MinValue Then
+                Dim secs As Long
+                If Long.TryParse(If(ini.GetKeyValue(SlotSection(pos), "DurationSeconds"), ""),
+                                 NumberStyles.Integer, CultureInfo.InvariantCulture, secs) AndAlso secs > 0 Then
+                    startAt = startAt.AddSeconds(secs)
+                End If
+                If startAt > best Then best = startAt
+            End If
+        Next
+        Return best
+    End Function
+
+    ' P43: [Guard] ArmedCount - the slots that hold the guardian alive WITHOUT an open
+    ' block of their own: SCHEDULE slots (a rule waiting for its next window) and PENDING
+    ' slots (StartAt set, Until not yet computed by the service).
+    Private Function GuardedSlotCount(ByVal ini As IniFile, ByVal slotCount As Integer) As Integer
+        Dim n As Integer = 0
+        For pos As Integer = 1 To slotCount
+            Dim sec As String = SlotSection(pos)
+            Dim spec As String = If(ini.GetKeyValue(sec, "ScheduleSpec"), "")
+            Dim startAt As String = If(ini.GetKeyValue(sec, "StartAt"), "")
+            Dim untilText As String = If(ini.GetKeyValue(sec, "Until"), "")
+            If spec <> "" OrElse (startAt <> "" AndAlso untilText = "") Then n += 1
+        Next
+        Return n
+    End Function
+
+    ' The union of one plaintext ";"-packed list key across every armed slot, in
+    ' first-occurrence order and deduped case-insensitively. Feeds the v9 mirror, which
+    ' must be the OVER-blocking projection of the slot set (a union can only ever add).
+    Private Function UnionSlotList(ByVal ini As IniFile, ByVal slotCount As Integer, ByVal key As String) As String
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim parts As New List(Of String)
+        For pos As Integer = 1 To slotCount
+            For Each tok As String In If(ini.GetKeyValue(SlotSection(pos), key), "").Split(";"c)
+                Dim s As String = tok.Trim()
+                If s <> "" AndAlso seen.Add(s) Then parts.Add(s)
+            Next
+        Next
+        If parts.Count = 0 Then Return ""
+        Return String.Join(";", parts) & ";"
+    End Function
+
+    ' P34: one line per slot in use, for the cap refusal. Display-only and fail-SOFT (an
+    ' unreadable end renders as "?"), so a refusal message can never throw over a block.
+    Private Function BuildSlotSummaries(ByVal ini As IniFile, ByVal slotCount As Integer) As List(Of String)
+        Dim lines As New List(Of String)
+        For pos As Integer = 1 To slotCount
+            Dim sec As String = SlotSection(pos)
+            Dim id As String = If(ini.GetKeyValue(sec, "Id"), "?")
+            Dim sites As String = If(ini.GetKeyValue(sec, "Sites"), "")
+            Dim apps As String = If(ini.GetKeyValue(sec, "Apps"), "")
+            Dim what As String = (sites & apps).Trim(";"c).Replace(";", ", ")
+            If what = "" Then what = "(nothing listed)"
+            Dim ends As DateTime = SlotDate(ini, pos, "Until")
+            Dim startAt As DateTime = SlotDate(ini, pos, "StartAt")
+            Dim whenText As String
+            If ends > DateTime.MinValue Then
+                whenText = "until " & ends.ToString()
+            ElseIf startAt > DateTime.MinValue Then
+                whenText = "starts " & startAt.ToString()
+            Else
+                whenText = "no end recorded"
+            End If
+            lines.Add("  #" & id & "  " & what & "  (" & whenText & ")")
+        Next
+        Return lines
+    End Function
+
+    ' Write the 16 per-slot keys for ONE slot. ALWAYS all 16, "" when unset, matching
+    ' BuildSlotCanonical's fixed 16-line shape (an absent key can never shorten the
+    ' canonical into another config's). Encrypted: StartAt/Until (CoolOffUntil and
+    ' ScheduleActiveUntil are the SERVICE's to write and start empty). Everything else -
+    ' including Sites/Apps/UrlPatterns - is plaintext-as-stored; the MAC is its protection.
+    Private Sub WriteSlotSection(ByVal ini As IniFile, ByVal position As Integer, ByVal id As Integer,
+                                 ByVal startAt As DateTime?, ByVal endsAt As DateTime?,
+                                 ByVal durationSeconds As Long, ByVal siteList As String,
+                                 ByVal appList As String, ByVal urlPatterns As String,
+                                 ByVal allSessionKill As Boolean, ByVal coolOffSeconds As Long,
+                                 ByVal partnerSaltB64 As String, ByVal partnerHashB64 As String,
+                                 ByVal committed As Boolean)
+        Dim sec As String = SlotSection(position)
+        ini.AddSection(sec)
+        ini.SetKeyValue(sec, "Id", id.ToString(CultureInfo.InvariantCulture))
+        ini.SetKeyValue(sec, "StartAt", If(startAt.HasValue, enc.EncryptData(startAt.Value.ToString(CA)), ""))
+        ini.SetKeyValue(sec, "DurationSeconds", If(durationSeconds > 0, durationSeconds.ToString(CultureInfo.InvariantCulture), ""))
+        ini.SetKeyValue(sec, "Until", If(endsAt.HasValue, enc.EncryptData(endsAt.Value.ToString(CA)), ""))
+        ini.SetKeyValue(sec, "Sites", siteList)
+        ini.SetKeyValue(sec, "Apps", appList)
+        ini.SetKeyValue(sec, "UrlPatterns", urlPatterns)
+        ini.SetKeyValue(sec, "AllSession", If(allSessionKill, "yes", ""))
+        ini.SetKeyValue(sec, "ScheduleSpec", "")
+        ini.SetKeyValue(sec, "ScheduleActiveUntil", "")
+        ini.SetKeyValue(sec, "CoolOffUntil", "")
+        ini.SetKeyValue(sec, "CoolOffDuration", If(coolOffSeconds > 0, coolOffSeconds.ToString(CultureInfo.InvariantCulture), ""))
+        ini.SetKeyValue(sec, "PartnerSalt", partnerSaltB64)
+        ini.SetKeyValue(sec, "PartnerHash", partnerHashB64)
+        ini.SetKeyValue(sec, "PartnerUnlockedAt", "")
+        ini.SetKeyValue(sec, "Committed", If(committed, "yes", "no"))
+    End Sub
+
+    ' Recompute the global header ([Slots] SlotCount/NextSlotId, [Guard] HoldUntil/
+    ' ArmedCount) plus the v9 single-block mirror, from the slots now in `ini`.
+    ' HoldUntil is EXTEND-ONLY (P43): max(existing, horizon). It is never shortened here,
+    ' by anything - only TeardownAll clears it - so a stale scalar can only over-guard.
+    Private Sub RefreshHeaderAndV9Mirror(ByVal ini As IniFile, ByVal slotCount As Integer, ByVal nextSlotId As Integer)
+        ini.AddSection("Slots")
+        ini.SetKeyValue("Slots", "SlotCount", slotCount.ToString(CultureInfo.InvariantCulture))
+        ini.SetKeyValue("Slots", "NextSlotId", nextSlotId.ToString(CultureInfo.InvariantCulture))
+
+        Dim horizon As DateTime = SlotHorizon(ini, slotCount)
+        Dim existingHold As DateTime = DateTime.MinValue
+        Try
+            Dim raw As String = ini.GetKeyValue("Guard", "HoldUntil")
+            If raw IsNot Nothing AndAlso raw <> "" Then
+                Dim dt As DateTime
+                If DateTime.TryParse(enc.DecryptData(raw), CA, DateTimeStyles.None, dt) Then existingHold = dt
+            End If
+        Catch
+        End Try
+        Dim hold As DateTime = If(existingHold > horizon, existingHold, horizon)
+        ini.AddSection("Guard")
+        ini.SetKeyValue("Guard", "HoldUntil", If(hold > DateTime.MinValue, enc.EncryptData(hold.ToString(CA)), ""))
+        ini.SetKeyValue("Guard", "ArmedCount", GuardedSlotCount(ini, slotCount).ToString(CultureInfo.InvariantCulture))
+
+        ' ---- the v9 single-block mirror (read by the enforcement readers until S3a) ----
+        Dim sitesUnion As String = UnionSlotList(ini, slotCount, "Sites")
+        Dim appsUnion As String = UnionSlotList(ini, slotCount, "Apps")
 
         ini.AddSection("Process")
-        ini.SetKeyValue("Process", "List", If(appList = "", "null", enc.EncryptData(appList)))
-        ' D2c: the all-session app-kill policy flag, MAC-covered from birth (written BEFORE
-        ' StampFreshMac, like [Commit]/[CoolOff]). Written "yes" ONLY when the user gave
-        ' --all-session-kill; absent otherwise (canonical reads absent as "", so a default block
-        ' is byte-identical to today). Stored PLAINTEXT (a boolean policy is not a secret); the MAC
-        ' protects it - a raw edit to flip it fails verification -> the readers fail closed -> freeze.
-        ' The service reads it to widen its kill loop from session 0 to EVERY session; a widen-only
-        ' union that can never remove a kill.
-        If allSessionKill Then
-            ini.SetKeyValue("Process", "AllSession", "yes")
-        End If
+        ini.SetKeyValue("Process", "List", If(appsUnion = "", "null", enc.EncryptData(appsUnion)))
+        ' Widen-only: "yes" as soon as ANY slot asks for it, and never written back to
+        ' off - an all-session kill can only ever ADD kills, so leaving a stale "yes" is
+        ' the safe side. Absent stays absent (the byte-identical v9 default block).
+        For pos As Integer = 1 To slotCount
+            If String.Equals(If(ini.GetKeyValue(SlotSection(pos), "AllSession"), ""), "yes", StringComparison.OrdinalIgnoreCase) Then
+                ini.SetKeyValue("Process", "AllSession", "yes")
+                Exit For
+            End If
+        Next
 
         ini.AddSection("User")
         ini.SetKeyValue("User", "CustomChecked", "")
-        ini.SetKeyValue("User", "CustomSites", If(siteList = "", "null", siteList))
+        ini.SetKeyValue("User", "CustomSites", If(sitesUnion = "", "null", sitesUnion))
         ini.SetKeyValue("User", "Done", "no")
         ini.SetKeyValue("User", "NeedsAlerted", "yes")
 
+        ' The mirror end = the guard horizon, i.e. the LATEST moment any slot holds. A v9
+        ' reader therefore keeps enforcing until every slot is done - over-blocking, never
+        ' under - and because `hold` is extend-only this can never move backwards.
         ini.AddSection("Time")
-        ini.SetKeyValue("Time", "Until", enc.EncryptData(untilDate.ToString(CA)))
-        ini.SetKeyValue("Time", "TimeChanging", "no")
-        ' B4: seed the monotonic high-water mark at "now" (en-CA LOCAL, encrypted
-        ' like Until). From here the service advances it at most one tick at a
-        ' time and never on a clock jump, and decides expiry off it instead of
-        ' raw DateTime.Now - so rolling the clock forward past Until can't lift
-        ' the block early. Stamped under the MAC by StampFreshMac below, so it
-        ' can't be forged past Until without failing verification.
-        ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
+        If hold > DateTime.MinValue Then ini.SetKeyValue("Time", "Until", enc.EncryptData(hold.ToString(CA)))
 
-        ini.AddSection("CurrentTime")
-        ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
-
-        ' C3b: mint the partner code. Generate a random code, store ONLY its salted
-        ' one-way hash (Base64) + its salt (Base64) + an empty UnlockedAt, all as
-        ' PLAINTEXT in [Partner] (they are not reversible secrets - the MAC is what
-        ' protects them, exactly like plaintext CustomSites). Set BEFORE StampFreshMac
-        ' so the fresh MAC covers them (and the C1b backup below captures them) - the
-        ' shown code is then MAC-valid from birth. The plaintext is returned once and
-        ' never persisted.
-        Dim partnerSalt() As Byte = ConfigIntegrity.NewPartnerSalt()
-        Dim partnerCodePlain As String = ConfigIntegrity.GeneratePartnerCode()
-        ini.AddSection("Partner")
-        ini.SetKeyValue("Partner", "Salt", Convert.ToBase64String(partnerSalt))
-        ini.SetKeyValue("Partner", "Hash", ConfigIntegrity.ComputePartnerHash(partnerSalt, partnerCodePlain))
-        ini.SetKeyValue("Partner", "UnlockedAt", "")
-
-        ' C4: the commit policy flag, MAC-covered from birth (set BEFORE StampFreshMac,
-        ' like the [Partner] fields). A committed block disables self-serve cooling-off
-        ' (code-only exit); the partner code + expiry still lift it. Stored NON-empty in
-        ' both states ("yes"/"no") so it round-trips cleanly through IniFile (no bare-key
-        ' Nothing ambiguity). Clearing/flipping it by raw edit fails the MAC -> freeze.
+        ' Committed if ANY slot is committed: the strictest slot sets the machine's exit
+        ' policy for the v9 reader (a committed block loses self-serve cooling-off).
+        Dim anyCommitted As Boolean = False
+        Dim maxCoolOff As Long = 0
+        For pos As Integer = 1 To slotCount
+            If String.Equals(If(ini.GetKeyValue(SlotSection(pos), "Committed"), ""), "yes", StringComparison.OrdinalIgnoreCase) Then anyCommitted = True
+            Dim secs As Long
+            If Long.TryParse(If(ini.GetKeyValue(SlotSection(pos), "CoolOffDuration"), ""),
+                             NumberStyles.Integer, CultureInfo.InvariantCulture, secs) AndAlso secs > maxCoolOff Then maxCoolOff = secs
+        Next
         ini.AddSection("Commit")
-        ini.SetKeyValue("Commit", "Committed", If(committed, "yes", "no"))
-
-        ' C6b: the configurable cooling-off duration (seconds), MAC-covered from birth
-        ' (set BEFORE StampFreshMac, like the [Partner]/[Commit] fields). Written ONLY
-        ' when the user gave --cooloff a positive value; absent = "use the compile-time
-        ' floor". The service clamps max(this, floor) so a value below the floor still
-        ' waits the floor - the field can only EXTEND cooling-off, never shorten it. Stored
-        ' PLAINTEXT (a duration is not a secret); the MAC protects it (a raw edit to shorten
-        ' it fails verification -> the readers fail closed -> freeze). A plain integer
-        ' ToString() is culture-invariant (no group separators), matching the service parse.
-        If coolOffSeconds > 0 Then
+        ini.SetKeyValue("Commit", "Committed", If(anyCommitted, "yes", "no"))
+        ' Longest configured wait wins - cooling-off can only ever be EXTENDED (the
+        ' service clamps up to its floor anyway), never shortened by a second arm.
+        If maxCoolOff > 0 Then
             ini.AddSection("CoolOff")
-            ini.SetKeyValue("CoolOff", "Duration", coolOffSeconds.ToString())
+            ini.SetKeyValue("CoolOff", "Duration", maxCoolOff.ToString(CultureInfo.InvariantCulture))
+        End If
+    End Sub
+
+    ' ---- ArmSlot: the ONE writer for `monkmode block` ----
+    '
+    ' Arms a NEW slot beside whatever is already armed and returns its id + the freshly
+    ' minted partner code (shown ONCE by the caller; only its salted one-way hash is ever
+    ' persisted - C3b rotate-on-use, now per SLOT so one block's code can never address
+    ' another's).
+    '
+    ' `serviceInstalled` is INJECTED rather than read here so the unit tests never touch
+    ' the SCM; the CLI passes Blocker.ServiceIsInstalled().
+    '
+    ' The CONFIRM-LOOP: the service rewrites this ini every tick, so a save can be lost to
+    ' a tick that had already loaded an older copy. After saving we RE-READ from disk and
+    ' require BOTH that our new Id is present at its position AND that the MAC validates;
+    ' anything else is treated as a lost race and retried (ArmAttempts times, ArmRetryMs
+    ' apart). On total failure NOTHING else is touched and the caller exits 2 - "could not
+    ' arm" is the safe failure, because no block was lifted, shortened or torn down.
+    Friend Function ArmSlot(ByVal domains As IEnumerable(Of String),
+                            ByVal apps As IEnumerable(Of String),
+                            ByVal urlPatterns As String,
+                            ByVal startAt As DateTime?,
+                            ByVal endsAt As DateTime,
+                            ByVal serviceInstalled As Boolean,
+                            Optional ByVal committed As Boolean = False,
+                            Optional ByVal coolOffSeconds As Long = 0,
+                            Optional ByVal allSessionKill As Boolean = False) As ArmResult
+        Dim last As ArmResult = Nothing
+        For attempt As Integer = 1 To ArmAttempts
+            last = TryArmSlotOnce(domains, apps, urlPatterns, startAt, endsAt, serviceInstalled,
+                                  committed, coolOffSeconds, allSessionKill)
+            ' Only a lost write is worth retrying: a cap or a frozen config will say the
+            ' same thing every time, and retrying would just delay an honest refusal.
+            If last.Outcome <> ArmOutcome.WriteRace Then Return last
+            If attempt < ArmAttempts Then System.Threading.Thread.Sleep(ArmRetryMs)
+        Next
+        Return last
+    End Function
+
+    Private Function TryArmSlotOnce(ByVal domains As IEnumerable(Of String),
+                                    ByVal apps As IEnumerable(Of String),
+                                    ByVal urlPatterns As String,
+                                    ByVal startAt As DateTime?,
+                                    ByVal endsAt As DateTime,
+                                    ByVal serviceInstalled As Boolean,
+                                    ByVal committed As Boolean,
+                                    ByVal coolOffSeconds As Long,
+                                    ByVal allSessionKill As Boolean) As ArmResult
+        Dim result As New ArmResult
+
+        ' 1. Load whatever is there (a missing/unreadable file reads as an empty config,
+        '    which is MAC-INVALID - it never counts as "usable").
+        Dim ini As New IniFile
+        Dim loaded As Boolean = False
+        Try
+            If File.Exists(IniPath()) Then
+                ini.Load(IniPath())
+                loaded = True
+            End If
+        Catch
+            ini = New IniFile
+            loaded = False
+        End Try
+
+        Dim macValid As Boolean = loaded AndAlso ConfigMacIsValidForIni(ini)
+        ' GetKeyValue never returns Nothing (absent section OR key both read ""), and a
+        ' v10 config ALWAYS writes SlotCount - so a blank read is exactly "no [Slots]
+        ' section", i.e. a pre-v1.1 file. A stored literal "0" is a legitimately EMPTY v10
+        ' config and is appended to (position 1), never rewritten.
+        Dim hasSlotsSection As Boolean = loaded AndAlso ini.GetKeyValue("Slots", "SlotCount") <> ""
+        Dim slotCount As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+        Dim fresh As Boolean = ShouldFreshRewrite(serviceInstalled, macValid, hasSlotsSection, slotCount)
+
+        ' 2. With the service PRESENT (or a usable config), an invalid MAC means FROZEN:
+        '    re-stamping over an unverified config is the B7 fail-open bug, so refuse.
+        If Not fresh AndAlso Not macValid Then
+            result.Outcome = ArmOutcome.Frozen
+            Return result
         End If
 
-        ' B7: stamp a fresh tamper-evident MAC. Generate a per-block HMAC key,
-        ' DPAPI-protect it at machine scope into [Integrity] Key, and MAC the
-        ' canonical of the plaintext values just written into [Integrity] Mac.
-        ' Best-effort: a DPAPI failure must NOT abort arming the block (the
-        ' readers then see no/invalid MAC and fail CLOSED = keep enforcing,
-        ' which is safe - they just can't auto-lift until a good stamp exists).
-        StampFreshMac(ini)
+        ' 3. P34: the cap, checked BEFORE any side effect at all.
+        If Not fresh AndAlso slotCount >= ConfigIntegrity.MaxSlots Then
+            result.Outcome = ArmOutcome.CapReached
+            result.SlotSummaries = BuildSlotSummaries(ini, slotCount)
+            Return result
+        End If
 
-        ini.Save(IniPath())
-        ' C1b: capture a MAC-covered shadow copy of the just-armed config, so a
-        ' later corrupt/blanked/short primary restores from it instead of freezing
-        ' into the unstamped panic default. Only copies if the fresh stamp is
-        ' MAC-valid (a DPAPI failure above left it unstamped -> no backup), so the
-        ' backup is always a genuinely liftable config.
-        RefreshBackup(ini)
-        Return partnerCodePlain
+        Dim position As Integer
+        Dim id As Integer
+        Dim partnerSalt() As Byte = ConfigIntegrity.NewPartnerSalt()
+        Dim partnerCodePlain As String = ConfigIntegrity.GeneratePartnerCode()
+        Dim saltB64 As String = Convert.ToBase64String(partnerSalt)
+        Dim hashB64 As String = ConfigIntegrity.ComputePartnerHash(partnerSalt, partnerCodePlain)
+        Dim durationSeconds As Long = 0
+        If startAt.HasValue Then durationSeconds = CLng(Math.Round((endsAt - startAt.Value).TotalSeconds))
+        ' P29: a PENDING slot stores StartAt + DurationSeconds and NO Until - the SERVICE
+        ' computes Until at activation. Storing an absolute Until here would UNDER-BLOCK
+        ' after downtime (the wall clock moves on while the machine is off).
+        Dim endsAtOrNothing As DateTime? = If(startAt.HasValue, CType(Nothing, DateTime?), CType(endsAt, DateTime?))
+
+        If fresh Then
+            ' P18 fresh rewrite: nothing trustworthy to preserve, so scaffold from scratch.
+            ' This is the ONLY path that seeds the monotonic frame.
+            ini = New IniFile
+            position = 1
+            id = 1
+            ini.AddSection("Time")
+            ini.SetKeyValue("Time", "TimeChanging", "no")
+            ' B4: seed the monotonic high-water mark at "now" (en-CA LOCAL, encrypted like
+            ' Until). From here the service advances it at most one tick at a time and never
+            ' on a clock jump, and decides expiry off it instead of raw DateTime.Now - so
+            ' rolling the clock forward past a slot's Until can't lift it early. MAC-covered
+            ' by StampFreshMac below, so it can't be forged past Until either.
+            ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
+            ini.AddSection("CurrentTime")
+            ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
+            ' The v9 [Partner] mirror belongs to the ONE block this fresh config holds.
+            ini.AddSection("Partner")
+            ini.SetKeyValue("Partner", "Salt", saltB64)
+            ini.SetKeyValue("Partner", "Hash", hashB64)
+            ini.SetKeyValue("Partner", "UnlockedAt", "")
+        Else
+            position = slotCount + 1
+            Dim highest As Integer = 0
+            For pos As Integer = 1 To slotCount
+                Dim existing As Integer
+                If Integer.TryParse(If(ini.GetKeyValue(SlotSection(pos), "Id"), ""),
+                                    NumberStyles.Integer, CultureInfo.InvariantCulture, existing) AndAlso existing > highest Then highest = existing
+            Next
+            id = NextIdForArm(ini.GetKeyValue("Slots", "NextSlotId"), highest)
+            ' The append path deliberately leaves [Time] HighWater, [CurrentTime] Now,
+            ' [Time] TimeChanging and the v9 [Partner] block ALONE: the first two are the
+            ' running slots' monotonic frame, TimeChanging may be mid-clock-change
+            ' cooperation, and the v9 partner verifier is an EXISTING block's exit - none
+            ' of them is this arm's to reset. This slot's own code lands in its section.
+        End If
+
+        WriteSlotSection(ini, position, id, startAt, endsAtOrNothing, durationSeconds,
+                         PackList(domains), PackApps(apps), If(urlPatterns, ""),
+                         allSessionKill, coolOffSeconds, saltB64, hashB64, committed)
+        RefreshHeaderAndV9Mirror(ini, position, id + 1)
+
+        ' 4. Stamp. A fresh config mints a new key + MAC; an append re-stamps with the
+        '    EXISTING key, and only ever reaches here with macValid=True (step 2).
+        If fresh Then
+            StampFreshMac(ini)
+        Else
+            RestampMacWithExistingKey(ini)
+        End If
+
+        Try
+            ini.Save(IniPath())
+        Catch
+            result.Outcome = ArmOutcome.WriteRace
+            Return result
+        End Try
+
+        ' 5. CONFIRM: re-read from disk. Our slot must be there AND the MAC must validate,
+        '    or the write was lost (or overwritten) and this attempt did not happen.
+        Dim check As New IniFile
+        Try
+            check.Load(IniPath())
+        Catch
+            result.Outcome = ArmOutcome.WriteRace
+            Return result
+        End Try
+        Dim confirmedId As Integer
+        If Not Integer.TryParse(If(check.GetKeyValue(SlotSection(position), "Id"), ""),
+                                NumberStyles.Integer, CultureInfo.InvariantCulture, confirmedId) _
+           OrElse confirmedId <> id _
+           OrElse Not ConfigMacIsValidForIni(check) Then
+            result.Outcome = ArmOutcome.WriteRace
+            Return result
+        End If
+
+        ' C1b: capture a MAC-covered shadow copy of the just-armed config, so a later
+        ' corrupt/blanked/short primary restores from it instead of freezing into the
+        ' unstamped panic default. Only copies when the stamp is MAC-valid.
+        RefreshBackup(check)
+
+        result.Outcome = ArmOutcome.Armed
+        result.Id = id
+        result.Position = position
+        result.PartnerCode = partnerCodePlain
+        result.FreshRewrite = fresh
+        Return result
+    End Function
+
+    ' C3b/v1.1: the pre-slot entry point, retained as a thin shim over ArmSlot so the
+    ' existing end-to-end CLI-writer tests keep driving the REAL write path. It arms one
+    ' ACTIVE slot on a config with nothing else armed (serviceInstalled:=False + a wiped
+    ' ini => ArmSlot's fresh-rewrite path) and returns the minted partner code, exactly as
+    ' it always did. NOT on any production path any more - DoBlock calls ArmSlot directly,
+    ' because only ArmSlot can carry --urls/--start and report the new slot's id.
+    Public Function WriteConfig(ByVal domains As IEnumerable(Of String), ByVal apps As IEnumerable(Of String), ByVal untilDate As DateTime, Optional ByVal committed As Boolean = False, Optional ByVal coolOffSeconds As Long = 0, Optional ByVal allSessionKill As Boolean = False) As String
+        Return ArmSlot(domains, apps, "", Nothing, untilDate, serviceInstalled:=False,
+                       committed:=committed, coolOffSeconds:=coolOffSeconds, allSessionKill:=allSessionKill).PartnerCode
     End Function
 
     ' B7/B4: builds the v10 two-level canonical the MAC is computed over, from a

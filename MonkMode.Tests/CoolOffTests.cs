@@ -733,22 +733,12 @@ public class CoolOffWriteConfigTests
             cliIni.Load(iniPath);
             // Stored plaintext seconds under [CoolOff] Duration...
             Assert.Equal("7200", cliIni.GetKeyValue("CoolOff", "Duration"));
-            // ...and every reader still derives the SAME canonical from what was written.
-            //
-            // S1/S2 SEAM (v1.1): the value is NOT inside the canonical right now. S1 moved
-            // the readers to the v10 per-slot canonical but deliberately left the arm path
-            // on the v9 sections, so a WriteConfig'd ini has no [Slots] section and every
-            // reader derives SlotCount=0.
-            // !! NOT fail-closed - do NOT install a tree in this state. The writer stamps
-            // with the SAME v10 wrapper the readers verify with, so macValid stays TRUE
-            // while every v9-located enforcement field sits OUTSIDE the canonical and is
-            // UNCOVERED - tamper-OPEN under a valid MAC, not frozen. S2 restores coverage
-            // for fresh arms; S3a moves the enforcement readers. The reader-agreement half
-            // of this test still holds. S2 rewrites the arm path to emit [Slot1]
-            // CoolOffDuration, at which point the SlotCount=0 assertion fails LOUDLY and
-            // "Slot1.CoolOffDuration=7200\n" replaces it.
+            // ...and the value is MAC-COVERED, on the v10 per-slot canonical the arm path has
+            // written since S2 (v1.1) - a raw edit to shorten the wait fails the MAC and every
+            // reader freezes. The v9 [CoolOff] Duration mirror checked above is still written
+            // for the enforcement readers until S3a moves them onto the slots.
             var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
-            Assert.Contains("SlotCount=0\n", cli);
+            Assert.Contains("Slot1.CoolOffDuration=7200\n", cli);
 
             var srvIni = new monkmode.IniFile();
             srvIni.Load(iniPath);
@@ -783,12 +773,12 @@ public class CoolOffWriteConfigTests
             // compile-time floor default). Use IsNullOrEmpty (absent reads "", a blanked key
             // reads Nothing - the recurring ini round-trip quirk).
             Assert.True(string.IsNullOrEmpty(cliIni.GetKeyValue("CoolOff", "Duration")));
-            // S1/S2 seam (see the sibling test for the full note): the v9 arm path writes no
-            // [Slots] section, so the v10 readers derive a zero-slot canonical - macValid
-            // TRUE, enforcement fields UNCOVERED, tamper-open, must-never-install. S2
-            // restores the per-slot "Slot1.CoolOffDuration=\n" assertion when the arm path
-            // emits slots.
-            Assert.Contains("SlotCount=0\n", MonkMode.Blocker.CanonicalFromIni(cliIni));
+            // ...and the slot carries an EMPTY CoolOffDuration - MAC-covered as empty, so
+            // "no configured wait, use the floor" is itself protected: a raw edit that
+            // invents a duration fails the MAC. (16 per-slot keys are always emitted, "" when
+            // unset - an absent key could otherwise shorten one config's canonical into
+            // another's.)
+            Assert.Contains("Slot1.CoolOffDuration=\n", MonkMode.Blocker.CanonicalFromIni(cliIni));
         }
         finally
         {
