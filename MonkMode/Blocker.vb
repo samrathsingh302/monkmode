@@ -806,9 +806,112 @@ Module Blocker
 
     ' ---- notifier ----
 
-    Public Sub RegisterAndLaunchNotifier()
+    ' D4d rider: which arm paths clear an ORPHANED notifier before launching a fresh
+    ' one. Named constants, not bare True/False at the call sites, so the policy is a
+    ' single readable thing the unit tests pin (MonkMode/Program.vb passes these).
+    '
+    ' A MANUAL arm kills leftovers: `monkmode block --for ...` is an explicit,
+    ' interactive, one-shot act, and after D4c's single-instance mutex an orphaned
+    ' notifier from a previous block (one whose CLI died, or that outlived a teardown)
+    ' makes the fresh spawn LOSE the claim and stand down - so the new block would run
+    ' with a notifier still pointed at the OLD state. Killing the orphan first hands the
+    ' claim to the fresh spawn.
+    '
+    ' A SCHEDULE arm does NOT: `monkmode schedule ...` can be re-run at any moment,
+    ' including during an OPEN window with a perfectly healthy notifier doing app-kill
+    ' and clock-change compensation. Killing that one is a real (if brief) enforcement
+    ' hole for the sake of tidiness, so the schedule path leaves the running notifier
+    ' alone - the guardian's relaunch already covers a genuinely dead one.
+    Friend Const ManualArmKillsLeftovers As Boolean = True
+    Friend Const ScheduleArmKillsLeftovers As Boolean = False
+
+    ' Bounded retry for the leftover kill: at most 3 passes, 250 ms apart. Bounded
+    ' because arming must never hang on a process that refuses to die - we give up and
+    ' arm anyway (see ShouldKillLeftoverNotifier for why giving up is the safe side).
+    Private Const LeftoverKillAttempts As Integer = 3
+    Private Const LeftoverKillRetryMs As Integer = 250
+
+    '    The leftover-notifier kill decision - PURE, so its truth table is pinned by
+    '    tests without enumerating real processes or reading a live ini (same
+    '    testable-core + thin-live-wrapper shape as SingleInstance.ShouldStandDown and
+    '    Service1.ReassertHostsFailClosed).
+    '
+    '    Kill only when ALL THREE hold:
+    '      - killLeftovers: this caller is a manual arm (the schedule path passes False);
+    '      - instanceCount > 0: there is actually something to kill (no process
+    '        enumeration means no kill - never fire blind);
+    '      - timeChangingText is NOT "yes": no clock change is in flight.
+    '
+    '    The TimeChanging condition is the load-bearing one. "yes" is the ~2s window in
+    '    which the notifier is mid-clock-change cooperation with the service
+    '    (MM_notify\Form1.vb:456/462 raise and clear it around SystemEvents_TimeChanged);
+    '    a notifier killed inside that window leaves the flag stuck at "yes", which
+    '    freezes the service's HighWater roll and the schedule poll for the rest of the
+    '    block (Service1.vb:869/898/1125 all gate on TimeChanging="no"). So the two
+    '    outcomes are NOT symmetric: failing to kill a leftover is safe - a duplicate
+    '    notifier only ever OVER-enforces (double toasts, double app-kill) - while
+    '    killing in-window degrades enforcement. Every ambiguous case therefore resolves
+    '    to "don't kill", and the flag is compared case-insensitively and trimmed so a
+    '    "YES " written by any writer still counts as in-window.
+    '
+    '    Absent/empty text ("" - GetKeyValue's answer for a missing [Time] TimeChanging,
+    '    e.g. no ini at all before a first arm) reads as "no clock change in flight",
+    '    which is what an absent block means. A FAILED read is different and is handled
+    '    by the wrapper below, which declines to kill at all.
+    Friend Function ShouldKillLeftoverNotifier(ByVal timeChangingText As String,
+                                               ByVal instanceCount As Integer,
+                                               ByVal killLeftovers As Boolean) As Boolean
+        If Not killLeftovers Then Return False
+        If instanceCount <= 0 Then Return False
+        Dim flag As String = If(timeChangingText, "").Trim()
+        If String.Equals(flag, "yes", StringComparison.OrdinalIgnoreCase) Then Return False
+        Return True
+    End Function
+
+    '    The thin live wrapper around that gate: enumerate the real mm_notify processes,
+    '    read the real [Time] TimeChanging, and kill only if the gate says so.
+    '
+    '    Both the count and the flag are re-read on EVERY attempt, so (a) the loop stops
+    '    as soon as the last leftover is gone (count 0 => gate False => Return), and (b)
+    '    a clock change that STARTS mid-retry stops the remaining attempts rather than
+    '    being killed through - the whole retry window (<= 500 ms of sleep) is comparable
+    '    to the ~2s TimeChanging window, so re-checking is not theatre.
+    '
+    '    Any failure to establish those two facts (process enumeration or ini read
+    '    throwing) returns WITHOUT killing: we cannot prove we are outside the
+    '    clock-change window, and not killing is the safe side. Individual p.Kill()
+    '    failures are swallowed exactly like the teardown kill (KillWatchdogProcesses)
+    '    and simply cost an attempt. Nothing here can fail the arm.
+    Private Sub KillLeftoverNotifiers(ByVal killLeftovers As Boolean)
+        For attempt As Integer = 1 To LeftoverKillAttempts
+            Try
+                Dim leftovers() As Process = Process.GetProcessesByName(NotifierProcessName)
+                Dim ini As New IniFile
+                ini.Load(IniPath())
+                If Not ShouldKillLeftoverNotifier(ini.GetKeyValue("Time", "TimeChanging"), leftovers.Length, killLeftovers) Then Return
+                For Each p As Process In leftovers
+                    Try
+                        p.Kill()
+                    Catch
+                    End Try
+                Next
+            Catch
+                Return
+            End Try
+            ' Let the kills land before re-counting; no trailing sleep on the last pass.
+            If attempt < LeftoverKillAttempts Then Threading.Thread.Sleep(LeftoverKillRetryMs)
+        Next
+    End Sub
+
+    ' killLeftovers defaults to False - the conservative side - so any caller added
+    ' later leaves a running notifier alone until it opts in deliberately.
+    Public Sub RegisterAndLaunchNotifier(Optional ByVal killLeftovers As Boolean = False)
         Dim notifier As String = Path.Combine(AppDir(), NotifierExeName)
         If Not File.Exists(notifier) Then Return
+        ' D4d rider: clear an orphaned notifier BEFORE the launch below, otherwise the
+        ' fresh spawn loses D4c's single-instance claim to the orphan and stands down.
+        ' Best-effort and bounded; never fails the arm.
+        KillLeftoverNotifiers(killLeftovers)
         Try
             Using rk As RegistryKey = Registry.CurrentUser.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Run", True)
                 If rk IsNot Nothing Then rk.SetValue(RunValueName, notifier)

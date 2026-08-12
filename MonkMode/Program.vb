@@ -349,7 +349,10 @@ Module Program
             Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at expiry rather than restore/remove it.")
         End If
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
-        Blocker.RegisterAndLaunchNotifier()
+        ' D4d rider: a MANUAL arm clears an orphaned notifier first, so this block's
+        ' fresh spawn wins D4c's single-instance claim instead of standing down behind
+        ' a leftover pointed at the previous block (Blocker.ManualArmKillsLeftovers).
+        Blocker.RegisterAndLaunchNotifier(Blocker.ManualArmKillsLeftovers)
 
         ' D3b: record this arm to the separate, non-MAC stats history (best-effort - Stats.RecordBlockStart
         ' swallows every error and never throws, so a stats failure can't perturb the block just armed
@@ -544,7 +547,9 @@ Module Program
 
         Blocker.WriteScheduleConfig(spec)
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
-        Blocker.RegisterAndLaunchNotifier()
+        ' D4d rider: a schedule arm/re-arm can land during an OPEN window with a healthy
+        ' notifier running - never kill it for tidiness (Blocker.ScheduleArmKillsLeftovers).
+        Blocker.RegisterAndLaunchNotifier(Blocker.ScheduleArmKillsLeftovers)
 
         Console.WriteLine("Schedule armed. Windows open automatically at their times.")
         Console.WriteLine("  Windows: " & windowsArg.Trim())
