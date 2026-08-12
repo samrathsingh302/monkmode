@@ -539,7 +539,14 @@ Public Class Form1
     ' tests reach them as mm_notify.Form1.X.
 
     ' The Spec grammar-version tag (parity copy of Service1.ScheduleSpecGrammarVersion).
-    Friend Const ScheduleSpecGrammarVersion As String = "v1"
+    ' P19 (v1.1 S3a): "v1" -> "v2" WITH the overnight (wrapped) window grammar. The bump is
+    ' load-bearing - a v2 wrapped token fed to a v1 parser used to VANISH silently (fail-open),
+    ' whereas an unknown tag parses to zero windows.
+    Friend Const ScheduleSpecGrammarVersion As String = "v2"
+
+    ' The LEGACY tag, still accepted (never emitted): a v1 Spec means STRICT same-day windows.
+    ' Parity copy of Service1.ScheduleSpecGrammarVersionLegacy.
+    Friend Const ScheduleSpecGrammarVersionLegacy As String = "v1"
 
     ' Has the open scheduled window reached its monotonic close? "" (no window) and any unparseable
     ' input read as NOT elapsed (fail-closed: a corrupted deadline/mark keeps the window held).
@@ -626,9 +633,18 @@ Public Class Form1
         If String.IsNullOrWhiteSpace(specText) Then Return result
         Dim parts() As String = specText.Split(";"c)
         If parts.Length < 2 Then Return result
-        If parts(0).Trim() <> ScheduleSpecGrammarVersion Then Return result
+        ' The TAG selects the grammar: only v2 admits wrapped (overnight) windows.
+        Dim tag As String = parts(0).Trim()
+        Dim allowWrap As Boolean
+        If tag = ScheduleSpecGrammarVersion Then
+            allowWrap = True
+        ElseIf tag = ScheduleSpecGrammarVersionLegacy Then
+            allowWrap = False
+        Else
+            Return result
+        End If
         For Each winTok As String In parts(1).Split(","c)
-            Dim w As ScheduleWindow = TryParseWindow(winTok)
+            Dim w As ScheduleWindow = TryParseWindow(winTok, allowWrap)
             If w IsNot Nothing Then result.Windows.Add(w)
         Next
         For i As Integer = 2 To parts.Length - 1
@@ -650,9 +666,10 @@ Public Class Form1
         Next
     End Sub
 
-    ' Parse one "dayMask:HHMM-HHMM" window; Nothing if malformed (fail-closed skip). Enforces SD3:
-    ' same-day only (open < close); rejects any out-of-range time or day. Parity copy.
-    Private Shared Function TryParseWindow(ByVal token As String) As ScheduleWindow
+    ' Parse one "dayMask:HHMM-HHMM" window; Nothing if malformed (fail-closed skip). open = close
+    ' is never legal; open > close is a WRAPPED overnight window under v2 (allowWrap) and the old
+    ' SD3 same-day rejection under the legacy v1 tag. Parity copy.
+    Private Shared Function TryParseWindow(ByVal token As String, ByVal allowWrap As Boolean) As ScheduleWindow
         If token Is Nothing Then Return Nothing
         Dim tok As String = token.Trim()
         If tok = "" Then Return Nothing
@@ -665,7 +682,8 @@ Public Class Form1
         Dim openMin As Integer = TryParseHhmm(times(0))
         Dim closeMin As Integer = TryParseHhmm(times(1))
         If openMin < 0 OrElse closeMin < 0 Then Return Nothing
-        If openMin >= closeMin Then Return Nothing
+        If openMin = closeMin Then Return Nothing
+        If openMin > closeMin AndAlso Not allowWrap Then Return Nothing
         Dim w As New ScheduleWindow()
         w.DayMask = mask
         w.OpenMinutes = openMin

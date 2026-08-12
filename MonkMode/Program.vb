@@ -522,6 +522,17 @@ Module Program
             Console.Error.WriteLine("A schedule is armed. To change its sites, re-run 'monkmode schedule --sites ... --windows ...' with the full list.")
             Return 1
         End If
+        ' v1.1 S3a: `add` writes the extra sites to the v9 [User] CustomSites and the hosts
+        ' snapshot, and to NO slot. The service now reconciles that snapshot to the SLOTS on
+        ' every tick (P37) and repairs hosts to match, so an added site would silently
+        ' disappear again within ~10s. Refuse honestly instead of appearing to work - a second
+        ' block covers the same need today, and P42/S5 makes `add` service-adjudicated.
+        If Blocker.AnySlotArmed() Then
+            Console.Error.WriteLine("'add' can't extend a block yet in this version. Start another block for the extra sites instead:")
+            Console.Error.WriteLine("  monkmode block --sites " & String.Join(",", domains) & " --for <duration>")
+            Console.Error.WriteLine("It runs alongside the block you already have.")
+            Return 1
+        End If
         If Not Blocker.BlockIsActive() Then
             Console.Error.WriteLine("No active block to add to. Start one with 'monkmode block'.")
             Return 1
@@ -1088,7 +1099,7 @@ Module Program
         Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
         Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")
         Console.WriteLine("  - --all-session-kill kills blocked apps in EVERY logged-in Windows session, not just the one you ran 'block' in (useful if you fast-user-switch to a second account to dodge the kill). No effect unless you block apps.")
-        Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM, same-day only). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
+        Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM; an end BEFORE the start means overnight (e.g. ""Mon-Fri 22:30-04:00"" covers Tue-Sat 00:00-04:00)). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")
         Console.WriteLine("  - --app-preset kills a whole category of well-known apps at once (comma-separate several): " & String.Join(", ", Blocker.KnownAppPresetNames()) & ". Combine it with --apps to add your own.")

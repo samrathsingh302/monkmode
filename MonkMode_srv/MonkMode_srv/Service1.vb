@@ -680,6 +680,113 @@ Public Class Service1
         End Try
     End Function
 
+    ' v1.1 S3a: read the SLOTS out of a loaded ini into the per-tick SlotState list - the
+    ' enforcement truth the folds/unions above reason over. Positions 1..CLAMPED SlotCount
+    ' only (ConfigIntegrity.ParseSlotCount, never the raw stored value: a forged count can
+    ' only ever build a canonical no MAC matches -> freeze), so stale [SlotN] sections beyond
+    ' the count are invisible here exactly as they are to CanonicalFromIni.
+    '
+    ' Decrypt-BEFORE-macValid is deliberate and load-bearing, the same discipline the
+    ' [Schedule] ActiveUntil read follows: a garbled ciphertext must THROW (-> the tick's
+    ' Catch -> RecoverPrimaryConfig, fail-closed) and must never be silently read as "",
+    ' which would drop a slot's end and, with it, its hold. In practice a slot that fails to
+    ' decrypt has already failed the MAC (CanonicalFromIni decrypts the same four fields), so
+    ' macValid is False by the time this runs and every fold holds regardless.
+    Friend Function LoadSlots(ByVal ini As IniFile) As List(Of SlotState)
+        Dim slots As New List(Of SlotState)
+        If ini Is Nothing Then Return slots
+        Dim count As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+        For pos As Integer = 1 To count
+            Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+            Dim s As New SlotState()
+            s.Position = pos
+            s.Id = ini.GetKeyValue(sec, "Id")
+            Dim startEnc As String = ini.GetKeyValue(sec, "StartAt")
+            Dim untilEnc As String = ini.GetKeyValue(sec, "Until")
+            Dim schedEnc As String = ini.GetKeyValue(sec, "ScheduleActiveUntil")
+            s.StartAt = If(startEnc = "", "", encryptionW.DecryptData(startEnc))
+            s.UntilText = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
+            s.ScheduleActiveUntil = If(schedEnc = "", "", encryptionW.DecryptData(schedEnc))
+            s.DurationSeconds = ini.GetKeyValue(sec, "DurationSeconds")
+            s.Sites = SplitPackedList(ini.GetKeyValue(sec, "Sites"), ";"c)
+            s.Apps = SplitPackedList(ini.GetKeyValue(sec, "Apps"), ";"c)
+            s.UrlPatterns = SplitPackedList(ini.GetKeyValue(sec, "UrlPatterns"), "|"c)
+            s.AllSession = ini.GetKeyValue(sec, "AllSession")
+            s.ScheduleSpec = ini.GetKeyValue(sec, "ScheduleSpec")
+            slots.Add(s)
+        Next
+        Return slots
+    End Function
+
+    ' P36: the ONE per-slot writer. Order is the PersistScheduleActiveUntil discipline plus
+    ' the Id re-locate that top risk 2 demands:
+    '   reload -> TOCTOU re-validate the MAC (only ever re-stamp bytes just re-verified;
+    '   re-stamping over an unverified config IS the B7 fail-open bug) -> RE-LOCATE the
+    '   position whose Id = slotId (never trust a position captured before the reload: a
+    '   compaction between read and write would otherwise write into ANOTHER slot's section,
+    '   which is the mis-adjudicated-lift class) -> not found means write NOTHING -> set ->
+    '   re-stamp with the EXISTING key -> Save -> refresh the C1b shadow backup.
+    ' Returns True iff the write happened. NEVER throws (it runs inside the tick).
+    Friend Function PersistSlotField(ByVal slotId As String, ByVal key As String, ByVal plainValue As String, ByVal encrypt As Boolean) As Boolean
+        Return PersistSlotFieldAt(Application.StartupPath + "\monkmode_settings.ini", slotId, key, plainValue, encrypt)
+    End Function
+
+    ' The testable core of PersistSlotField with the config path made explicit - the
+    ' ProcessScheduleSnapshot/ProcessAddToHosts pattern, so unit tests drive the real write
+    ' path against a test-owned file and never the deployed config.
+    Friend Function PersistSlotFieldAt(ByVal iniPath As String, ByVal slotId As String, ByVal key As String, ByVal plainValue As String, ByVal encrypt As Boolean) As Boolean
+        Try
+            Dim iniFile = New IniFile
+            iniFile.Load(iniPath)
+            If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            Dim pos As Integer = FindSlotPositionById(iniFile, slotId)
+            If pos = 0 Then Return False        ' the slot moved or was retired: write NOTHING
+            Dim stored As String = If(plainValue = "", "", If(encrypt, encryptionW.EncryptData(plainValue), plainValue))
+            iniFile.SetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), key, stored)
+            RestampMacWithExistingKey(iniFile)
+            iniFile.Save(iniPath)
+            Try
+                ConfigBackup.CopyIfSourceValid(iniPath,
+                                               System.IO.Path.Combine(System.IO.Path.GetDirectoryName(iniPath), ConfigBackup.BackupFileName),
+                                               ConfigMacIsValidForIni(iniFile))
+            Catch ex As Exception
+            End Try
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' v1.1 S3a: the PER-SLOT window poll - the slot twin of ProcessScheduleWindows, running
+    ' the same pure decision (EvaluateWindows -> NextScheduleActiveUntil) once per slot that
+    ' carries a rule, and persisting each result through PersistSlotField. Updates the
+    ' in-memory SlotState on a successful write so THIS tick's folds/unions see it.
+    '
+    ' macValid REQUIRED to act (a frozen config never has its schedule state modified or
+    ' re-stamped - it is already enforcing). Best-effort per slot: a failed persist leaves
+    ' that slot's stored value alone and the next tick re-evaluates.
+    '
+    ' DEFERRED (S3b): the issue-#2 lost-update guard the v9 path gets from
+    ' ScheduleSpecUnchangedSinceSnapshot has no per-slot equivalent yet. It is unreachable
+    ' today - no CLI writes a slot ScheduleSpec (WriteSlotSection always writes ""), so no
+    ' writer can change one under this tick - and PersistSlotField's Id re-locate already
+    ' stops the write landing in the wrong section.
+    Private Sub ProcessSlotScheduleWindows(ByVal slots As List(Of SlotState), ByVal lastNowText As String, ByVal nowText As String, ByVal newHwText As String, ByVal monoElapsedSeconds As Long, ByVal macValid As Boolean, ByVal isBoot As Boolean)
+        Try
+            If Not macValid OrElse slots Is Nothing Then Return
+            For Each s As SlotState In slots
+                ' Fast path: no rule and no open window - nothing to evaluate or clear.
+                If s.ScheduleSpec = "" AndAlso s.ScheduleActiveUntil = "" Then Continue For
+                Dim openNow As List(Of ScheduleOpen) = EvaluateWindows(ParseSchedule(s.ScheduleSpec).Windows, lastNowText, nowText, monoElapsedSeconds, isBoot)
+                Dim target As String = NextScheduleActiveUntil(s.ScheduleActiveUntil, openNow, newHwText)
+                If target <> s.ScheduleActiveUntil Then
+                    If PersistSlotField(s.Id, "ScheduleActiveUntil", target, True) Then s.ScheduleActiveUntil = target
+                End If
+            Next
+        Catch ex As Exception
+        End Try
+    End Sub
+
     ' B4 creep fix: a MONOTONIC anchor (Environment.TickCount64, ms since boot -
     ' immune to wall-clock changes) captured at the last HighWater advance. The
     ' per-tick HighWater credit is capped by the real elapsed since this anchor, so
@@ -749,6 +856,12 @@ Public Class Service1
         ' (seeded at OnStart), NOT the stored [CurrentTime] Now, so a reboot's downtime gap is
         ' never misread as a live jump (crux #4b - see lastTickWallNow above).
         Dim iniScheduleSpec As String = ""
+        ' v1.1 S3a: the SLOTS as this tick sees them - the enforcement truth the folds and
+        ' unions below read INSTEAD of the v9 mirror keys (which sit outside the MAC-covered
+        ' canonical and were therefore raw-editable under a valid MAC). Empty is the
+        ' fail-closed default: with no readable slots every gate falls back on the v9
+        ' disjunct it always had, so this can never REMOVE enforcement, only add.
+        Dim slots As New List(Of SlotState)
         Dim prevTickWallNow As String = ""
         Dim tickWallNow As String = ""
         Dim monoElapsedSeconds As Long = 0
@@ -830,6 +943,10 @@ Public Class Service1
             ' Key, validate [Integrity] Mac over the canonical). Invalid/absent
             ' MAC or a DPAPI failure -> False -> block stays standing.
             macValid = ConfigMacIsValidForIni(iniFile)
+            ' v1.1 S3a: read the slots (decrypting their four datetimes) now the ini is
+            ' loaded. A garbled slot ciphertext throws into the Catch below - fail-closed,
+            ' the same discipline the [Schedule] ActiveUntil read follows.
+            slots = LoadSlots(iniFile)
             ' B4: advance the monotonic high-water mark. Read the stored value
             ' (decrypted), then NextHighWater advances it to "now" ONLY if the
             ' advance is a Trusted real tick; a clock-forward jump or a backward
@@ -915,6 +1032,10 @@ Public Class Service1
             ' off it (an open window out-ranks expiry/cooling-off/code). isBoot:=False (a live
             ' tick; OnStart re-evaluates with isBoot:=True). No Spec => inert fast path.
             iniScheduleActiveUntil = ProcessScheduleWindows(iniScheduleActiveUntil, iniScheduleSpec, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
+            ' v1.1 S3a: the same window->duration conversion, once per SLOT that carries a
+            ' rule, persisted through PersistSlotField. Inert on every slot armed today (the
+            ' CLI writes ScheduleSpec="" until S3b), so this is machinery + tests for now.
+            ProcessSlotScheduleWindows(slots, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
         End If
 
         ' C5b (b3-i/b3-ii): the effective schedule state for THIS tick's ENFORCEMENT, computed
@@ -929,6 +1050,37 @@ Public Class Service1
         ' scheduleActiveNow=False -> both unions degenerate to today's exact behaviour.
         Dim scheduleActiveNow As Boolean = ScheduleActive(iniScheduleActiveUntil, newHw)
         Dim activeSchedule As ParsedSchedule = If(scheduleActiveNow, ParseSchedule(iniScheduleSpec), Nothing)
+
+        ' ---- v1.1 S3a: this tick's SLOT-derived enforcement, computed ONCE ----
+        '
+        ' Every value below is a WIDENING of what the v9 mirror already produced (R1): the
+        ' held gate is "mirror held OR any slot held", the two lists are "the mirror's list
+        ' PLUS the enforcing slots' entries", and the all-session flag is an OR. Nothing here
+        ' can narrow a matcher or drop a hold - narrowing is the fail-open sin - so a config
+        ' whose slots are unreadable (or absent) enforces exactly what it did before S3a,
+        ' while a config with slots is now enforced from MAC-COVERED fields: raw-editing
+        ' [Time] Until or blanking [User] CustomSites no longer changes what is blocked.
+        Dim slotsHeld As Boolean = AnyBlockHeld(slots, newHwAsOf, ExpiryGraceSeconds, macValid, newHw)
+        ' The union the hosts machinery enforces AND reconciles the snapshot to: the open
+        ' schedule's own sites (unchanged) plus the sites of every slot whose lists count now -
+        ' open OR PENDING (SlotContributesLists; a pending slot's entries are already in hosts
+        ' and in the snapshot from arm time, and nothing can re-add them if this drops them).
+        ' Duplicates are harmless - BuildHostsEntries dedups by host name and EffectiveHostsBlock
+        ' dedups line-wise.
+        Dim enforcedSites As New List(Of String)
+        If scheduleActiveNow AndAlso activeSchedule IsNot Nothing Then enforcedSites.AddRange(activeSchedule.Sites)
+        enforcedSites.AddRange(UnionSlotSites(slots, newHwAsOf, ExpiryGraceSeconds, macValid, newHw))
+        ' The apps appended to the v9 kill list: the open schedule's apps (unchanged) plus the
+        ' apps of the same slots the hosts union takes.
+        Dim enforcedApps As New List(Of String)
+        If scheduleActiveNow AndAlso activeSchedule IsNot Nothing Then enforcedApps.AddRange(activeSchedule.Apps)
+        enforcedApps.AddRange(UnionSlotApps(slots, newHwAsOf, ExpiryGraceSeconds, macValid, newHw))
+        ' D2c widen: the v9 [Process] AllSession flag OR that of any slot contributing lists.
+        Dim allSessionKillNow As Boolean = iniAllSessionKill OrElse AnySlotAllSessionKill(slots, newHwAsOf, ExpiryGraceSeconds, macValid, newHw)
+        ' The one gate the five per-tick self-heals take: the v9 BlockHeld (kept as the
+        ' widening disjunct - the mirror is still written, and S3b/S8 own its removal) OR the
+        ' slot OR-fold. macValid=False makes BOTH arms True, so a frozen config still freezes.
+        Dim enforcementHeld As Boolean = BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) OrElse slotsHeld
 
         ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
         ' we no longer hold the file open, so this is how the lock is maintained).
@@ -980,9 +1132,17 @@ Public Class Service1
         ' is RepairHostsBlock(hostsText, snapshot) - BYTE-IDENTICAL to before - and with no
         ' snapshot the target is "" and nothing is written (also as before). Try/Catch so a
         ' transient lock never crashes the service.
+        ' P37 (v1.1 S3a): reconcile the snapshot with config truth BEFORE the self-heal reads
+        ' it, so a snapshot that drifted (a crash between the config write and the snapshot
+        ' write, a CLI arm racing a service retire, a hand-edited snapshot) is repaired from
+        ' the MAC-covered slots in the same tick it is used. macValid-gated, never-blanking, and
+        ' driven by enforcedSites - which INCLUDES pending slots, so this can never strip out a
+        ' scheduled block's entries that nothing would put back. See ReconcileHostsSnapshot.
+        ReconcileHostsSnapshot(Application.StartupPath + "\monkmode_hosts.block", macValid, enforcedSites)
+
         Try
             Dim snapshotPath As String = Application.StartupPath + "\monkmode_hosts.block"
-            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
+            If enforcementHeld Then
                 ' The manual block's snapshot (the CLI persisted it at arm), or "" for a
                 ' schedule-only block that never manually armed (no snapshot file on disk).
                 Dim snapshotBlock As String = ""
@@ -991,7 +1151,10 @@ Public Class Service1
                 End If
                 ' The effective marker block for this tick: snapshot UNION schedule sites while a
                 ' window is open, else the snapshot verbatim (the no-schedule byte-identity).
-                Dim expectedBlock As String = EffectiveHostsBlock(snapshotBlock, If(scheduleActiveNow, activeSchedule.Sites, Nothing), scheduleActiveNow)
+                ' v1.1 S3a: the union is now the schedule's sites AND every enforcing slot's
+                ' (enforcedSites). With neither in play the list is empty and this returns the
+                ' snapshot VERBATIM - the byte-identical no-schedule path, unchanged.
+                Dim expectedBlock As String = EffectiveHostsBlock(snapshotBlock, enforcedSites, enforcedSites.Count > 0)
                 If Not String.IsNullOrWhiteSpace(expectedBlock) Then
                     Dim hostsText As String = ""
                     If My.Computer.FileSystem.FileExists(hostDirS) Then
@@ -1034,7 +1197,7 @@ Public Class Service1
             ' schedule-only block is watched too; a no-schedule block (ActiveUntil="")
             ' is byte-identical (BlockHeld reduces to Not EffectiveBlockHasExpired).
             If ShouldRestartPeer(System.Diagnostics.Process.GetProcessesByName("mm_guard").Length,
-                                 BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw),
+                                 enforcementHeld,
                                  My.Computer.FileSystem.FileExists(guardianExe)) Then
                 System.Diagnostics.Process.Start(guardianExe)
             End If
@@ -1050,7 +1213,7 @@ Public Class Service1
         ' newHwAsOf (trusted high-water mark), not DateTime.Now, so a clock-forward
         ' can't drop the keys early. No-schedule block (ActiveUntil="") is byte-identical.
         Try
-            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
+            If enforcementHeld Then
                 AssertSafeBootRegistration()
             End If
         Catch ex As Exception
@@ -1066,7 +1229,7 @@ Public Class Service1
         ' not DateTime.Now, so a clock-forward can't drop the policy early. Own Try so a
         ' registry hiccup here never disturbs the SafeBoot re-assert or crashes the tick.
         Try
-            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
+            If enforcementHeld Then
                 AssertDohPolicy()
             End If
         Catch ex As Exception
@@ -1082,7 +1245,7 @@ Public Class Service1
         ' early. Read-only probe inside makes an intact DACL a no-op (no churn).
         ' Best-effort - never crash the tick. No-schedule block byte-identical.
         Try
-            If BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) Then
+            If enforcementHeld Then
                 AssertDenyDeleteAce()
             End If
         Catch ex As Exception
@@ -1098,9 +1261,12 @@ Public Class Service1
         ' appKillTimer_Tick, SessionId<>0) still keys off iniProcessList alone, so blocking a
         ' schedule's USER-session apps (browsers/games) needs the same union THERE - a follow-up
         ' slice (b3-iii, see handoff), exactly as the manual block's app-kill is split today.
-        Dim killList As String = EffectiveKillList(iniProcessList,
-                                                   If(scheduleActiveNow, activeSchedule.Apps, Nothing),
-                                                   scheduleActiveNow)
+        ' v1.1 S3a: enforcedApps carries the open schedule's apps AND every ENFORCING slot's
+        ' apps, so the kill set is now driven by the MAC-COVERED [SlotN] Apps rather than by
+        ' the raw-editable v9 [Process] List. iniProcessList stays as the BASE (widen-only:
+        ' deleting a name from the mirror can no longer stop a kill, and the mirror can never
+        ' subtract from the slots either). Empty list => iniProcessList verbatim, byte-identical.
+        Dim killList As String = EffectiveKillList(iniProcessList, enforcedApps, enforcedApps.Count > 0)
         ' D2c: normally the SERVICE kills only session-0 processes and the user-session notifier
         ' (MM_notify appKillTimer_Tick, SessionId<>0) kills the interactive session. With the armed
         ' [Process] AllSession flag, the LocalSystem service (which alone has cross-session kill
@@ -1112,7 +1278,7 @@ Public Class Service1
         ' that is likewise un-gated by macValid).
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
-            If ProcessInKillScope(iniAllSessionKill, Proc.SessionId) Then
+            If ProcessInKillScope(allSessionKillNow, Proc.SessionId) Then
                 Try
                     If ProcessNameInKillList(killList, Proc.ProcessName) Then
                         Proc.Kill()
@@ -1797,6 +1963,206 @@ Public Class Service1
         Return (Not EffectiveBlockHasExpired(untilText, asOf, graceSeconds, macValid)) OrElse (macValid AndAlso ScheduleActive(scheduleActiveUntilText, highWaterText))
     End Function
 
+    ' ============ v1.1 S3a: the SLOT enforcement layer (folds + unions) ============
+    '
+    ' Until S3a the tick enforced off the v9 SINGLE-BLOCK mirror keys ([Time] Until,
+    ' [User] CustomSites, [Process] List/AllSession). Those keys sit OUTSIDE the v10
+    ' canonical, so a raw edit to any of them left macValid TRUE: back-dating [Time] Until
+    ' tore the whole block down with no tamper evidence at all. The folds and unions below
+    ' read the SLOTS instead ([Slot1]..[Slot8] - every field MAC-covered), which is what
+    ' actually closes that hole.
+    '
+    ' The v9 mirror is NOT removed here (S3b/S8 own its removal): S2 still writes it as an
+    ' over-blocking PROJECTION of the slot set, and every call site below keeps it as a
+    ' WIDENING disjunct - held if the mirror says held OR any slot says held; kill/hosts =
+    ' the mirror's list PLUS the slots'. Widen-only is R1 (narrowing a matcher is fail-open),
+    ' and it also guarantees this slice cannot REMOVE enforcement a config had before it.
+    '
+    ' P16: a slot's STATE is DERIVED, never stored -
+    '   PENDING  <=> StartAt <> "" AndAlso Until = ""   (armed for later; not enforcing yet)
+    '   SCHEDULE <=> ScheduleSpec <> ""                 (its Until is the past sentinel)
+    '   ACTIVE   <=> Until <> "" and not expired against the trusted HighWater.
+
+    ' One slot as the tick sees it: the four encrypted datetimes already DECRYPTED, the
+    ' three lists already split. Reference type so the C# unit tests can build one directly
+    ' and drive the pure folds without any ini/DPAPI at all.
+    Friend Class SlotState
+        Public Position As Integer
+        Public Id As String = ""
+        Public StartAt As String = ""              ' decrypted; "" unless PENDING
+        Public DurationSeconds As String = ""
+        Public UntilText As String = ""            ' decrypted; "" = no end computed yet
+        Public Sites As New List(Of String)
+        Public Apps As New List(Of String)
+        Public UrlPatterns As New List(Of String)
+        Public AllSession As String = ""
+        Public ScheduleSpec As String = ""
+        Public ScheduleActiveUntil As String = ""  ' decrypted
+    End Class
+
+    ' Split one stored packed list into its entries (trimmed, empties dropped). Sites/Apps
+    ' are ";"-packed with a trailing ";" (Blocker.PackList/PackApps); UrlPatterns is
+    ' "|"-packed (P55). Neither separator can appear inside an entry - both are rejected at
+    ' arm - so a split can never fuse or split an entry wrongly. Pure + Shared.
+    Friend Shared Function SplitPackedList(ByVal packed As String, ByVal separator As Char) As List(Of String)
+        Dim outList As New List(Of String)
+        If packed Is Nothing OrElse packed = "" Then Return outList
+        For Each tok As String In packed.Split(separator)
+            Dim t As String = tok.Trim()
+            If t <> "" Then outList.Add(t)
+        Next
+        Return outList
+    End Function
+
+    ' Has THIS slot's own end genuinely passed? Fail-closed on every axis, exactly like
+    ' BlockHasExpired (which it delegates to): an unparseable Until is NOT expired, and a
+    ' slot with no Until at all (PENDING, or a SCHEDULE slot before the CLI writes the
+    ' sentinel) is NOT expired either - "no recorded end" can never mean "over". Pure.
+    Friend Shared Function SlotExpired(ByVal slot As SlotState, ByVal asOf As DateTime, ByVal graceSeconds As Long) As Boolean
+        If slot Is Nothing Then Return False
+        If slot.UntilText = "" Then Return False
+        Return BlockHasExpired(slot.UntilText, asOf, graceSeconds)
+    End Function
+
+    ' Does this slot keep the machine's ENFORCEMENT MACHINERY up (the guardian peer, the
+    ' SafeBoot keys, the DoH policy, the deny-DELETE ACE, the hosts repair)? The per-slot
+    ' twin of BlockHeld, and fail-closed the same way:
+    '   * macValid = False   => HELD (freeze: a tampered config never stands anything down);
+    '   * not expired        => HELD (which includes a PENDING slot: its machinery must be
+    '                           up and re-asserted BEFORE its start moment arrives);
+    '   * an open schedule window => HELD (SD1).
+    ' Note the deliberate difference from SlotEnforcesNow below: "keep the machinery up" is
+    ' NOT the same question as "are this slot's sites blocked right now". Pure + Shared.
+    Friend Shared Function SlotHeld(ByVal slot As SlotState, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As Boolean
+        If Not macValid Then Return True
+        If slot Is Nothing Then Return False
+        Return (Not SlotExpired(slot, asOf, graceSeconds)) OrElse ScheduleActive(slot.ScheduleActiveUntil, highWaterText)
+    End Function
+
+    ' The OR-fold over every slot - the gate all five per-tick self-heals take. macValid =
+    ' False returns True BEFORE the loop, so a frozen config holds even with zero readable
+    ' slots (the empty-list case is exactly where a plain Any() fold would fail OPEN).
+    ' Pure + Shared.
+    Friend Shared Function AnyBlockHeld(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As Boolean
+        If Not macValid Then Return True
+        If slots Is Nothing Then Return False
+        For Each s As SlotState In slots
+            If SlotHeld(s, asOf, graceSeconds, macValid, highWaterText) Then Return True
+        Next
+        Return False
+    End Function
+
+    ' Is THIS slot's own enforcement window OPEN at this instant - i.e. is its timer running?
+    ' Deliberately STRICTER than SlotHeld, and NOT the union-membership test (that is
+    ' SlotContributesLists below): a PENDING slot's timer has not started, so anything that
+    ' reasons about "is this block running" must say No. Fail-closed where it counts:
+    ' macValid = False reads every slot as running (a frozen config over-blocks rather than
+    ' losing anything). Pure + Shared.
+    Friend Shared Function SlotEnforcesNow(ByVal slot As SlotState, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As Boolean
+        If slot Is Nothing Then Return False
+        If Not macValid Then Return True
+        If slot.UntilText <> "" AndAlso Not SlotExpired(slot, asOf, graceSeconds) Then Return True   ' ACTIVE
+        Return ScheduleActive(slot.ScheduleActiveUntil, highWaterText)                               ' open window
+    End Function
+
+    ' P16: is this slot PENDING - armed with `--start` for later, its Until not yet computed?
+    ' Derived, never stored: StartAt set AND no Until. Pure + Shared.
+    Friend Shared Function SlotIsPending(ByVal slot As SlotState) As Boolean
+        If slot Is Nothing Then Return False
+        Return slot.StartAt <> "" AndAlso slot.UntilText = ""
+    End Function
+
+    ' Do this slot's LISTS belong in the enforced union and in the hosts heal source? Yes when
+    ' its window is open (SlotEnforcesNow) - and ALSO when it is PENDING.
+    '
+    ' The pending arm is load-bearing, not generosity. The CLI writes a pending slot's sites
+    ' into hosts AND into monkmode_hosts.block at arm (Program.vb DoBlock -> Blocker.Write-
+    ' HostsBlock), and S2's v9 guard-horizon mirror already enforces them from that moment, so
+    ' a `--start` slot over-blocks from arm time in this tree - accepted, and over-block only.
+    ' Leaving PENDING out here would make the P37 reconciler STRIP those already-written
+    ' entries out of the heal source within one tick, and NOTHING could ever put them back:
+    ' the P29 activation stamper that turns PENDING into ACTIVE does not exist until S3b, so
+    ' the slot never becomes enforcing. Every later hosts repair, crash re-block or reboot
+    ' would then rebuild hosts WITHOUT the scheduled block's sites - a block the CLI promised
+    ' and that would never once take effect. That is a strict-subset regression against v1.0,
+    ' the one place the unions would not be a superset, so PENDING is in.
+    ' Fail-closed: macValid = False already returns True via SlotEnforcesNow. Pure + Shared.
+    Friend Shared Function SlotContributesLists(ByVal slot As SlotState, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As Boolean
+        Return SlotEnforcesNow(slot, asOf, graceSeconds, macValid, highWaterText) OrElse SlotIsPending(slot)
+    End Function
+
+    ' The shared body of the three unions: first-occurrence order, deduped case-insensitively
+    ' (domains and exe names are both case-insensitive on Windows, and a case-only duplicate
+    ' would just emit a second identical hosts line). WIDEN-ONLY by construction - it can only
+    ' ever ADD entries to whatever the caller already had. Pure + Shared.
+    Private Shared Function UnionContributedSlotLists(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String, ByVal pick As Func(Of SlotState, List(Of String))) As List(Of String)
+        Dim outList As New List(Of String)
+        If slots Is Nothing Then Return outList
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        For Each s As SlotState In slots
+            If Not SlotContributesLists(s, asOf, graceSeconds, macValid, highWaterText) Then Continue For
+            Dim items As List(Of String) = pick(s)
+            If items Is Nothing Then Continue For
+            For Each item As String In items
+                Dim t As String = If(item, "").Trim()
+                If t <> "" AndAlso seen.Add(t) Then outList.Add(t)
+            Next
+        Next
+        Return outList
+    End Function
+
+    ' The hosts UNION: the blocked sites of every slot whose lists count right now (open, or
+    ' PENDING - see SlotContributesLists). A domain named by two slots appears ONCE (dedup is
+    ' per host name, exactly like BuildHostsEntries' own dedup).
+    Friend Shared Function UnionSlotSites(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As List(Of String)
+        Return UnionContributedSlotLists(slots, asOf, graceSeconds, macValid, highWaterText, Function(s) s.Sites)
+    End Function
+
+    ' The app-kill UNION, over the same slots as the hosts union. Appended to the v9 kill list
+    ' by the tick (never replacing it), so the matcher can only ever gain names.
+    Friend Shared Function UnionSlotApps(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As List(Of String)
+        Return UnionContributedSlotLists(slots, asOf, graceSeconds, macValid, highWaterText, Function(s) s.Apps)
+    End Function
+
+    ' The URL-pattern UNION (P55 lists). NOTE: nothing enforces URL patterns yet - the F2
+    ' in-browser UIA watcher that consumes them is a later slice. The fold lives here so the
+    ' three unions are defined and tested together and so F2 wires to a pinned reader instead
+    ' of inventing a fourth traversal of the slots.
+    Friend Shared Function UnionSlotUrlPatterns(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As List(Of String)
+        Return UnionContributedSlotLists(slots, asOf, graceSeconds, macValid, highWaterText, Function(s) s.UrlPatterns)
+    End Function
+
+    ' Does any slot contributing lists ask for the cross-session app kill? Same membership as
+    ' the unions (so a slot's apps and the scope they are killed in can never disagree), and
+    ' widen-only exactly like the v9 [Process] AllSession read it is OR'd with: a "yes" can
+    ' only ever ADD kills, never remove one.
+    Friend Shared Function AnySlotAllSessionKill(ByVal slots As List(Of SlotState), ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal highWaterText As String) As Boolean
+        If slots Is Nothing Then Return False
+        For Each s As SlotState In slots
+            If SlotContributesLists(s, asOf, graceSeconds, macValid, highWaterText) AndAlso
+               String.Equals(If(s.AllSession, ""), "yes", StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    ' P36: the POSITION (1-based) holding the slot whose Id is slotId, or 0 if no position
+    ' does. TOP RISK 2 lives here: positions are not stable (a retire/compaction renumbers
+    ' them), so a writer that trusted a position captured before a reload could update a
+    ' DIFFERENT block's field - the mis-adjudicated-lift class. Every per-slot write
+    ' re-locates by Id instead. Uses the CLAMPED SlotCount, never the raw stored value, so a
+    ' forged count can't widen the scan. Pure + Shared (unit-pinned).
+    Friend Shared Function FindSlotPositionById(ByVal ini As IniFile, ByVal slotId As String) As Integer
+        If ini Is Nothing Then Return 0
+        Dim wanted As String = If(slotId, "").Trim()
+        If wanted = "" Then Return 0
+        Dim count As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+        For pos As Integer = 1 To count
+            Dim stored As String = If(ini.GetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), "Id"), "").Trim()
+            If String.Equals(stored, wanted, StringComparison.Ordinal) Then Return pos
+        Next
+        Return 0
+    End Function
+
     ' The effective app-kill set for this tick (design §6.3, the app-kill UNION / SD2). It is
     ' the manual [Process] List, plus - ONLY while a scheduled window is open (scheduleActive) -
     ' the schedule's own apps. Returned as the SAME delimited, .Contains-searchable string the
@@ -2015,13 +2381,80 @@ Public Class Service1
         End Try
     End Sub
 
+    ' ---- P37 (v1.1 S3a): hosts-snapshot RECONCILIATION, the single anti-race invariant ----
+    '
+    ' monkmode_hosts.block is the MAC-INDEPENDENT on-disk copy of what should be in hosts:
+    ' the B2 self-heal repairs FROM it, and ReassertHostsFailClosed's crash backstop re-blocks
+    ' FROM it. With N slots it can drift from config truth at a dozen crash points (an arm that
+    ' wrote the config and died before the snapshot; a CLI arm racing a service retire; a
+    ' snapshot hand-edited between ticks). Rather than patch each of those incrementally, EVERY
+    ' tick compares the snapshot's entry SET with the union of the slots whose lists count now
+    ' (SlotContributesLists - open OR pending) and, on ANY difference, rewrites the snapshot
+    ' from config truth. That single step subsumes every incremental patch and self-heals every
+    ' crash point, grow or shrink.
+    '
+    ' The truth set is deliberately the CONTRIBUTING slots, not the ENFORCING ones. A PENDING
+    ' slot's sites are already in hosts and in this snapshot (the CLI wrote them at arm), and
+    ' nothing in the tree turns PENDING into ACTIVE until S3b ships the P29 activation stamper
+    ' - so reconciling against "enforcing" alone would strip a scheduled block's sites out of
+    ' the heal source permanently, and every later repair/crash-reblock/reboot would rebuild
+    ' hosts without them. See SlotContributesLists.
+    '
+    ' Two hard gates:
+    '  * macValid = False => the snapshot is NEVER touched. A frozen config keeps the snapshot
+    '    it has, for the self-heal and the crash backstop - the same fail-closed rule
+    '    ClassifyScheduleSnapshot takes (every macValid=False case reads as a manual hold).
+    '  * an EMPTY truth set => leave it alone (R1). "Nothing is enforcing" is exactly the state
+    '    in which a rewrite would BLANK the snapshot, and a blanked snapshot is a torn-down
+    '    block. Retiring a slot and clearing the snapshot at the end is the teardown path's
+    '    job (stopMe deletes it), never this reconciler's.
+
+    ' The entry lines of a hosts marker block as a SET: the marker line and blank lines are
+    ' excluded, so a difference means a genuinely different set of blocked hosts rather than
+    ' formatting noise. Pure + Shared.
+    Friend Shared Function HostsBlockEntrySet(ByVal blockText As String) As HashSet(Of String)
+        Dim entries As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If blockText Is Nothing OrElse blockText = "" Then Return entries
+        For Each raw As String In blockText.Split(New String() {vbCrLf, vbLf}, StringSplitOptions.None)
+            Dim ln As String = raw.Trim()
+            If ln = "" OrElse String.Equals(ln, HostsMarker, StringComparison.Ordinal) Then Continue For
+            entries.Add(ln)
+        Next
+        Return entries
+    End Function
+
+    ' Do the snapshot and config truth disagree about WHICH hosts are blocked? Pure + Shared.
+    Friend Shared Function SnapshotNeedsReconcile(ByVal snapshotText As String, ByVal expectedBlock As String) As Boolean
+        Return Not HostsBlockEntrySet(snapshotText).SetEquals(HostsBlockEntrySet(expectedBlock))
+    End Function
+
+    ' The thin file-I/O wrapper (the ProcessScheduleSnapshot pattern - explicit path so unit
+    ' tests drive it against a temp file, never the real snapshot). truthSites = the union of
+    ' the ENFORCING slots' sites plus any open schedule's own sites. Best-effort; NEVER throws.
+    Friend Shared Sub ReconcileHostsSnapshot(ByVal snapshotPath As String, ByVal macValid As Boolean, ByVal truthSites As List(Of String))
+        Try
+            If Not macValid Then Return                                         ' frozen: never touch it
+            If truthSites Is Nothing OrElse truthSites.Count = 0 Then Return    ' R1: never blank it
+            Dim entries As String = BuildHostsEntries(truthSites)
+            If entries = "" Then Return                                         ' every site normalised away
+            Dim expected As String = HostsMarker & vbCrLf & entries
+            Dim existing As String = ""
+            If System.IO.File.Exists(snapshotPath) Then existing = System.IO.File.ReadAllText(snapshotPath)
+            If Not SnapshotNeedsReconcile(existing, expected) Then Return        ' already truth: no churn
+            System.IO.File.WriteAllText(snapshotPath, expected)
+        Catch ex As Exception
+        End Try
+    End Sub
+
     ' ---- the wall-clock window evaluator (pure; the schedule's WHEN half) ----
     '
     ' Reference types so the C# unit tests (InternalsVisibleTo) can inspect them as
     ' monkmode.Service1.ParsedSchedule / ScheduleWindow / ScheduleOpen.
 
     ' One recurring window: a day-of-week mask (bit 0 = Mon .. bit 6 = Sun), an open
-    ' minute-of-day and a close minute-of-day, open < close (same-day only, SD3).
+    ' minute-of-day and a close minute-of-day. open < close is a same-day window; open >
+    ' close is an OVERNIGHT (wrapped) window whose tail lands on the day AFTER the masked
+    ' day (P20); open = close is never legal.
     Friend Class ScheduleWindow
         Public DayMask As Integer
         Public OpenMinutes As Integer
@@ -2046,9 +2479,25 @@ Public Class Service1
         Public RemainingSeconds As Long
     End Class
 
-    ' The grammar-version tag the Spec always leads with, so C6 can extend the grammar
-    ' (v1 -> v2) without a canonical bump. Pinned by a unit test.
-    Friend Const ScheduleSpecGrammarVersion As String = "v1"
+    ' The grammar-version tag the Spec always leads with, so the grammar can be extended
+    ' without a canonical bump. Pinned by a unit test.
+    '
+    ' P19 (v1.1 S3a) - bumped "v1" -> "v2" WITH the overnight (wrapped) window grammar, and
+    ' the bump is LOAD-BEARING, not cosmetic: under v1 code TryParseWindow skipped any token
+    ' with openMin >= closeMin, so a v2 wrapped token ("2230-0400") fed to a v1 binary would
+    ' VANISH silently - a fail-OPEN. With the tag bumped, a v2 Spec under a v1 binary fails
+    ' the tag check and parses to ZERO windows instead (inert, and the v10 canonical has
+    ' already frozen that config anyway, since a v1-era binary carries an older schema).
+    Friend Const ScheduleSpecGrammarVersion As String = "v2"
+
+    ' The LEGACY grammar tag, still accepted by the parser (never emitted). A v1 Spec means
+    ' STRICT same-day windows (SD3): a v1 writer could not emit a wrapped token, so treating
+    ' one as a wrap would be inventing a window nobody armed. Accepting v1 keeps an existing
+    ' v1-armed schedule ENFORCED under new binaries (dropping it would be the under-block);
+    ' it is inert in production anyway, because a config armed by a v1-era binary carries a
+    ' pre-v10 schema and therefore fails the MAC -> freeze. The WRITER only ever emits
+    ' ScheduleSpecGrammarVersion.
+    Friend Const ScheduleSpecGrammarVersionLegacy As String = "v1"
 
     ' C5b (c2): the schedule-only PAST [Time] Until SENTINEL (design §4B). A schedule-only
     ' block has no manual duration, so the CLI (c3) writes THIS fixed, clearly-past,
@@ -2070,18 +2519,29 @@ Public Class Service1
     ' is inert - a self-authored garbage rule must never INVENT a phantom permanent
     ' block, and it never disturbs the manual block or the MAC). A TAMPERED Spec, by
     ' contrast, fails the MAC upstream -> freeze (B7). Pure; no filesystem/DPAPI.
-    '   Spec := "v1" ";" windowList ";" "sites=" siteList ";" "apps=" appList
+    '   Spec := ("v1"|"v2") ";" windowList ";" "sites=" siteList ";" "apps=" appList
     '   window := dayMask ":" HHMM "-" HHMM   (dayMask = chars '1'..'7' = Mon..Sun)
+    ' P20: under "v2" an END BEFORE the start means the window WRAPS past midnight
+    ' (2230-0400); under the legacy "v1" tag a wrapped token is still skipped (SD3).
     Friend Shared Function ParseSchedule(ByVal specText As String) As ParsedSchedule
         Dim result As New ParsedSchedule()
         If String.IsNullOrWhiteSpace(specText) Then Return result
         Dim parts() As String = specText.Split(";"c)
         ' Need at least the version tag + the window list; an unknown tag is inert.
         If parts.Length < 2 Then Return result
-        If parts(0).Trim() <> ScheduleSpecGrammarVersion Then Return result
+        ' The TAG selects the grammar: only v2 admits wrapped (overnight) windows.
+        Dim tag As String = parts(0).Trim()
+        Dim allowWrap As Boolean
+        If tag = ScheduleSpecGrammarVersion Then
+            allowWrap = True
+        ElseIf tag = ScheduleSpecGrammarVersionLegacy Then
+            allowWrap = False
+        Else
+            Return result
+        End If
         ' Windows (comma-separated); skip any malformed one, keep the rest.
         For Each winTok As String In parts(1).Split(","c)
-            Dim w As ScheduleWindow = TryParseWindow(winTok)
+            Dim w As ScheduleWindow = TryParseWindow(winTok, allowWrap)
             If w IsNot Nothing Then result.Windows.Add(w)
         Next
         ' Sites / apps: locate by prefix among the remaining parts (order-tolerant,
@@ -2106,8 +2566,11 @@ Public Class Service1
     End Sub
 
     ' Parse one "dayMask:HHMM-HHMM" window; Nothing if malformed (fail-closed skip).
-    ' Enforces SD3: same-day only (open < close); rejects any out-of-range time or day.
-    Private Shared Function TryParseWindow(ByVal token As String) As ScheduleWindow
+    ' Rejects any out-of-range time or day. P20: openMin = closeMin is rejected in EVERY
+    ' grammar (zero-length, and "24 hours" would be an ambiguous second meaning for the same
+    ' token); openMin > closeMin is a WRAPPED overnight window under v2 (allowWrap) and the
+    ' old SD3 same-day rejection under the legacy v1 tag.
+    Private Shared Function TryParseWindow(ByVal token As String, ByVal allowWrap As Boolean) As ScheduleWindow
         If token Is Nothing Then Return Nothing
         Dim tok As String = token.Trim()
         If tok = "" Then Return Nothing
@@ -2120,12 +2583,27 @@ Public Class Service1
         Dim openMin As Integer = TryParseHhmm(times(0))
         Dim closeMin As Integer = TryParseHhmm(times(1))
         If openMin < 0 OrElse closeMin < 0 Then Return Nothing
-        If openMin >= closeMin Then Return Nothing         ' SD3: reject overnight / zero-length
+        If openMin = closeMin Then Return Nothing          ' zero-length / ambiguous 24h - never legal
+        If openMin > closeMin AndAlso Not allowWrap Then Return Nothing   ' SD3 under the v1 grammar
         Dim w As New ScheduleWindow()
         w.DayMask = mask
         w.OpenMinutes = openMin
         w.CloseMinutes = closeMin
         Return w
+    End Function
+
+    ' P20: does this window WRAP past midnight (its end is BEFORE its start)? The wrap is
+    ' derived from the times themselves - there is no stored flag to forge or to drift.
+    Friend Shared Function WindowIsWrapped(ByVal w As ScheduleWindow) As Boolean
+        Return w.OpenMinutes > w.CloseMinutes
+    End Function
+
+    ' P20: a window's length in minutes - (1440 - open + close) when it wraps past midnight,
+    ' (close - open) otherwise. Used for the SD4 jump-OVER duration and for the jump-over
+    ' close instant, so both stay correct for a wrapped window without a second formula.
+    Friend Shared Function WindowDurationMinutes(ByVal w As ScheduleWindow) As Integer
+        If WindowIsWrapped(w) Then Return 1440 - w.OpenMinutes + w.CloseMinutes
+        Return w.CloseMinutes - w.OpenMinutes
     End Function
 
     ' "12345" -> bitmask (bit 0 = Mon .. bit 6 = Sun). 0 if empty or any char is not
@@ -2162,7 +2640,9 @@ Public Class Service1
     ' The wall-clock evaluator (design §4.2). For each window decide OPEN? and the
     ' seconds to enforce, over the §4.2 matrix:
     '   * INSIDE now (normal / forward-jump-INTO / boot-inside): now in [open, close)
-    '     on a matching day -> OPEN, remaining = close - now.
+    '     on a matching day -> OPEN, remaining = close - now. For a WRAPPED window (P22)
+    '     "inside" is either today's pre-midnight segment (remaining = to midnight + close)
+    '     or the post-midnight tail of YESTERDAY's masked opening (remaining = close - now).
     '   * LIVE jump-OVER (running session only): the wall advanced past a whole window
     '     (crossed its open, now >= its close) AND the advance is a JUMP - the wall
     '     delta vastly exceeds the real monotonic elapsed (wallDelta - monoElapsed >
@@ -2194,12 +2674,31 @@ Public Class Service1
         For Each w As ScheduleWindow In windows
             Dim openSec As Double = w.OpenMinutes * 60.0
             Dim closeSec As Double = w.CloseMinutes * 60.0
-            If ScheduleDayMatches(nowDt, w.DayMask) AndAlso nowSec >= openSec AndAlso nowSec < closeSec Then
+            ' P22: the wrapped segment belongs to the START day's mask, so "inside" is three
+            ' cases, not one. (c) is the one that matters most: after midnight the calendar day
+            ' has ROLLED, so today's mask no longer names this window - only YESTERDAY's does.
+            ' Omitting (c) would drop the hold across a midnight reboot (isBoot re-evaluates
+            ' from scratch with no stored ActiveUntil to fall back on) = fail-OPEN.
+            Dim insideRemaining As Long = -1
+            If Not WindowIsWrapped(w) Then
+                ' (a) same-day window: today's mask AND open <= now < close.
+                If ScheduleDayMatches(nowDt, w.DayMask) AndAlso nowSec >= openSec AndAlso nowSec < closeSec Then
+                    insideRemaining = CLng(Math.Ceiling(closeSec - nowSec))
+                End If
+            ElseIf ScheduleDayMatches(nowDt, w.DayMask) AndAlso nowSec >= openSec Then
+                ' (b) wrapped, and we are in TODAY's pre-midnight segment: run to midnight,
+                ' then on to the close on the far side.
+                insideRemaining = CLng(Math.Ceiling((86400.0 - nowSec) + closeSec))
+            ElseIf ScheduleDayMatches(nowDt.Date.AddDays(-1), w.DayMask) AndAlso nowSec < closeSec Then
+                ' (c) wrapped, and we are in the post-midnight tail of YESTERDAY's opening.
+                insideRemaining = CLng(Math.Ceiling(closeSec - nowSec))
+            End If
+            If insideRemaining >= 0 Then
                 ' INSIDE now (covers normal ticks, forward-jump-INTO, boot-inside).
-                opens.Add(NewScheduleOpen(w, CLng(Math.Ceiling(closeSec - nowSec))))
+                opens.Add(NewScheduleOpen(w, insideRemaining))
             ElseIf wallIsJump AndAlso ScheduleJumpedOver(w, lastNowDt, nowDt) Then
                 ' LIVE jump-OVER a whole window: enforce its FULL duration (SD4).
-                opens.Add(NewScheduleOpen(w, (w.CloseMinutes - w.OpenMinutes) * 60L))
+                opens.Add(NewScheduleOpen(w, WindowDurationMinutes(w) * 60L))
             End If
         Next
         Return opens
@@ -2215,7 +2714,8 @@ Public Class Service1
 
     ' Did the wall traversal (lastNow, now] leap over a whole instance of window w -
     ' i.e. is there a matching day whose open-instant is in (lastNow, now] and whose
-    ' same-day close is at/before now? Bounded backward scan from now.Date (day-of-week
+    ' close (open + duration; the NEXT day for a wrapped window, P23) is at/before
+    ' now? Bounded backward scan from now.Date (day-of-week
     ' repeats weekly, so a matching day is always within ~7 days of now; the 366 cap
     ' just bounds a pathological multi-year jump). Only called when wallIsJump is
     ' already established, so this is existence-only; the enforced duration is always
@@ -2225,8 +2725,11 @@ Public Class Service1
         Dim guard As Integer = 0
         While d >= lastNowDt.Date AndAlso guard <= 366
             If ScheduleDayMatches(d, w.DayMask) Then
+                ' P23: the close instant is the open instant PLUS the window's length, which
+                ' for a wrapped window lands on the NEXT day. Deriving it this way keeps the
+                ' same-day case byte-identical (d + open + (close - open) = d + close).
                 Dim openInstant As DateTime = d.AddMinutes(w.OpenMinutes)
-                Dim closeInstant As DateTime = d.AddMinutes(w.CloseMinutes)
+                Dim closeInstant As DateTime = openInstant.AddMinutes(WindowDurationMinutes(w))
                 If openInstant > lastNowDt AndAlso openInstant <= nowDt AndAlso nowDt >= closeInstant Then
                     Return True
                 End If
@@ -3293,4 +3796,4 @@ Public NotInheritable Class Simple3Des
         Return System.Text.Encoding.Unicode.GetString(ms.ToArray)
     End Function
 
-End Class
+End Class

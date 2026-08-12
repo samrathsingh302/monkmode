@@ -88,7 +88,7 @@ public class TryBuildScheduleSpecTests
         var ok = Build("Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00",
             new[] { "reddit.com", "news.ycombinator.com" }, new[] { "chrome.exe" }, out var spec, out var err);
         Assert.True(ok, err);
-        Assert.Equal("v1;12345:0900-1700,67:1000-1400;sites=reddit.com|news.ycombinator.com;apps=chrome.exe", spec);
+        Assert.Equal("v2;12345:0900-1700,67:1000-1400;sites=reddit.com|news.ycombinator.com;apps=chrome.exe", spec);
         // Round-trip through the service parser: 2 windows with the intended masks/times + lists.
         var p = monkmode.Service1.ParseSchedule(spec);
         Assert.Equal(2, p.Windows.Count);
@@ -99,12 +99,12 @@ public class TryBuildScheduleSpecTests
     }
 
     [Theory]
-    [InlineData("Wed 09:00-09:30", "v1;3:0900-0930;sites=x.com;apps=")]
-    [InlineData("Mon-Wed,Fri 08:00-12:00", "v1;1235:0800-1200;sites=x.com;apps=")]         // range + list
-    [InlineData("mon,MON,Monday 08:00-12:00", "v1;1:0800-1200;sites=x.com;apps=")]         // case + dedupe + long name
-    [InlineData("Mon-Sun 00:00-23:59", "v1;1234567:0000-2359;sites=x.com;apps=")]          // full week, min/max times
-    [InlineData("Tue 9:05-9:30", "v1;2:0905-0930;sites=x.com;apps=")]                      // 1-digit hour -> zero-padded
-    [InlineData("Sat, Sun 10:00-14:00", "v1;67:1000-1400;sites=x.com;apps=")]              // space after the comma
+    [InlineData("Wed 09:00-09:30", "v2;3:0900-0930;sites=x.com;apps=")]
+    [InlineData("Mon-Wed,Fri 08:00-12:00", "v2;1235:0800-1200;sites=x.com;apps=")]         // range + list
+    [InlineData("mon,MON,Monday 08:00-12:00", "v2;1:0800-1200;sites=x.com;apps=")]         // case + dedupe + long name
+    [InlineData("Mon-Sun 00:00-23:59", "v2;1234567:0000-2359;sites=x.com;apps=")]          // full week, min/max times
+    [InlineData("Tue 9:05-9:30", "v2;2:0905-0930;sites=x.com;apps=")]                      // 1-digit hour -> zero-padded
+    [InlineData("Sat, Sun 10:00-14:00", "v2;67:1000-1400;sites=x.com;apps=")]              // space after the comma
     public void DayAndTimeForms_SerialiseAndRoundTripToAtLeastOneWindow(string windows, string expectedSpec)
     {
         var ok = Build(windows, new[] { "x.com" }, System.Array.Empty<string>(), out var spec, out var err);
@@ -118,7 +118,7 @@ public class TryBuildScheduleSpecTests
     {
         var ok = Build("Mon 09:00-17:00", new[] { "HTTPS://Reddit.com/r/all", "  spaced.com  " }, System.Array.Empty<string>(), out var spec, out var err);
         Assert.True(ok, err);
-        Assert.Equal("v1;1:0900-1700;sites=reddit.com|spaced.com;apps=", spec);
+        Assert.Equal("v2;1:0900-1700;sites=reddit.com|spaced.com;apps=", spec);
     }
 
     [Fact]
@@ -126,7 +126,7 @@ public class TryBuildScheduleSpecTests
     {
         var ok = Build("Mon 09:00-17:00", new[] { "x.com" }, new[] { "chrome", "discord.exe" }, out var spec, out var err);
         Assert.True(ok, err);
-        Assert.Equal("v1;1:0900-1700;sites=x.com;apps=chrome.exe|discord.exe", spec);
+        Assert.Equal("v2;1:0900-1700;sites=x.com;apps=chrome.exe|discord.exe", spec);
     }
 
     [Fact]
@@ -135,14 +135,16 @@ public class TryBuildScheduleSpecTests
         // A trailing ';' (empty clause) is skipped, not an error.
         var ok = Build("Mon 09:00-17:00;", new[] { "x.com" }, System.Array.Empty<string>(), out var spec, out var err);
         Assert.True(ok, err);
-        Assert.Equal("v1;1:0900-1700;sites=x.com;apps=", spec);
+        Assert.Equal("v2;1:0900-1700;sites=x.com;apps=", spec);
     }
 
     [Theory]
     [InlineData("", "window")]                              // no windows
     [InlineData("   ", "window")]
-    [InlineData("Mon 22:00-06:00", "must end after")]       // SD3 overnight (open >= close)
-    [InlineData("Mon 09:00-09:00", "must end after")]       // zero-length
+    // P21 (v1.1 S3a): an end BEFORE the start is no longer a refusal - it is an OVERNIGHT
+    // window (see OvernightWindowTests). Only the ZERO-LENGTH case is still refused, and with
+    // a message that TEACHES the overnight form instead of telling the user to split it.
+    [InlineData("Mon 09:00-09:00", "starts and ends at the same time")]
     [InlineData("Fri-Mon 09:00-17:00", "runs backwards")]   // reversed day range
     [InlineData("Xyz 09:00-17:00", "day")]                  // bad day name
     [InlineData("Mon Tue Wed 09:00-17:00", "day")]          // space-separated list -> rejected, NOT silently narrowed to Mon
@@ -354,11 +356,11 @@ public class ScheduleWriteConfigTests
 public class NotifierScheduleArmedGateTests
 {
     [Theory]
-    [InlineData("v1;12345:0900-1700;sites=x.com;apps=", true)]
-    [InlineData("v1;7:1000-1400;sites=x.com", true)]
+    [InlineData("v2;12345:0900-1700;sites=x.com;apps=", true)]
+    [InlineData("v2;7:1000-1400;sites=x.com", true)]
     [InlineData("", false)]                        // manual block / cleared schedule
     [InlineData("garbage", false)]                 // unparseable -> inert
-    [InlineData("v1;99:9999-0000;sites=x", false)] // every window malformed -> 0 windows
+    [InlineData("v2;99:9999-0000;sites=x", false)] // every window malformed -> 0 windows
     public void ScheduleArmed_MatchesTheService_ExactDerivation(string spec, bool armed)
     {
         // The notifier derives armed EXACTLY as the service (macValid AND ParseSchedule has a window)

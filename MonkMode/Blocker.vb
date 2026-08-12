@@ -77,7 +77,10 @@ Module Blocker
     ' the c2 scheduleArmed guard keeps the service+guardian alive between windows. The Spec always
     ' leads with the grammar-version tag so the service parser accepts it.
     Public Const ScheduleOnlyExpiredUntil As String = "1970-01-01 00:00:00"
-    Public Const ScheduleSpecGrammarVersion As String = "v1"
+    ' P19 (v1.1 S3a): "v1" -> "v2" WITH the overnight (wrapped) window grammar. Load-bearing:
+    ' a v2 wrapped token ("2230-0400") fed to a v1 parser would be SKIPPED silently (fail-open),
+    ' whereas an unknown tag parses to zero windows. The CLI only ever emits this tag.
+    Public Const ScheduleSpecGrammarVersion As String = "v2"
     Public Const Marker As String = "#### MonkMode Entries ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
@@ -217,6 +220,23 @@ Module Blocker
             Dim untilStr As String = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
             Dim hwStr As String = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))
             Return Not BlockGenuinelyExpired(True, untilStr, hwStr)
+        Catch
+            Return True
+        End Try
+    End Function
+
+    ' v1.1 S3a: is at least one SLOT armed? Used only to refuse `add`, which still appends to
+    ' the v9 [User] CustomSites and the hosts snapshot and to NO slot, while the service now
+    ' reconciles that snapshot to the SLOTS every tick (P37) - so an added site would be
+    ' stripped back out within ~10s. Fail-SAFE: any read failure reads as ARMED, because the
+    ' refusal costs the user one re-run of `block` while a false "not armed" would let `add`
+    ' quietly no-op. (P42/S5 makes `add` service-adjudicated and per-slot.)
+    Public Function AnySlotArmed() As Boolean
+        Try
+            If Not File.Exists(IniPath()) Then Return False
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            Return ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount")) > 0
         Catch
             Return True
         End Try
@@ -1589,9 +1609,11 @@ Module Blocker
         Return (minutes \ 60).ToString("00", CultureInfo.InvariantCulture) & (minutes Mod 60).ToString("00", CultureInfo.InvariantCulture)
     End Function
 
-    ' Parse one human window clause ("Mon-Fri 09:00-17:00", "Sat, Sun 10:00-14:00") into the compact
-    ' "dayMask:HHMM-HHMM" grammar token. Rejects overnight/zero-length (open >= close, SD3) and bad
-    ' days/times. Fail-closed: any error returns False + a friendly message.
+    ' Parse one human window clause ("Mon-Fri 09:00-17:00", "Sat, Sun 10:00-14:00", "Mon-Sun
+    ' 22:30-04:00") into the compact "dayMask:HHMM-HHMM" grammar token. P21: an end BEFORE the
+    ' start is now an OVERNIGHT window (the wrapped v2 grammar), so only the ZERO-LENGTH case
+    ' (open = close) is refused. Bad days/times still refuse. Fail-closed: any error returns
+    ' False + a friendly message and stamps nothing.
     Private Function TryParseWindowClause(ByVal clause As String, ByRef compactWindow As String, ByRef errorMsg As String) As Boolean
         compactWindow = ""
         Dim m As System.Text.RegularExpressions.Match =
@@ -1609,8 +1631,8 @@ Module Blocker
             errorMsg = "Could not understand the time in '" & clause.Trim() & "'. Use 24-hour HH:MM, e.g. 09:00-17:00."
             Return False
         End If
-        If openMin >= closeMin Then
-            errorMsg = "The window '" & clause.Trim() & "' must end after it starts (overnight windows aren't supported in this version - split it into two same-day windows)."
+        If openMin = closeMin Then
+            errorMsg = "The window '" & clause.Trim() & "' starts and ends at the same time. Use e.g. ""Mon-Fri 09:00-17:00"", or ""Mon-Sun 22:30-04:00"" for an overnight window."
             Return False
         End If
         compactWindow = maskChars & ":" & MinutesToHhmm(openMin) & "-" & MinutesToHhmm(closeMin)

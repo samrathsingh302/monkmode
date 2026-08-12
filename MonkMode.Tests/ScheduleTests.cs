@@ -77,11 +77,16 @@ namespace MonkMode.Tests;
 public class ScheduleConstTests
 {
     [Fact]
-    public void GrammarVersionTag_IsV1_AndParityAcrossServiceAndGuardianEvaluator()
+    public void GrammarVersionTag_IsV2_AndParityAcrossServiceAndGuardianEvaluator()
     {
-        // The Spec always leads with this tag so C6 can grow the grammar (v1 -> v2)
-        // WITHOUT a canonical bump. A retune is a single loud edit here.
-        Assert.Equal("v1", monkmode.Service1.ScheduleSpecGrammarVersion);
+        // The Spec always leads with this tag so the grammar can grow WITHOUT a canonical
+        // bump. A retune is a single loud edit here. v1.1 S3a (P19) bumped v1 -> v2 with the
+        // overnight (wrapped) window grammar: a v2 wrapped token fed to a v1 parser would
+        // have been SKIPPED silently (fail-open), so the tag had to move with the grammar.
+        Assert.Equal("v2", monkmode.Service1.ScheduleSpecGrammarVersion);
+        // The legacy tag is still ACCEPTED by the parser (never emitted), so a v1-armed
+        // schedule keeps enforcing under new binaries instead of silently going inert.
+        Assert.Equal("v1", monkmode.Service1.ScheduleSpecGrammarVersionLegacy);
     }
 
     // C5b (c2): the schedule-only past-[Time] Until SENTINEL (design §4B). It must be a REAL
@@ -139,7 +144,7 @@ public class ParseScheduleTests
     [InlineData("   ")]
     [InlineData(null)]
     [InlineData("garbage")]                          // no ';' -> < 2 parts -> inert
-    [InlineData("v2;12345:0900-1700;sites=x;apps=")] // unknown grammar tag -> inert
+    [InlineData("v3;12345:0900-1700;sites=x;apps=")] // unknown grammar tag -> inert (v1/v2 are the known ones)
     [InlineData("nope;12345:0900-1700;sites=x;apps=")]
     public void UnparseableOrUnknownTag_YieldsNoWindows_Inert(string? spec)
     {
