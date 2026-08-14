@@ -366,6 +366,12 @@ Module Program
         ' only ADD kills). No-op if no apps are blocked (nothing to kill), noted below only then.
         Dim allSessionKill As Boolean = HasFlag(args, "--all-session-kill")
 
+        ' M0 (F6): sample "is anything already armed?" HERE, BEFORE ArmSlot appends this
+        ' block's own slot - afterwards AnySlotArmed() is unconditionally True and the two
+        ' fresh-arm guards below could never fire. Both of them get this one reading:
+        ' the B5a DoH snapshot, and D4d's leftover-notifier kill.
+        Dim alreadyArmed As Boolean = Blocker.AnythingArmed()
+
         ' v1.1 S2: CONFIG FIRST, then the snapshot, then hosts. ArmSlot appends this block
         ' as a new slot (or refuses without side effects), mints its own partner code and
         ' returns it ONCE - only a salted, MAC-covered hash is ever persisted.
@@ -398,14 +404,26 @@ Module Program
         ' data loss). Must precede InstallAndStart - the service sets the policy in
         ' its OnStart. Never aborts arming the block; if it fails, teardown will
         ' leave the DoH-off policy in place rather than risk deleting a user value.
-        If Not Blocker.WriteDohSnapshot() Then
-            Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at expiry rather than restore/remove it.")
+        '
+        ' M0 (F6): ONLY on a genuinely fresh arm. Re-snapshotting beside a live block
+        ' captures MonkMode's OWN forced-off DoH policy as "the user's prior", and
+        ' teardown then restores that and consumes the snapshot - the P0 the 13/08
+        ' estate bug-hunt found live on this machine. Full argument at
+        ' Blocker.ShouldSnapshotDohPolicy. On a non-fresh arm the EXISTING snapshot is
+        ' the truth and is left untouched; nothing is warned about, because nothing
+        ' was lost.
+        If Blocker.ShouldSnapshotDohPolicy(alreadyArmed, Blocker.DohSnapshotExists()) Then
+            If Not Blocker.WriteDohSnapshot() Then
+                Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at expiry rather than restore/remove it.")
+            End If
         End If
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
-        ' D4d rider: a MANUAL arm clears an orphaned notifier first, so this block's
-        ' fresh spawn wins D4c's single-instance claim instead of standing down behind
-        ' a leftover pointed at the previous block (Blocker.ManualArmKillsLeftovers).
-        Blocker.RegisterAndLaunchNotifier(Blocker.ManualArmKillsLeftovers)
+        ' D4d rider: a FRESH manual arm clears an orphaned notifier first, so this block's
+        ' spawn wins D4c's single-instance claim instead of standing down behind a leftover
+        ' pointed at the previous block. M0 rider (F6): when something is ALREADY armed the
+        ' notifier it would kill is not an orphan but the live block's working one, so the
+        ' arm leaves it alone - see Blocker.ManualArmKillPolicy.
+        Blocker.RegisterAndLaunchNotifier(Blocker.ManualArmKillPolicy(alreadyArmed))
 
         ' D3b: record this arm to the separate, non-MAC stats history (best-effort - Stats.RecordBlockStart
         ' swallows every error and never throws, so a stats failure can't perturb the block just armed
@@ -619,11 +637,20 @@ Module Program
         ' clears any stale hosts snapshot left by a prior block (so the service's window-open union
         ' starts clean). Neither runs on a re-arm: re-snapshotting DoH mid-open-window would capture
         ' our own forced-off state as the "prior", and a live schedule snapshot must not be dropped.
-        Dim freshArm As Boolean = Not Blocker.ScheduleIsArmed()
-        If freshArm Then
+        '
+        ' M0 (F6): "nothing armed yet" now means nothing at all - SLOTS as well as a schedule. This
+        ' guard was written when a schedule was the only thing that could already be running; v1.1 S2
+        ' lets a manual block coexist, so `schedule` beside a live manual block hit the SAME
+        ' re-snapshot bug the manual path did. Both changes only ever do LESS: one fewer DoH
+        ' overwrite, and one fewer hosts-snapshot deletion (deleting it while a slot is armed would
+        ' strip that slot's sites out of the B2 repair source, which nothing would put back).
+        Dim alreadyArmed As Boolean = Blocker.AnythingArmed()
+        If Blocker.ShouldSnapshotDohPolicy(alreadyArmed, Blocker.DohSnapshotExists()) Then
             If Not Blocker.WriteDohSnapshot() Then
                 Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at teardown rather than restore/remove it.")
             End If
+        End If
+        If Not alreadyArmed Then
             Blocker.DeleteSnapshot()
         End If
 

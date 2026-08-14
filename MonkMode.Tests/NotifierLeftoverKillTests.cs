@@ -150,14 +150,57 @@ public class NotifierLeftoverKillTests
         Assert.False(MonkMode.Blocker.ShouldKillLeftoverNotifier("no", -1, true));
     }
 
-    // Call-site pin, manual arm (MonkMode\Program.vb, DoBlock): the argument it passes is
-    // this constant, asserted as a value AND composed through the gate - a manual arm with
-    // one orphan and a quiet clock kills.
+    // Call-site pin, manual arm (MonkMode\Program.vb, DoBlock): on a FRESH arm the argument
+    // it passes is this constant, asserted as a value AND composed through the gate - a
+    // fresh manual arm with one orphan and a quiet clock kills. (Since M0/F6 the call site
+    // routes through ManualArmKillPolicy; the fresh branch returns exactly this constant.)
     [Fact]
     public void ManualCaller_PassesTrue()
     {
         Assert.True(MonkMode.Blocker.ManualArmKillsLeftovers);
         Assert.True(MonkMode.Blocker.ShouldKillLeftoverNotifier("no", 1, MonkMode.Blocker.ManualArmKillsLeftovers));
+    }
+
+    // M0 rider (F6): the manual arm's kill policy is only right for a FRESH arm.
+    //
+    // D4d's whole argument above is that the notifier a manual arm finds is an ORPHAN - a
+    // leftover from a block that no longer exists. v1.1 S2 removed the one-block-at-a-time
+    // refusal, so `monkmode block` can now land beside a LIVE block whose notifier is
+    // healthy and doing user-session app-kill and clock-change compensation. Killing that
+    // one opens exactly the enforcement hole the schedule path already refuses to open, and
+    // it does so at the worst moment - the arm that is adding MORE to enforce.
+    //
+    // So a non-fresh manual arm takes the schedule path's answer. Nothing is lost: the
+    // notifier re-reads the ini every app-kill and poll tick, so the survivor picks up the
+    // newly armed slot within one tick, and a duplicate notifier only ever OVER-enforces.
+    [Theory]
+    [InlineData(false, true)]   // fresh manual arm: clear the orphan, as D4d intends
+    [InlineData(true, false)]   // something already armed: that notifier is not an orphan
+    public void ManualArmKillPolicy_OnlyAFreshArmKills(bool alreadyArmed, bool expected)
+    {
+        Assert.Equal(expected, MonkMode.Blocker.ManualArmKillPolicy(alreadyArmed));
+    }
+
+    // The policy resolves to the two existing named constants rather than bare literals, so
+    // there is still exactly ONE statement of each answer.
+    [Fact]
+    public void ManualArmKillPolicy_ReusesTheNamedConstants()
+    {
+        Assert.Equal(MonkMode.Blocker.ManualArmKillsLeftovers, MonkMode.Blocker.ManualArmKillPolicy(false));
+        Assert.Equal(MonkMode.Blocker.ScheduleArmKillsLeftovers, MonkMode.Blocker.ManualArmKillPolicy(true));
+    }
+
+    // Composed through the real gate: the SAME world (one live notifier, quiet clock) that
+    // makes a fresh manual arm kill must leave the live block's notifier alone on a second
+    // arm. This is the behaviour change, stated end-to-end.
+    [Fact]
+    public void SecondArmBesideALiveBlock_LeavesItsNotifierRunning()
+    {
+        Assert.True(MonkMode.Blocker.ShouldKillLeftoverNotifier("no", 1, MonkMode.Blocker.ManualArmKillPolicy(false)));
+        Assert.False(MonkMode.Blocker.ShouldKillLeftoverNotifier("no", 1, MonkMode.Blocker.ManualArmKillPolicy(true)));
+        // ...and the clock-change refusal still dominates on both branches.
+        Assert.False(MonkMode.Blocker.ShouldKillLeftoverNotifier("yes", 1, MonkMode.Blocker.ManualArmKillPolicy(false)));
+        Assert.False(MonkMode.Blocker.ShouldKillLeftoverNotifier("yes", 1, MonkMode.Blocker.ManualArmKillPolicy(true)));
     }
 
     // Call-site pin, schedule arm (MonkMode\Program.vb, DoSchedule): the same world that

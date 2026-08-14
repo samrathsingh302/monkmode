@@ -150,6 +150,19 @@ Module Blocker
         Return Path.Combine(AppDir(), DohSnapshotName)
     End Function
 
+    ' M0 (F6): does a DoH snapshot already exist? Fail-SAFE in the direction that
+    ' PRESERVES it: any read failure answers True ("assume one is there"), because
+    ' the cost of a false True is a lingering older-but-genuine prior, while a false
+    ' False overwrites the user's real prior policy with whatever is on the machine
+    ' right now - which, mid-block, is MonkMode's own forced-off state.
+    Public Function DohSnapshotExists() As Boolean
+        Try
+            Return File.Exists(DohSnapshotPath())
+        Catch
+            Return True
+        End Try
+    End Function
+
     Public Function HostsPath() As String
         Return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers", "etc", "hosts")
     End Function
@@ -1446,6 +1459,24 @@ Module Blocker
     Friend Const ManualArmKillsLeftovers As Boolean = True
     Friend Const ScheduleArmKillsLeftovers As Boolean = False
 
+    ' M0 rider (F6, 14/08/2026): the manual arm's kill policy is only right for a FRESH
+    ' arm. D4d's reasoning above assumes the notifier it finds is an ORPHAN - a leftover
+    ' from a block that is gone. Since v1.1 S2 removed the one-block-at-a-time refusal, a
+    ' manual arm can land beside a LIVE block whose notifier is healthy and doing
+    ' user-session app-kill and clock-change compensation. Killing that one is the exact
+    ' enforcement hole the schedule path already refuses to open ("never kill it for
+    ' tidiness"), so a non-fresh manual arm now takes the schedule path's answer.
+    '
+    ' Nothing is lost by not killing: the notifier re-reads the ini on every app-kill and
+    ' poll tick (MM_notify\Form1.vb), so the surviving instance picks up the newly armed
+    ' slot within one tick without being restarted, and a duplicate notifier only ever
+    ' OVER-enforces (ShouldKillLeftoverNotifier's header). A genuinely dead one is still
+    ' covered by the guardian's 10 s relaunch.
+    Friend Function ManualArmKillPolicy(ByVal anythingAlreadyArmed As Boolean) As Boolean
+        If anythingAlreadyArmed Then Return ScheduleArmKillsLeftovers
+        Return ManualArmKillsLeftovers
+    End Function
+
     ' Bounded retry for the leftover kill: at most 3 passes, 250 ms apart. Bounded
     ' because arming must never hang on a process that refuses to die - we give up and
     ' arm anyway (see ShouldKillLeftoverNotifier for why giving up is the safe side).
@@ -2609,6 +2640,56 @@ Module Blocker
     ' Returns True on success. False => teardown can't restore the user's prior DoH
     ' policy (it will DO NOTHING at expiry - fail-safe, our "off" may linger), so the
     ' caller warns the user. Never throws / never aborts arming the block.
+    ' M0 (F6, 14/08/2026) - THE fix for the P0 the 13/08 estate bug-hunt found live on
+    ' this machine: may THIS arm take a DoH snapshot? PURE, so the truth table is pinned
+    ' without touching HKLM or the SCM (the ShouldFreshRewrite / ShouldKillLeftoverNotifier
+    ' shape).
+    '
+    ' The bug. B5a snapshots the user's browser DoH policy at block start and restores it
+    ' at teardown. Until now the MANUAL arm path took that snapshot UNCONDITIONALLY, while
+    ' the schedule path had always guarded it (Program.vb DoSchedule). That was survivable
+    ' only while v1.0 refused a second block outright; v1.1 S2 removed that refusal, so
+    ' `block` can now arm beside a live block. Arm twice and the second snapshot reads the
+    ' policy the SERVICE has already forced OFF and records it as "the user's prior" -
+    ' teardown then dutifully "restores" DoH=off and CONSUMES the snapshot, so the real
+    ' prior is gone for good. Observed live: two arms 2 s apart on 12/08/2026 (22:26:03 and
+    ' 22:26:05 in dist\monkmode_stats), and every browser on the machine left with DoH
+    ' force-disabled by machine policy with no record able to restore it.
+    '
+    ' The rule: snapshot ONLY on a genuinely fresh arm - nothing already armed, and no
+    ' snapshot already on disk. Both conditions are load-bearing and neither implies the
+    ' other:
+    '   - anythingArmed covers the live case (a second arm beside a running block, whether
+    '     the first is a manual slot or a schedule window). Its live source AnySlotArmed()
+    '     already fails SAFE to True on an unreadable config, which lands here as "don't
+    '     snapshot" - the preserving direction.
+    '   - snapshotExists is the backstop that makes the guard hold even when the armed
+    '     reading is wrong (a tampered/frozen config, or ScheduleIsArmed()'s catch, which
+    '     answers False on a failed read). An existing snapshot is by definition an older
+    '     record of the user's prior policy, and older-but-genuine beats newer-but-ours.
+    '     It is also what stops a machine that is ALREADY poisoned from re-poisoning
+    '     itself on the next arm.
+    '
+    ' Not snapshotting is always the safe side, because RemoveDohPolicy's no-snapshot path
+    ' DOES NOTHING rather than delete a value it cannot prove MonkMode created (the same
+    ' no-data-loss fence). Worst case is a lingering "off" the user can clear by hand;
+    ' the alternative is silently overwriting their real setting.
+    Friend Function ShouldSnapshotDohPolicy(ByVal anythingArmed As Boolean,
+                                            ByVal snapshotExists As Boolean) As Boolean
+        If anythingArmed Then Return False
+        If snapshotExists Then Return False
+        Return True
+    End Function
+
+    ' The live read of "is anything already armed?" for the gate above. Slots OR a
+    ' schedule: since v1.1 S2 the two coexist, so either one means the service may
+    ' already have forced DoH off. Sampled by the CLI BEFORE it arms - once ArmSlot has
+    ' appended this block's own slot, AnySlotArmed() is unconditionally True and the gate
+    ' could never fire.
+    Public Function AnythingArmed() As Boolean
+        Return AnySlotArmed() OrElse ScheduleIsArmed()
+    End Function
+
     Public Function WriteDohSnapshot() As Boolean
         Try
             Dim ents As DohPolicy.DohPolicyEntry() = DohPolicy.Entries
