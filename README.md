@@ -9,7 +9,7 @@ its own administrator.
 
 MonkMode is a personal fork of the open-source [Cold Turkey](#upstream--licence)
 blocker (GPLv3): a 2011 VB.NET 2.0 WinForms codebase that no longer built,
-modernised to .NET 8, converted to a CLI, threat-modelled, tested and hardened.
+modernised to .NET 10 LTS, converted to a CLI, threat-modelled, tested and hardened.
 
 ```
 monkmode setup --partner "Alex (alex@example.com)"   # required once, first run
@@ -145,7 +145,7 @@ This fork is where the actual work is — the inherited codebase was a starting
 point, not a product:
 
 - **Legacy modernisation:** VB.NET 2010 / .NET Framework 2.0 → SDK-style
-  **.NET 8** (`net8.0-windows`). The public source had *never* built — it
+  **.NET 10 LTS** (`net10.0-windows`, retargeted from .NET 8 by v1.1 slice S0b, 12/08/2026). The public source had *never* built — it
   referenced a third-party `ServiceTools` helper that was never shipped;
   replaced with a hand-written advapi32 P/Invoke layer
   ([`MonkMode/ServiceTools.vb`](MonkMode/ServiceTools.vb)).
@@ -185,7 +185,7 @@ point, not a product:
 
 ## Building & running
 
-- Target: .NET 8 (`net8.0-windows`), VB.NET, SDK-style projects.
+- Target: .NET 10 LTS (`net10.0-windows`), VB.NET, SDK-style projects.
 - Build everything: open `MonkMode.sln` in Visual Studio 2022, or:
 
       dotnet build MonkMode.sln -c Release
@@ -205,7 +205,7 @@ point, not a product:
 
 - `monkmode.exe` requests Administrator elevation (it edits the hosts file and
   installs/starts the service via the Service Control Manager). Requires the
-  .NET 8 desktop runtime.
+  .NET 10 desktop runtime.
 
 ## Removing a block or the service
 
@@ -237,7 +237,7 @@ complete corresponding source for any build is this repository, on the
 
     https://github.com/samrathsingh302/monkmode
 
-Build it with the .NET 8 SDK (`dotnet build MonkMode.sln -c Release`) and
+Build it with the .NET 10 SDK (`dotnet build MonkMode.sln -c Release`) and
 assemble a runnable folder with `tools\build-dist.ps1` — see
 [Building & running](#building--running). All use is governed by the GPLv3 terms
 in [COPYING](COPYING).

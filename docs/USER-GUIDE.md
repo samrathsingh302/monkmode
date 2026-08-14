@@ -62,7 +62,7 @@ From an **elevated** PowerShell prompt, in the repo root:
 powershell -ExecutionPolicy Bypass -File tools\install.ps1
 ```
 
-That publishes a self-contained `win-x64` payload (bundling the .NET 8 runtime, so
+That publishes a self-contained `win-x64` payload (bundling the .NET 10 runtime, so
 the target machine needs no .NET installed), copies it to `C:\Program Files\MonkMode\`,
 and adds that folder to the machine `PATH`. Open a **new** elevated prompt afterwards
 so the updated `PATH` is picked up, then continue at Section 2 (`monkmode setup`).
@@ -87,7 +87,7 @@ Options: `-PayloadDir <folder>` installs a pre-built payload instead of publishi
 ### 1b. Build from source (manual / dev)
 
 If you would rather run from a plain `dist\` folder (the dev workflow, no Program Files
-copy), build and assemble it yourself. The .NET 8 SDK is user-scoped on this machine
+copy), build and assemble it yourself. The .NET 10 SDK is user-scoped on this machine
 (not on `PATH`), so call it by its full path:
 
 ```
@@ -133,7 +133,7 @@ dist\monkmode.exe setup --partner "Alex (alex@example.com)"
 dist\monkmode.exe block --sites reddit.com --for 2h
 ```
 
-Requires the .NET 8 desktop runtime. `monkmode.exe` requests Administrator
+Requires the .NET 10 desktop runtime. `monkmode.exe` requests Administrator
 elevation automatically (it edits the hosts file and installs/starts the service
 via the Service Control Manager).
 
