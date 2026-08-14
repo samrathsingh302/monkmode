@@ -278,4 +278,53 @@ Friend Module Guardian
         Return notifierInstanceCount <= 0
     End Function
 
+    '    M1 (F6, 14/08/2026): the guardian's own single-instance name and process
+    '    name. Kept here beside the other gates rather than in Program.vb, so the
+    '    stand-down decision and the two names it needs sit in one unit-tested place
+    '    (the SingleInstance.vb shape on the notifier's side).
+    Friend Const GuardianMutexName As String = "Global\MonkModeGuardian"
+    Friend Const GuardianProcessName As String = "mm_guard"
+
+    '    M1: the stand-down decision for a guardian that LOST the single-instance
+    '    claim - the exact port of MM_notify's SingleInstance.ShouldStandDown, which
+    '    was written against this same attack and which this half never received.
+    '
+    '    Losing the mutex alone is NOT enough to exit. The old code exited on that
+    '    signal alone, justified by a comment claiming a Global\ object needs
+    '    SeCreateGlobalPrivilege - which is FALSE for mutexes. SeCreateGlobalPrivilege
+    '    gates the creation of section (file-mapping) objects in the global namespace;
+    '    mutexes, events and semaphores are not covered, and the name carries a default
+    '    DACL. So ANY non-elevated same-machine process can create
+    '    "Global\MonkModeGuardian" first, hold it forever, and every guardian the
+    '    service ever spawns exits within milliseconds - the SYSTEM watchdog switched
+    '    off permanently by three lines, and the service's ShouldRestartPeer (which
+    '    counts processes, sees zero, and spawns again) turned into a 10 s spawn loop.
+    '    That is strictly worse than having no mutex at all, which is exactly the
+    '    argument SingleInstance.ShouldStandDown makes on the notifier's side.
+    '
+    '    So the loser also requires a SECOND real mm_guard process to exist. The count
+    '    includes self, so > 1 means another copy is genuinely live. In the real race
+    '    the mutex was meant to close (two service ticks both deciding to spawn) both
+    '    processes exist, the loser sees >= 2 and exits; a bare squatter leaves the
+    '    count at 1 and the guardian keeps guarding, unclaimed - the pre-mutex posture,
+    '    which is safe because a duplicate guardian only ever OVER-enforces (its two
+    '    actions are SCM-start-if-stopped and relaunch-notifier-if-none, both already
+    '    idempotent gates) and the service's own spawn gate stops it multiplying.
+    '
+    '    Fail-closed direction, unlike the notifier's fail-SOFT one: this process's
+    '    entire job is to keep enforcement alive, so every ambiguity resolves to "keep
+    '    guarding". The live wrapper in Program.vb therefore also keeps guarding when
+    '    the claim attempt itself THROWS - which is not hypothetical, since a squatter
+    '    can create a different KIND of kernel object under the same name and make the
+    '    Mutex constructor throw, a second three-line permanent kill.
+    '
+    '    Accepted residual, unchanged from the notifier's: a squatter who also runs a
+    '    decoy process named mm_guard.exe makes every real guardian count >= 2 and
+    '    stand down. That decoy ALREADY defeats the service's ShouldRestartPeer
+    '    (peerInstanceCount <= 0) today with no mutex involved, so this adds no new
+    '    capability.
+    Friend Function ShouldStandDown(ByVal claimLost As Boolean, ByVal guardianProcessCount As Integer) As Boolean
+        Return claimLost AndAlso guardianProcessCount > 1
+    End Function
+
 End Module

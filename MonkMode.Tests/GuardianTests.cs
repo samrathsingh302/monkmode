@@ -35,6 +35,11 @@
 //     on the guardian's side - active block only, exe must exist, no
 //     duplicate-spawn while an instance is running.
 //
+//   - Guardian.ShouldStandDown (M1/F6): the single-instance stand-down, ported
+//     from MM_notify's SingleInstance.ShouldStandDown - a lost mutex claim alone
+//     is NOT a reason to exit, or any non-elevated squatter switches the SYSTEM
+//     watchdog off permanently.
+//
 //   - The cadence consts: the guardian must tick at the service's own 10s/5s
 //     cadence so the pair agree on expiry within one tick of each other.
 //
@@ -171,6 +176,89 @@ public class GuardianShouldRelaunchNotifierTests
                     Assert.Equal(
                         monkmode.Service1.ShouldRestartPeer(count, active, exists),
                         mm_guard.Guardian.ShouldRelaunchNotifier(count, active, exists));
+    }
+}
+
+// M1 (F6, 14/08/2026): the guardian's single-instance stand-down.
+//
+// THE BUG. mm_guard exited on the bare "the Global\MonkModeGuardian mutex already
+// exists" signal, on a comment claiming a Global\ object needs SeCreateGlobalPrivilege
+// so only a stray non-elevated launch could ever hit it. That premise is false -
+// SeCreateGlobalPrivilege gates SECTION (file-mapping) objects, not mutexes, and the
+// name carries a default DACL. So any non-elevated process could create the mutex
+// first, hold it, and permanently disable the SYSTEM watchdog in three lines, while
+// the service respawned it every 10 s (ShouldRestartPeer counts processes, and a
+// guardian that exits in milliseconds always counts zero). Strictly worse than having
+// no mutex at all - which is exactly the reasoning MM_notify's
+// SingleInstance.ShouldStandDown already carried, and which this half never received.
+//
+// A stale test-bin mm_guard.exe realising the vector is not hypothetical either: one
+// was found running from MonkMode.Tests\bin on 12/08 (S3b handoff).
+public class GuardianStandDownTests
+{
+    // A bare squatter (count 1 = just us) never stands the guardian down. THE
+    // regression pin: this is the whole attack.
+    [Fact]
+    public void ClaimLost_ButNoSecondGuardian_KeepsGuarding()
+    {
+        Assert.False(mm_guard.Guardian.ShouldStandDown(true, 1));
+        Assert.False(mm_guard.Guardian.ShouldStandDown(true, 0));
+        Assert.False(mm_guard.Guardian.ShouldStandDown(true, -1));
+    }
+
+    // The race the mutex was actually for: two service ticks both spawn, both
+    // processes exist, the loser sees >= 2 and exits.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(9)]
+    public void ClaimLost_AndASecondGuardianIsLive_StandsDown(int live)
+    {
+        Assert.True(mm_guard.Guardian.ShouldStandDown(true, live));
+    }
+
+    // Winning the claim is never a reason to exit, whatever the count says.
+    [Fact]
+    public void ClaimWon_NeverStandsDown()
+    {
+        foreach (var count in new[] { -1, 0, 1, 2, 5 })
+            Assert.False(mm_guard.Guardian.ShouldStandDown(false, count));
+    }
+
+    // The port must be exact. Two hand-written copies of the same policy are how
+    // two gates drift, so pin the guardian's answer to the notifier's across the
+    // whole input space rather than restating the rule.
+    [Fact]
+    public void MirrorsTheNotifiersStandDownGate()
+    {
+        foreach (var lost in new[] { true, false })
+            foreach (var count in new[] { -1, 0, 1, 2, 3, 7 })
+                Assert.Equal(
+                    mm_notify.SingleInstance.ShouldStandDown(lost, count),
+                    mm_guard.Guardian.ShouldStandDown(lost, count));
+    }
+
+    // The names the live wrapper feeds the gate. The process name must be the one
+    // the SERVICE counts when it decides to respawn a peer, or the two halves would
+    // be reasoning about different processes; the mutex name is pinned literally
+    // because renaming it silently forfeits every claim held by an already-running
+    // guardian (both copies would then think they are alone).
+    [Fact]
+    public void NamesArePinned()
+    {
+        Assert.Equal("mm_guard", mm_guard.Guardian.GuardianProcessName);
+        Assert.Equal(@"Global\MonkModeGuardian", mm_guard.Guardian.GuardianMutexName);
+        Assert.StartsWith(@"Global\", mm_guard.Guardian.GuardianMutexName);
+    }
+
+    // The count includes SELF, so the boundary is > 1, not > 0. Stated separately
+    // because an off-by-one here restores the original bug exactly: with > 0 a lone
+    // guardian that lost the claim to a squatter would stand down again.
+    [Fact]
+    public void TheCountIncludesSelf_SoTheBoundaryIsTwo()
+    {
+        Assert.False(mm_guard.Guardian.ShouldStandDown(true, 1));   // only us
+        Assert.True(mm_guard.Guardian.ShouldStandDown(true, 2));    // us + a real peer
     }
 }
 

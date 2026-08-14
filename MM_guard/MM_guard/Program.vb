@@ -75,25 +75,54 @@ Module Program
         ' Single instance, machine-wide ("Global\" so the SYSTEM-session copy
         ' also excludes any copy started in a user session, and vice versa).
         ' The service's spawn gate already counts processes, but the mutex
-        ' closes the race of two ticks both deciding to spawn. Creating a
-        ' Global\ object needs SeCreateGlobalPrivilege - a stray non-elevated
-        ' launch (the guardian is only meant to be SYSTEM-spawned) throws
-        ' here, so exit quietly instead of crashing unhandled.
+        ' closes the race of two ticks both deciding to spawn.
+        '
+        ' M1 (F6, 14/08/2026) - CORRECTION. This block used to exit on the bare
+        ' "already exists" signal, and to exit on a constructor throw, justified
+        ' by a comment claiming a Global\ object needs SeCreateGlobalPrivilege so
+        ' only a stray non-elevated launch could fail here. That premise is
+        ' WRONG: SeCreateGlobalPrivilege gates SECTION (file-mapping) objects in
+        ' the global namespace, not mutexes/events/semaphores, and the name
+        ' carries a default DACL. Any non-elevated same-machine process could
+        ' therefore create "Global\MonkModeGuardian" first and permanently
+        ' disable the SYSTEM watchdog in three lines - while the service kept
+        ' respawning it every 10 s, because ShouldRestartPeer counts processes
+        ' and always found zero. MM_notify's SingleInstance.ShouldStandDown was
+        ' written against exactly this attack; this half never got it. Ported now.
+        '
+        ' Both failure directions therefore KEEP GUARDING:
+        '   - claim lost, but no second real mm_guard process exists => a squatter,
+        '     not a genuine race => carry on unclaimed (the pre-mutex posture);
+        '   - the constructor THROWS (e.g. a squatter created a different KIND of
+        '     kernel object under the same name, which is a second three-line
+        '     kill) => carry on unclaimed rather than exit.
+        ' Running unclaimed is safe: a duplicate guardian only ever OVER-enforces
+        ' (both its actions are already idempotent gates), and the service's own
+        ' spawn gate stops duplicates multiplying.
         Dim createdNew As Boolean = False
-        Dim mtx As Mutex
+        Dim mtx As Mutex = Nothing
         Try
-            mtx = New Mutex(True, "Global\MonkModeGuardian", createdNew)
+            mtx = New Mutex(True, Guardian.GuardianMutexName, createdNew)
+            If Not createdNew Then
+                ' We never took ownership (initiallyOwned is ignored when the
+                ' object already exists), so closing our handle releases nothing
+                ' of theirs - it just drops our reference.
+                mtx.Dispose()
+                mtx = Nothing
+                Dim liveCount As Integer =
+                    Process.GetProcessesByName(Guardian.GuardianProcessName).Length
+                If Guardian.ShouldStandDown(True, liveCount) Then Return
+            End If
         Catch ex As Exception
-            Return
+            ' Claim attempt or process count failed. Cannot prove a genuine second
+            ' guardian exists, so guard on without a claim - never exit.
+            mtx = Nothing
         End Try
-        If Not createdNew Then
-            mtx.Dispose()
-            Return
-        End If
 
         ' AppDomain.UnhandledException backstop (fail-closed on crash) - see
-        ' OnUnhandledException. Registered only once we are the single real
-        ' guardian instance (a throwaway second instance returned above).
+        ' OnUnhandledException. Registered only once we are going to guard (a
+        ' genuine duplicate returned above); an unclaimed guardian guards for
+        ' real, so it needs the backstop just as much as a claimed one.
         AddHandler AppDomain.CurrentDomain.UnhandledException, AddressOf OnUnhandledException
 
         Try
@@ -147,7 +176,10 @@ Module Program
                 TryRelaunchNotifier(blockActive)
             Loop
         Finally
-            mtx.Dispose()
+            ' Nothing when we are guarding unclaimed (squatter, or a claim attempt
+            ' that threw); the claim is otherwise a handle the kernel frees with the
+            ' process anyway, so a missed Dispose could never strand it.
+            If mtx IsNot Nothing Then mtx.Dispose()
         End Try
     End Sub
 
