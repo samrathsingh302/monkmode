@@ -482,8 +482,11 @@ stops a running service, never calls `unblock --force` itself, and never edits
 hosts. When clear, it deletes the idle service registration (`sc delete` on a
 stopped service only), the install dir, the machine `PATH` entry, and the
 current user's notifier autorun. Your account data (`monkmode_setup.ini`,
-`monkmode_stats`, and the stale enforcement config) is **kept by default** so a
-reinstall keeps your setup and history; pass `-PurgeData` for a clean slate.
+`monkmode_stats`, the stale enforcement config, and the `monkmode_doh.snapshot` /
+`monkmode_hosts.block` snapshots) is **kept by default** so a reinstall keeps your
+setup and history; pass `-PurgeData` for a clean slate. The DoH snapshot is kept
+because it holds *your* browser DNS-over-HTTPS setting from before MonkMode — it
+is the only thing that can put that setting back, so `-PurgeData` discards it too.
 Options: `-InstallDir <folder>` if you installed somewhere other than
 `C:\Program Files\MonkMode`; `-IgnoreSchedule` to remove despite a lingering
 recurring schedule (it is then orphaned — clear it with `monkmode schedule

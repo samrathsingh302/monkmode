@@ -65,6 +65,19 @@
 # by the next block). These are preserved in the install dir and the dir is kept. Pass
 # -PurgeData to delete them too and remove the dir entirely - a truly clean slate.
 #
+# F6 (14/08/2026) - THE SNAPSHOTS ARE DATA TOO, and used to be deleted here as
+# "transient". monkmode_doh.snapshot is not MonkMode's own state: it is a record of
+# YOUR browser DNS-over-HTTPS policy from before MonkMode ever touched it. MonkMode
+# forces that policy off while a block runs, and this file is the ONLY thing that can
+# put your real setting back (RemoveDohPolicy deliberately does NOTHING without it,
+# rather than delete a value it cannot prove it created). Delete it and the user is
+# left with DoH force-disabled in every browser by machine policy, permanently, with
+# no record of what it was - which is exactly the state the 13/08 estate bug-hunt
+# found on this machine. An uninstall must never be the step that makes that
+# unrecoverable. monkmode_hosts.block is kept alongside it for consistency with the
+# config that is also preserved (the service reconciles it back to config truth on
+# every tick, so a stale entry cannot outlive one tick of the next block).
+#
 # SELF-PROTECTION. Refuses to delete a dir that looks like a source/working tree rather
 # than an installed copy: refuses if -InstallDir contains a .git folder or MonkMode.sln,
 # or if it resolves inside this repo (so pointing it at the repo or its dist\ is refused).
@@ -80,7 +93,10 @@ param(
     [string]$InstallDir = 'C:\Program Files\MonkMode',
 
     # Also delete the account/history data (monkmode_setup.ini, monkmode_stats,
-    # monkmode_settings.ini[.bak]) and remove the dir entirely. Default = keep data.
+    # monkmode_settings.ini[.bak]) AND the snapshots (monkmode_doh.snapshot,
+    # monkmode_hosts.block), then remove the dir entirely. Default = keep data.
+    # Note that purging monkmode_doh.snapshot discards the record of your
+    # pre-MonkMode browser DNS-over-HTTPS policy - see the header.
     [switch]$PurgeData,
 
     # Proceed even when a recurring schedule spec lingers in the config (it will be
@@ -98,12 +114,16 @@ $runValue    = 'MonkMode_notify'
 $runKey      = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
 
 # The account/history data files (all in the install dir, next to the exes - RUNBOOK 2.7).
-# Kept by default; removed only with -PurgeData.
+# Kept by default; removed only with -PurgeData. Same set tools\build-dist.ps1 preserves
+# across a rebuild - the two lists are the one answer to "what in this folder is not a
+# build artefact", so keep them together.
 $dataFiles = @(
     'monkmode_settings.ini',
     'monkmode_settings.ini.bak',
     'monkmode_setup.ini',
-    'monkmode_stats'
+    'monkmode_stats',
+    'monkmode_doh.snapshot',    # F6: the USER's pre-MonkMode browser DoH policy - see the header
+    'monkmode_hosts.block'      # F6: the hosts self-heal source, kept with the config it mirrors
 )
 
 # ============================================================================
@@ -324,9 +344,12 @@ if ($null -eq $resolvedInstall) {
     Remove-Item -Path $resolvedInstall -Recurse -Force
     Write-Host "Removed the install dir and ALL data ('$resolvedInstall') - clean slate (-PurgeData)."
 } else {
-    # Default: remove the payload (binaries + runtime + transient snapshots/triggers) but
+    # Default: remove the payload (binaries + runtime + one-shot partner-code triggers) but
     # PRESERVE the account/history data files. Delete everything in the dir EXCEPT the
     # known data files; if any data remain, keep the dir and say where the data is.
+    # F6: the DoH/hosts snapshots are in $dataFiles now - they used to fall into the
+    # "transient" bucket here and be deleted, which destroyed the only record able to
+    # restore the user's real browser DNS policy.
     $preserved = @()
     Get-ChildItem -Path $resolvedInstall -Force | ForEach-Object {
         if ($_.PSIsContainer) {
