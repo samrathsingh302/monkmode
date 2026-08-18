@@ -1,0 +1,11 @@
+# mm-lock / `doomscroll` bundle - the whole-domain half of the doom-scroll set.
+# One domain per line. Lines starting with # are ignored.
+# www. / m. / web. / mobile. mirrors are covered automatically by MonkMode.
+#
+# The bundle also carries shortform-urls.txt (Shorts / Reels / the YouTube home feed) - the
+# paths that cannot be expressed as a whole domain without losing the rest of the site.
+tiktok.com
+vm.tiktok.com
+snapchat.com
+x.com
+twitter.com

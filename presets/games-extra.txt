@@ -1,0 +1,12 @@
+# mm-games / `games` bundle - the launchers BEYOND the built-in `games` app preset.
+# One executable per line. Lines starting with # are ignored.
+#
+# The built-in preset (`--app-preset games`) already covers steam.exe, epicgameslauncher.exe,
+# battle.net.exe, riotclientservices.exe, leagueclient.exe, valorant.exe and
+# robloxplayerbeta.exe; the bundle passes BOTH, so only add names missing from that list here.
+# Matching is a case-insensitive substring of the process name, so a name here is a widening.
+steamwebhelper.exe
+ubisoftconnect.exe
+eadesktop.exe
+goggalaxy.exe
+minecraftlauncher.exe

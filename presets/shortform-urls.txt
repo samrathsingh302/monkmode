@@ -1,0 +1,25 @@
+# Shortform URL patterns - the F2 URL layer (`monkmode block --urls`), NOT hosts blocking.
+# One pattern per line. Lines starting with # are ignored.
+#
+# What this layer is: best-effort NUDGING. The hosts block is what actually stops a site
+# loading; these patterns steer a browser that can still reach the page, so the rest of the
+# site keeps working while one path does not. That is the point - youtube.com stays usable,
+# youtube.com/shorts does not.
+#
+# A pattern is a case-insensitive SUBSTRING of the normalised url (P57), with ONE exception
+# noted against youtube.com/ below. No ',' - it separates patterns. No '|' or ';' - the CLI
+# refuses a pattern containing either.
+youtube.com/shorts
+instagram.com/reels
+facebook.com/reel
+# --- The exact-home token. Read this before editing the next line. -------------------------
+# A pattern that is exactly "<host>/" - trailing slash, no further path - matches ONLY the
+# bare home page (P58). So this line redirects the YouTube HOME feed to
+# https://www.youtube.com/feed/subscriptions (P59) and leaves search, /watch, channels and
+# /feed/subscriptions itself alone. Delete the line to leave the home page untouched.
+#
+# DO NOT "simplify" it to a bare `youtube.com`. Without the trailing slash it is an ordinary
+# substring, so it also matches the redirect TARGET - the target becomes a hit, the watcher
+# redirects again, and the page reloads itself every 5 seconds (the redirect cooldown, P60).
+# The trailing slash is what keeps /feed/subscriptions reachable. It is load-bearing.
+youtube.com/
