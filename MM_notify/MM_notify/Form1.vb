@@ -194,6 +194,13 @@ Public Class Form1
     ' decrypted in Form1_Load) for the app count. Never throws.
     Private Function BuildManualLaunchToast(ByVal ini As IniFile) As String
         Try
+            ' v1.1 S4: with MORE THAN ONE block armed the single-block wording below would
+            ' state one deadline and one site/app count for all of them - true of the v9
+            ' mirror, false of the machine. Switch to the aggregate, which names the count and
+            ' the SHORTEST remaining span instead. Exactly one block keeps the richer, older
+            ' wording (and its pinned tests) unchanged.
+            Dim slotCount As Integer = RawSlotBlockCount(ini)
+            If slotCount > 1 Then Return Notifications.AggregateActiveMessage(slotCount, ShortestSlotRemaining(ini))
             Dim untilStr As String = enc.DecryptData(ini.GetKeyValue("Time", "Until"))
             Dim untilDt As DateTime
             If Not DateTime.TryParse(untilStr, CA, DateTimeStyles.None, untilDt) Then Return ""
@@ -237,11 +244,39 @@ Public Class Form1
             Dim nowTick As Long = Environment.TickCount64
             If Not Notifications.ShouldFirePeriodicReminder(nowTick, reminderAnchorTick, ReminderIntervalMs) Then Return ""
             reminderAnchorTick = nowTick
+            ' v1.1 S4: same switch as the launch toast, taken AFTER the anchor reset so the
+            ' 2h cadence is byte-identical whichever wording fires.
+            Dim slotCount As Integer = RawSlotBlockCount(ini)
+            If slotCount > 1 Then Return Notifications.AggregateActiveMessage(slotCount, ShortestSlotRemaining(ini))
             Dim remaining As TimeSpan? = Notifications.RemainingFromMark(enc.DecryptData(ini.GetKeyValue("Time", "Until")), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
             If remaining Is Nothing OrElse remaining.Value.TotalSeconds <= 0 Then Return ""
             Return Notifications.BlockActiveReminderMessage(remaining.Value)
         Catch ex As Exception
             Return ""
+        End Try
+    End Function
+
+    ' v1.1 S4 (display-only): the SHORTEST still-running remaining span across the slots' own
+    ' ends, measured against the monotonic [Time] HighWater - the same timeline the service
+    ' enforces on, never the wall clock. Slots whose Until is absent (PENDING / schedule),
+    ' unreadable or already elapsed are skipped; Nothing when none qualifies, and the caller
+    ' then drops the "left" clause rather than print a bogus one. Fail-soft (a toast must never
+    ' throw into the poll path) and enforcement-free.
+    Private Function ShortestSlotRemaining(ByVal ini As IniFile) As TimeSpan?
+        Try
+            Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
+            Dim highWater As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
+            Dim best As TimeSpan? = Nothing
+            For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+                Dim untilEnc As String = ini.GetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), "Until")
+                If untilEnc = "" Then Continue For
+                Dim remaining As TimeSpan? = Notifications.RemainingFromMark(enc.DecryptData(untilEnc), highWater)
+                If remaining Is Nothing OrElse remaining.Value.TotalSeconds <= 0 Then Continue For
+                If best Is Nothing OrElse remaining.Value < best.Value Then best = remaining
+            Next
+            Return best
+        Catch ex As Exception
+            Return Nothing
         End Try
     End Function
 
@@ -291,20 +326,34 @@ Public Class Form1
         ' ANY failure (a transient mid-write ini read, an unreadable ActiveUntil) falls back to the
         ' manual list - never LESS than today, self-heals next tick (the service is the real enforcer;
         ' hosts self-heal (b3-ii) keeps the schedule SITES blocked at manual strength regardless).
+        '
+        ' v1.1 S4 - THE APP-KILL TAMPER FIX. iniProcessList is the v9 [Process] List mirror,
+        ' read ONCE at Load, and it sits OUTSIDE the v10 canonical: blanking it with a text
+        ' editor left macValid TRUE and silently stopped every user-session kill, and a slot
+        ' armed AFTER this notifier launched was never killed at all. So the union now also
+        ' takes EVERY slot's own Apps, RE-READ FROM DISK EACH TICK (RawSlotApps) - MAC-covered
+        ' data, so editing it is tamper-evident, and re-read so a new slot is enforced within
+        ' one 2s beat instead of never. The mirror stays as the base: this is a UNION, never a
+        ' replacement, so no kill this loop used to make can be removed.
         Dim killList As String = iniProcessList
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
+            killList = EffectiveKillList(killList, RawSlotApps(ini), True)
             Dim scheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
             If scheduleActiveEnc <> "" Then
                 Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
                 Dim highWater As String = If(highWaterEnc = "", "", enc.DecryptData(highWaterEnc))
                 If ScheduleActive(enc.DecryptData(scheduleActiveEnc), highWater) Then
-                    killList = EffectiveKillList(iniProcessList, ParseSchedule(ini.GetKeyValue("Schedule", "Spec")).Apps, True)
+                    killList = EffectiveKillList(killList, ParseSchedule(ini.GetKeyValue("Schedule", "Spec")).Apps, True)
                 End If
             End If
         Catch ex As Exception
-            killList = iniProcessList
+            ' Keep whatever was accumulated before the failure (never narrower than the load-
+            ' time mirror). The pre-S4 code reset to iniProcessList here; with two independent
+            ' widenings in the Try, resetting would DROP the slot union whenever the (later,
+            ' decrypting) schedule read threw - and dropping a kill is the fail-open direction.
+            ' Self-heals on the next 2s beat either way.
         End Try
 
         ' Guard on the EFFECTIVE set (not iniProcessList): a SCHEDULE-ONLY block has a "null"/empty
@@ -592,6 +641,56 @@ Public Class Form1
     Friend Shared Function ProcessNameInKillList(ByVal killList As String, ByVal processName As String) As Boolean
         If killList Is Nothing OrElse killList.Length = 0 Then Return False
         Return killList.IndexOf(If(processName, "") & ".exe", StringComparison.OrdinalIgnoreCase) >= 0
+    End Function
+
+    ' ============ v1.1 S4: the notifier's SLOT view (raw scans, no new parser) ============
+    '
+    ' Same discipline as the guardian's P44 floor: the notifier must NOT grow a fifth copy of
+    ' the service's slot readers (SlotState plus the three held predicates), so it reads the
+    ' slot sections RAW - no MAC gate, no schedule parse, and no decrypt at all on the
+    ' enforcement path (the one slot decrypt lives in ShortestSlotRemaining, which is
+    ' display-only) - and every axis over-approximates towards MORE blocked.
+    '
+    ' Bound by MaxSlots and NOT by the stored [Slots] SlotCount, so forging SlotCount=0 cannot
+    ' silence the kill list. A stale section beyond the count can only ADD names, and slots are
+    ' REMOVED (never flagged) at retire and teardown, so the union goes quiet exactly when the
+    ' blocks do.
+
+    ' Every slot's Apps entries, first-occurrence order, deduped case-insensitively. Apps is
+    ' plaintext-as-stored (P8) and already carries the ".exe" suffix PackApps applied at arm,
+    ' which is the shape ProcessNameInKillList matches on. Deliberately NOT gated on whether a
+    ' slot is enforcing right now: a slot present in the file is armed, a PENDING one already
+    ' has its sites in hosts from arm time, and an ended one is removed from the file within a
+    ' service tick - so the widest reading costs at most one tick of over-kill and can never
+    ' drop a live block's app. Nothing/absent => empty. Pure; never throws.
+    Friend Shared Function RawSlotApps(ByVal ini As IniFile) As List(Of String)
+        Dim outList As New List(Of String)
+        If ini Is Nothing Then Return outList
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+            Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+            For Each tok As String In If(ini.GetKeyValue(sec, "Apps"), "").Split(";"c)
+                Dim t As String = tok.Trim()
+                If t <> "" AndAlso seen.Add(t) Then outList.Add(t)
+            Next
+        Next
+        Return outList
+    End Function
+
+    ' How many blocks the config NAMES, by the same raw floor the guardian holds on (P44): a
+    ' position counts once its ScheduleSpec / StartAt / Until is non-empty. DISPLAY-ONLY - it
+    ' picks the toast wording and nothing else - so an over-count is cosmetic and can never
+    ' touch enforcement. Pure; never throws.
+    Friend Shared Function RawSlotBlockCount(ByVal ini As IniFile) As Integer
+        If ini Is Nothing Then Return 0
+        Dim n As Integer = 0
+        For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+            Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+            If Not String.IsNullOrWhiteSpace(ini.GetKeyValue(sec, "ScheduleSpec")) OrElse
+               Not String.IsNullOrWhiteSpace(ini.GetKeyValue(sec, "StartAt")) OrElse
+               Not String.IsNullOrWhiteSpace(ini.GetKeyValue(sec, "Until")) Then n += 1
+        Next
+        Return n
     End Function
 
     ' C5b (c3): is a schedule armed? macValid AND the Spec parses to >=1 window - the EXACT

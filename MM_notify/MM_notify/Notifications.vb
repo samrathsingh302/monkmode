@@ -146,6 +146,25 @@ Friend Module Notifications
         Return "MonkMode is active - " & DescribeSubject(siteCount, appCount) & " blocked until " & FormatWall(untilWall) & left & "." & tail
     End Function
 
+    ' v1.1 S4: the AGGREGATE active toast for a multi-block machine - "3 blocks active ·
+    ' 45m left". v10 lets up to 8 slots be armed at once, and the single-block wording above
+    ' would name ONE deadline and ONE site/app count for all of them (it is built from the v9
+    ' single-block mirror), which is true of the mirror and false of the machine. This states
+    ' only what is certain: how many blocks are armed, and how long the SHORTEST of them has
+    ' left - so the first thing to end is the number the user sees.
+    '
+    ' shortest is Nothing / <= 0 => the "· X left" clause is dropped entirely rather than
+    ' printing a bogus or "0m" span (the same rule BlockActiveMessage follows for its "(about
+    ' X left)"). Pure; the count is rendered through the shared CountNoun so "1 block" /
+    ' "2 blocks" pluralise exactly like the site/app counts. Never throws.
+    Friend Function AggregateActiveMessage(ByVal blockCount As Integer, ByVal shortest As TimeSpan?) As String
+        Dim left As String = ""
+        If shortest IsNot Nothing AndAlso shortest.Value.TotalSeconds > 0 Then
+            left = " · " & HumanizeShort(shortest.Value) & " left"
+        End If
+        Return CountNoun(blockCount, "block") & " active" & left
+    End Function
+
     ' The cooling-off-started toast: the self-serve `unblock` wait has begun and the
     ' block stays fully enforced until it lifts itself. remaining is the monotonic
     ' active-time left (deadline - HighWater), rendered short.

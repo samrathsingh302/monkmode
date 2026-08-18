@@ -206,3 +206,109 @@ public class AppKillMatchTests
         Assert.True(mm_notify.Form1.ProcessNameInKillList("RiotClientServices.exe;", "riotclientservices"));
     }
 }
+
+// ---- v1.1 S4: the NOTIFIER's per-slot kill union ----
+//
+// THE HOLE THIS CLOSES (carried from the S3b handoff: "the notifier's kill list is still the
+// raw-editable v9 mirror", Form1.vb:114). The user-session app-kill loop took [Process] List
+// - read ONCE at launch, decrypted, and OUTSIDE the v10 canonical. Two consequences:
+//   * blanking that key with a text editor left macValid TRUE and silently stopped every
+//     user-session kill. Tamper-evident nowhere, fail-open everywhere;
+//   * a slot armed AFTER this notifier launched was never in the list at all, so its apps
+//     were never killed in the user session for the whole life of that notifier.
+// The loop now UNIONS in every slot's own Apps, re-read from disk each 2s beat. Apps rides
+// the MAC-covered canonical, so editing it is tamper-evident; re-reading means a new block is
+// enforced within one beat. It is a UNION over the load-time mirror, never a replacement, so
+// no kill the loop used to make can be removed - the same widen-only stance as the matcher
+// above and as ProcessInKillScope.
+public class NotifierSlotKillUnionTests
+{
+    private static mm_notify.IniFile Ini(params (string section, string key, string value)[] entries)
+    {
+        var ini = new mm_notify.IniFile();
+        foreach (var (section, key, value) in entries)
+        {
+            ini.AddSection(section);
+            ini.SetKeyValue(section, key, value);
+        }
+        return ini;
+    }
+
+    // The exact expression the tick builds: the load-time v9 mirror, widened by the slots.
+    private static string Union(string mirror, mm_notify.IniFile ini)
+        => mm_notify.Form1.EffectiveKillList(mirror, mm_notify.Form1.RawSlotApps(ini), true);
+
+    [Fact]
+    public void SlotApps_AreKilled_EvenWhenTheV9MirrorWasBlanked()
+    {
+        // The tamper drill in one assertion: mirror gone, slot intact, kill still made.
+        var killList = Union("", Ini(("Slot1", "Apps", "chrome.exe;discord.exe;")));
+        Assert.True(mm_notify.Form1.ProcessNameInKillList(killList, "chrome"));
+        Assert.True(mm_notify.Form1.ProcessNameInKillList(killList, "Discord"));
+    }
+
+    [Fact]
+    public void TheUnionNeverRemovesAKillTheMirrorAlreadyMade()
+    {
+        // Widen-only, by construction: the mirror is the BASE string EffectiveKillList appends
+        // to, so it is always a prefix of the result. Pinned because narrowing this matcher is
+        // precisely the fail-open the rest of this file exists to stop.
+        foreach (var mirror in new[] { "", "null", "chrome.exe;", "WhatsApp.exe;firefox.exe;" })
+        {
+            foreach (var slotApps in new[] { "", "discord.exe;", "chrome.exe;steam.exe;" })
+            {
+                var union = Union(mirror, Ini(("Slot1", "Apps", slotApps)));
+                Assert.StartsWith(mirror, union, StringComparison.Ordinal);
+                foreach (var name in new[] { "chrome", "WhatsApp", "firefox", "discord", "steam" })
+                {
+                    if (mm_notify.Form1.ProcessNameInKillList(mirror, name))
+                        Assert.True(mm_notify.Form1.ProcessNameInKillList(union, name));
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void EverySlotContributes_DedupedAndInFirstOccurrenceOrder()
+    {
+        var apps = mm_notify.Form1.RawSlotApps(Ini(
+            ("Slot1", "Apps", "chrome.exe;discord.exe;"),
+            ("Slot2", "Apps", "Chrome.exe;steam.exe;"),      // case-only duplicate of slot 1's
+            ("Slot8", "Apps", "spotify.exe;")));
+        Assert.Equal(new[] { "chrome.exe", "discord.exe", "steam.exe", "spotify.exe" }, apps);
+    }
+
+    [Fact]
+    public void TheScanIsBoundedByMaxSlots_NotByTheStoredSlotCount()
+    {
+        // A forged [Slots] SlotCount=0 must not be able to empty the kill list. Same reasoning
+        // as the guardian's P44 floor: the raw read cannot be silenced by an unMAC'd count.
+        var apps = mm_notify.Form1.RawSlotApps(Ini(("Slots", "SlotCount", "0"), ("Slot1", "Apps", "chrome.exe;")));
+        Assert.Equal(new[] { "chrome.exe" }, apps);
+        // ...and position 9 is not a position at all (MaxSlots is the cap).
+        Assert.Empty(mm_notify.Form1.RawSlotApps(Ini(("Slot9", "Apps", "chrome.exe;"))));
+        Assert.Equal(8, mm_notify.ConfigIntegrity.MaxSlots);
+    }
+
+    [Fact]
+    public void NoSlots_LeavesTheKillListByteIdentical()
+    {
+        // The degenerate path must be a true no-op: with no slot sections the loop kills
+        // EXACTLY what it killed before S4, with no extra work and no changed string.
+        Assert.Empty(mm_notify.Form1.RawSlotApps(new mm_notify.IniFile()));
+        Assert.Empty(mm_notify.Form1.RawSlotApps(null!));
+        Assert.Equal("WhatsApp.exe;", Union("WhatsApp.exe;", new mm_notify.IniFile()));
+        Assert.Equal("null", Union("null", new mm_notify.IniFile()));
+    }
+
+    [Fact]
+    public void SlotAppsKeepTheirArmTimeCasingAndExeSuffix_SoTheMatcherFindsThem()
+    {
+        // Apps is plaintext-as-stored (P8) and PackApps only APPENDS a missing ".exe" at arm -
+        // it never lower-cases - so the union feeds the matcher exactly the shape it expects,
+        // and the OrdinalIgnoreCase match above covers the casing.
+        var killList = Union("", Ini(("Slot1", "Apps", "WhatsApp.exe;")));
+        Assert.Contains("WhatsApp.exe", killList, StringComparison.Ordinal);
+        Assert.True(mm_notify.Form1.ProcessNameInKillList(killList, "whatsapp"));
+    }
+}

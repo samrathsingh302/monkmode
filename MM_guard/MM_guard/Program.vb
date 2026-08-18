@@ -23,10 +23,12 @@
 '    13/06/2026). The service's timer spawns it (gate: Service1.ShouldRestartPeer)
 '    and re-spawns it if it is killed; reciprocally, every tick this loop:
 '
-'      1. reads [Time] Until from monkmode_settings.ini next to the exes and
-'         EXITS once the block has genuinely expired (parsed, past end time -
-'         the only way the guardian ever stands down; an unparseable value
-'         fails CLOSED and it keeps guarding);
+'      1. reads monkmode_settings.ini next to the exes and EXITS once EVERY
+'         block has genuinely ended - the v9 residual ([Time] Until and friends)
+'         AND, since v1.1 S4, the v10 slots ([Guard] HoldUntil / ArmedCount plus
+'         the raw [Slot1..8] floor, folded by Guardian.AnyBlockHeld). That is the
+'         only way the guardian ever stands down; every unreadable or unparseable
+'         value fails CLOSED and it keeps guarding;
 '      2. restarts the MONKMODE service via the SCM if it is not running
 '         (it has SCM rights: spawned by the LocalSystem service, it IS SYSTEM);
 '      3. relaunches the user-session notifier (mm_notify.exe) if it has been
@@ -131,16 +133,21 @@ Module Program
                 ' verified the world this tick - act on the NEXT tick.
                 Thread.Sleep(TickIntervalMs)
 
-                ' Read [Time] Until, [Time] HighWater, [Time] CoolOffUntil, the C3b
-                ' [Partner] UnlockedAt and the B7 MAC validity in one ini load.
+                ' Read the v9 residual ([Time] Until/HighWater/CoolOffUntil, the C3b
+                ' [Partner] UnlockedAt, [Schedule] ActiveUntil), the S4 slot signals
+                ' ([Guard] HoldUntil/ArmedCount + the raw [SlotN] floor) and the B7 MAC
+                ' validity in one ini load.
                 Dim until As String = ""
                 Dim highWater As String = ""
                 Dim coolOffUntil As String = ""
                 Dim unlockedAt As String = ""
                 Dim scheduleActiveUntil As String = ""
-                Dim spec As String = ""
+                Dim guardHoldUntil As String = ""
+                Dim guardArmedCount As String = ""
+                Dim rawFloorHeld As Boolean = False
                 Dim macValid As Boolean = False
-                ReadBlockState(until, highWater, coolOffUntil, unlockedAt, scheduleActiveUntil, spec, macValid)
+                ReadBlockState(until, highWater, coolOffUntil, unlockedAt, scheduleActiveUntil,
+                               guardHoldUntil, guardArmedCount, rawFloorHeld, macValid)
 
                 ' Fail CLOSED on every axis: an unparseable Until OR an invalid/
                 ' absent B7 MAC (a tampered config) reads as NOT ended, so the
@@ -155,16 +162,33 @@ Module Program
                 ' the service the moment a completed cooling-off tears it down,
                 ' resurrecting the cooled-off block. C3b: folding the partner-code
                 ' UnlockedAt in is LOAD-BEARING for the identical reason - the
-                ' guardian must not resurrect a just-code-unlocked block. C5b (c2): folding
-                ' scheduleArmed in keeps the guardian alive BETWEEN windows of a recurring
-                ' schedule (so it can restart a killed service for tomorrow's window) and stands
-                ' it down (terminal) only once the Spec is cleared. Cheap over-approximation -
-                ' the Spec non-empty, NOT a 4th ParseSchedule copy (design §4C): the fail-SAFE
-                ' direction (a garbage non-empty Spec only over-guards, never an early stand-down).
-                ' macValid AndAlso so a tampered/frozen config never reads as armed (EffectiveExit
-                ' holds on its macValid gate anyway). Null-safe (IsNullOrWhiteSpace) inside the helper.
-                Dim scheduleArmed As Boolean = Guardian.ScheduleArmed(macValid, spec)
-                Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, ExpiryGraceSeconds, macValid, scheduleArmed)
+                ' guardian must not resurrect a just-code-unlocked block.
+                '
+                ' v1.1 S4: the stand-down is now the AND of two independent exits, i.e.
+                ' blockActive is their OR - the v9 residual must have exited AND no slot may
+                ' hold. AnyBlockHeld can only ever ADD a hold, so that disjunct is a pure
+                ' widening.
+                '
+                ' P44: scheduleArmed is passed FALSE and the global [Schedule] Spec is no
+                ' longer read at all - the raw slot floor replaces that legacy floor, and v10
+                ' moves the rule to each slot's own ScheduleSpec, which the floor sees. An OPEN
+                ' window still holds HARD through scheduleActiveUntil, and every slot-borne
+                ' schedule holds through the floor and [Guard] ArmedCount.
+                '
+                ' THE ONE NARROWING THIS COSTS, argued rather than hidden: a v9-shaped
+                ' schedule-only config - which today's `monkmode schedule` still writes, until
+                ' S5 makes a schedule a slot - has NO slots, so BETWEEN windows nothing holds
+                ' here any more and the guardian exits at a window's close instead of surviving
+                ' to the next one. It is bounded: the SERVICE's own peer-spawn gate is
+                ' enforcementHeld = BlockHeld OrElse slotsHeld, and for that config BlockHeld is
+                ' already False between windows - so the service would not respawn a guardian
+                ' killed in that gap either, and after a reboot in the gap none exists at all.
+                ' S4 therefore ALIGNS the guardian's stand-down with the service's own notion of
+                ' "enforcement held" rather than leaving the two halves disagreeing. Inside a
+                ' window, and for every slot-borne block, nothing changes.
+                Dim blockActive As Boolean =
+                    (Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, ExpiryGraceSeconds, macValid, False)) OrElse
+                    Guardian.AnyBlockHeld(guardHoldUntil, guardArmedCount, rawFloorHeld, highWater, macValid)
                 If Not blockActive Then
                     ' Genuinely expired (parsed, past end time, valid MAC): stand
                     ' down for good. The service's stopMe() also kills us at
@@ -201,17 +225,21 @@ Module Program
             Dim coolOffUntil As String = ""
             Dim unlockedAt As String = ""
             Dim scheduleActiveUntil As String = ""
-            Dim spec As String = ""
+            Dim guardHoldUntil As String = ""
+            Dim guardArmedCount As String = ""
+            Dim rawFloorHeld As Boolean = False
             Dim macValid As Boolean = False
-            ReadBlockState(until, highWater, coolOffUntil, unlockedAt, scheduleActiveUntil, spec, macValid)
+            ReadBlockState(until, highWater, coolOffUntil, unlockedAt, scheduleActiveUntil,
+                           guardHoldUntil, guardArmedCount, rawFloorHeld, macValid)
             ' C2b/C3b/C5b: same EffectiveExit gate as the loop - the dying guardian must
             ' not restart the service into a block that just cooled off, was code-unlocked
             ' OR whose scheduled window has closed (nor stand down mid-window: an open
-            ' window holds via ScheduleActive). C5b (c2): scheduleArmed (same cheap Spec-
-            ' non-empty over-approximation as the loop) also keeps the dying guardian from
-            ' standing down BETWEEN windows of a live schedule.
-            Dim scheduleArmed As Boolean = Guardian.ScheduleArmed(macValid, spec)
-            Dim blockActive As Boolean = Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, ExpiryGraceSeconds, macValid, scheduleArmed)
+            ' window holds via ScheduleActive). v1.1 S4: and the SAME AnyBlockHeld fold, so
+            ' the dying guardian's last act also covers a machine whose only live blocks are
+            ' SLOTS the v9 residual never mentions - byte-for-byte the loop's expression.
+            Dim blockActive As Boolean =
+                (Not Guardian.EffectiveExit(until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater, ExpiryGraceSeconds, macValid, False)) OrElse
+                Guardian.AnyBlockHeld(guardHoldUntil, guardArmedCount, rawFloorHeld, highWater, macValid)
             TryRestartService(blockActive)
         Catch ex As Exception
         End Try
@@ -226,24 +254,32 @@ Module Program
     ' early stand-down), macValidOut False means a tampered/unreadable config
     ' also reads active - so a deleted or corrupted config keeps the guardian
     ' guarding, never stands it down. One load (not four) so Until, HighWater,
-    ' CoolOffUntil, ScheduleActiveUntil, the [Schedule] Spec and the MAC are all evaluated
+    ' CoolOffUntil, ScheduleActiveUntil, the S4 slot signals and the MAC are all evaluated
     ' against the same bytes. C5b: scheduleActiveOut is the decrypted [Schedule] ActiveUntil
     ' ("" = no window open, the fail-closed default); the guardian only READS it (the
     ' service is its sole writer, like HighWater/CoolOffUntil), and folding
     ' ScheduleActive into the stand-down (via EffectiveExit) is LOAD-BEARING - without
     ' it the guardian could stand down at a window's start (not restart a killed
-    ' service mid-window) or resurrect the block at its close. C5b (c2): specOut is the
-    ' [Schedule] Spec (plaintext, as-stored - like UnlockedAt), from which the caller derives
-    ' scheduleArmed as the cheap Spec-non-empty over-approximation (no ParseSchedule copy in
-    ' the guardian); "" => not armed. Folding scheduleArmed into the stand-down keeps the
-    ' guardian alive BETWEEN windows so it can restart a killed service for the next one.
-    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef coolOffUntilOut As String, ByRef unlockedOut As String, ByRef scheduleActiveOut As String, ByRef specOut As String, ByRef macValidOut As Boolean)
+    ' service mid-window) or resurrect the block at its close.
+    '
+    ' v1.1 S4 (P43/P44) - the three slot signals, and one deletion:
+    '   * guardHoldOut       = the DECRYPTED [Guard] HoldUntil horizon ("" = none recorded);
+    '   * guardArmedCountOut = [Guard] ArmedCount, plaintext-as-stored (an int; the MAC is
+    '                          its protection, so it is never decrypted);
+    '   * rawFloorHeldOut    = the P44 raw per-position floor (see RawSlotFloorHeld);
+    '   * the global [Schedule] Spec read is GONE. It was the legacy floor P44 replaces, and
+    '     v10 moves the rule to each slot's own ScheduleSpec - which the raw floor sees.
+    ' All three keep the same fail-closed defaults as the rest: a failed load leaves
+    ' macValidOut False, which alone makes Guardian.AnyBlockHeld answer HELD.
+    Private Sub ReadBlockState(ByRef untilOut As String, ByRef highWaterOut As String, ByRef coolOffUntilOut As String, ByRef unlockedOut As String, ByRef scheduleActiveOut As String, ByRef guardHoldOut As String, ByRef guardArmedCountOut As String, ByRef rawFloorHeldOut As Boolean, ByRef macValidOut As Boolean)
         untilOut = ""
         highWaterOut = ""
         coolOffUntilOut = ""
         unlockedOut = ""
         scheduleActiveOut = ""
-        specOut = ""
+        guardHoldOut = ""
+        guardArmedCountOut = ""
+        rawFloorHeldOut = False
         macValidOut = False
         Try
             Dim ini As New IniFile
@@ -260,12 +296,67 @@ Module Program
             ' window; a genuine window's deadline is covered by the same MAC).
             Dim scheduleEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
             scheduleActiveOut = If(scheduleEnc = "", "", enc.DecryptData(scheduleEnc))
-            ' C5b (c2): [Schedule] Spec is plaintext (as-stored, MAC-covered), not decrypted.
-            specOut = ini.GetKeyValue("Schedule", "Spec")
+            ' S4/P43: [Guard] HoldUntil is an ENCRYPTED datetime like ActiveUntil ("" = none
+            ' recorded); [Guard] ArmedCount is a plaintext int. Both are MAC-covered, so an
+            ' edit to either is tamper-evident and lands on macValid=False => held.
+            Dim guardHoldEnc As String = ini.GetKeyValue("Guard", "HoldUntil")
+            guardHoldOut = If(guardHoldEnc = "", "", enc.DecryptData(guardHoldEnc))
+            guardArmedCountOut = ini.GetKeyValue("Guard", "ArmedCount")
+            ' S4/P44: the raw floor, read BEFORE the MAC evaluation deliberately - if anything
+            ' below were to throw, the Catch leaves macValidOut False (=> held) rather than a
+            ' quiet floor under a True MAC.
+            rawFloorHeldOut = RawSlotFloorHeld(ini)
             macValidOut = ConfigMacIsValidForIni(ini)
         Catch ex As Exception
         End Try
     End Sub
+
+    ' P44 - THE GUARDIAN FLOOR: does the config still NAME any block? A raw key scan with NO
+    ' parser, NO decrypt and NO MAC gate. Held when EITHER
+    '   (a) the clamped [Slots] SlotCount is > 0, or
+    '   (b) any position 1..MaxSlots carries a non-empty ScheduleSpec / StartAt / Until.
+    '
+    ' (a) is what makes the floor a provable SUPERSET of the service's own slot hold rather
+    ' than a shape-by-shape approximation of it: Service1.LoadSlots only ever produces a slot
+    ' for pos = 1 To SlotCount, and Service1.SlotHeld holds a slot with NO recorded end ("no
+    ' recorded end" can never mean "over"). So a config declaring a slot whose section is
+    ' empty or absent holds the SERVICE - and without (a) the guardian would stand down under
+    ' it, which is the one direction that must never happen. Pinned by
+    ' GuardianHold_IsASupersetOfTheServiceSlotHold. Clamped, so a forged count reads 0 rather
+    ' than 99 - the fail-open direction on its own, which is exactly why (b) does not consult
+    ' the count at all and why a forged count breaks the MAC anyway (=> held).
+    '
+    ' Why raw. The guardian must not grow a fifth copy of the slot readers (that is how the
+    ' four canonical copies stay honest - see CanonicalFromIni's warning), and it needs an
+    ' answer even for a config it cannot decrypt or verify. Every axis over-approximates in
+    ' the SAFE direction: a garbage non-empty value, a stale section beyond SlotCount, a
+    ' ciphertext it never decrypts - each one only ever keeps the guardian watching longer.
+    ' The scan bound is MaxSlots, NOT the stored SlotCount, so forging SlotCount=0 cannot
+    ' silence it.
+    '
+    ' Why it still goes quiet. Slots are REMOVED, never flagged: RetireSlotAt compacts and
+    ' RemoveSection's the freed trailing position, and P39's TeardownAll removes all
+    ' MaxSlots sections before the hosts strip. So after a genuine teardown no position
+    ' carries any of the three keys and the floor answers False - which is what lets the
+    ' guardian ever exit at all.
+    '
+    ' Fail-closed on its own account: any throw answers True (keep guarding). Friend so the
+    ' unit tests drive it against a test-owned ini, the CanonicalFromIni pattern.
+    Friend Function RawSlotFloorHeld(ByVal ini As IniFile) As Boolean
+        Try
+            If ini Is Nothing Then Return True
+            If ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount")) > 0 Then Return True
+            For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+                Dim sec As String = "Slot" & pos.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                If Not String.IsNullOrWhiteSpace(ini.GetKeyValue(sec, "ScheduleSpec")) Then Return True
+                If Not String.IsNullOrWhiteSpace(ini.GetKeyValue(sec, "StartAt")) Then Return True
+                If Not String.IsNullOrWhiteSpace(ini.GetKeyValue(sec, "Until")) Then Return True
+            Next
+            Return False
+        Catch ex As Exception
+            Return True
+        End Try
+    End Function
 
     ' B7/B4: builds the v10 two-level canonical the MAC is computed over, from a
     ' loaded ini - the global header, then one 16-line block per slot for

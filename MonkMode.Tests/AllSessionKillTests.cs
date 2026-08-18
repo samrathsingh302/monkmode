@@ -211,3 +211,116 @@ public class AllSessionKillWriteConfigTests
         });
     }
 }
+
+// ---- v1.1 S4: the PER-SLOT all-session union ----
+//
+// v10 arms up to eight blocks at once and each carries its OWN AllSession flag inside the
+// MAC-covered canonical, while the v9 [Process] AllSession mirror is a single machine-wide
+// key OUTSIDE it. The tick's scope is `iniAllSessionKill OrElse AnySlotAllSessionKill(...)`,
+// and what matters is that the second disjunct can only ever ADD sessions to the kill scope:
+// blanking the raw-editable mirror must no longer be able to narrow a live block's reach.
+public class PerSlotAllSessionUnionTests
+{
+    private static readonly DateTime AsOf = new(2026, 8, 18, 12, 0, 0);
+    private const long Grace = 5;
+    private const string Hw = "2026-08-18 12:00:00";
+    private const string Future = "2026-08-18 18:00:00";
+    private const string Past = "2026-08-18 06:00:00";
+
+    private static monkmode.Service1.SlotState Slot(string id, string until, string allSession, string startAt = "")
+        => new()
+        {
+            Id = id,
+            UntilText = until,
+            StartAt = startAt,
+            ScheduleActiveUntil = "",
+            ScheduleSpec = "",
+            AllSession = allSession,
+            Sites = new List<string>(),
+            Apps = new List<string>(),
+            UrlPatterns = new List<string>(),
+        };
+
+    private static bool Union(bool mirror, List<monkmode.Service1.SlotState> slots, bool macValid = true)
+        => mirror || monkmode.Service1.AnySlotAllSessionKill(slots, AsOf, Grace, macValid, Hw);
+
+    [Fact]
+    public void OneSlotAsking_ArmsIt_ForTheWholeTick()
+    {
+        // The union is over slots, not per slot: the service has ONE kill loop and one scope
+        // decision per tick, so a single all-session block widens that tick for everything it
+        // kills. Over-killing a session is the safe direction; under-killing is the bypass.
+        var slots = new List<monkmode.Service1.SlotState>
+        {
+            Slot("1", Future, ""),
+            Slot("2", Future, "yes"),
+            Slot("3", Future, ""),
+        };
+        Assert.True(Union(mirror: false, slots));
+        Assert.True(monkmode.Service1.ProcessInKillScope(Union(false, slots), 3));
+    }
+
+    [Fact]
+    public void NoSlotAsking_LeavesTheScopeExactlyWhereItWas()
+    {
+        var slots = new List<monkmode.Service1.SlotState> { Slot("1", Future, ""), Slot("2", Future, "no") };
+        Assert.False(Union(mirror: false, slots));
+        Assert.False(monkmode.Service1.ProcessInKillScope(Union(false, slots), 3));
+        Assert.True(monkmode.Service1.ProcessInKillScope(Union(false, slots), 0));   // session 0 unchanged
+    }
+
+    [Fact]
+    public void ABlankedV9Mirror_CanNoLongerNarrowALiveBlock()
+    {
+        // THE TAMPER THIS CLOSES. [Process] AllSession sits outside the v10 canonical, so
+        // editing it away leaves macValid TRUE. Before the slot union that silently dropped
+        // the cross-session kill; now the slot's own MAC-covered flag re-arms it, and blanking
+        // the slot's copy instead breaks the MAC (pinned above by
+        // AllSessionKillFlag_IsMacCovered_FlippingItBreaksTheMac).
+        var slots = new List<monkmode.Service1.SlotState> { Slot("1", Future, "yes") };
+        Assert.True(Union(mirror: false, slots));
+    }
+
+    [Fact]
+    public void WidenOnly_TheUnionNeverRemovesWhatTheMirrorAlreadyArmed()
+    {
+        // Monotonicity over every shape: with the mirror ON the answer is ON regardless of
+        // what the slots say - a slot can never switch the machine-wide flag back off.
+        foreach (var slots in new[]
+                 {
+                     new List<monkmode.Service1.SlotState>(),
+                     new List<monkmode.Service1.SlotState> { Slot("1", Future, "") },
+                     new List<monkmode.Service1.SlotState> { Slot("1", Past, "yes") },
+                     new List<monkmode.Service1.SlotState> { Slot("1", Future, "yes") },
+                 })
+        {
+            Assert.True(Union(mirror: true, slots));
+            if (Union(false, slots)) Assert.True(Union(true, slots));
+        }
+    }
+
+    [Fact]
+    public void MembershipMatchesTheAppUnion_SoAppsAndTheirScopeCannotDisagree()
+    {
+        // AnySlotAllSessionKill filters on SlotContributesLists - the SAME membership the
+        // Apps union uses - so a slot's apps and the sessions they are killed in are always
+        // decided by one predicate. An EXPIRED slot contributes neither; a PENDING one
+        // contributes both.
+        var expired = new List<monkmode.Service1.SlotState> { Slot("1", Past, "yes") };
+        Assert.False(Union(false, expired));
+        Assert.Empty(monkmode.Service1.UnionSlotApps(expired, AsOf, Grace, true, Hw));
+
+        var pending = new List<monkmode.Service1.SlotState> { Slot("2", "", "yes", startAt: Future) };
+        Assert.True(Union(false, pending));
+    }
+
+    [Fact]
+    public void FrozenConfig_NeverLosesAnAllSessionKill()
+    {
+        // macValid=False reads every slot as enforcing (SlotEnforcesNow), so a tampered config
+        // keeps the widened scope rather than quietly dropping to session-0-only. It cannot
+        // INVENT one either: with no slot asking, the answer is still off.
+        Assert.True(Union(false, new List<monkmode.Service1.SlotState> { Slot("1", Past, "yes") }, macValid: false));
+        Assert.False(Union(false, new List<monkmode.Service1.SlotState> { Slot("1", Future, "") }, macValid: false));
+    }
+}

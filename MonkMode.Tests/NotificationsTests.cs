@@ -169,6 +169,37 @@ public class NotificationsTests
     public void BlockEndedMessage_PinsTheExactHistoricalText()
         => Assert.Equal("Your block has ended. You're free — stay strong.", mm_notify.Notifications.BlockEndedMessage());
 
+    // ---- v1.1 S4: the AGGREGATE toast for a multi-block machine ----
+    //
+    // v10 arms up to eight slots at once. The single-block wording above is built from the v9
+    // single-block mirror, so with several blocks armed it would state ONE deadline and ONE
+    // site/app count for all of them - true of the mirror, false of the machine. The aggregate
+    // states only what is certain: how many blocks are armed, and how long the SHORTEST of
+    // them has left, so the first thing to end is the number the user sees.
+
+    [Theory]
+    [InlineData(3, 45, "3 blocks active · 45m left")]
+    [InlineData(2, 150, "2 blocks active · 2h 30m left")]
+    [InlineData(1, 60, "1 block active · 1h left")]        // singular, via the shared CountNoun
+    [InlineData(8, 1620, "8 blocks active · 1d 3h left")]  // the full cap, d/h vocabulary
+    public void AggregateActiveMessage_NamesTheCountAndTheShortestRemaining(int blocks, int minutes, string expected)
+        => Assert.Equal(expected, mm_notify.Notifications.AggregateActiveMessage(blocks, TimeSpan.FromMinutes(minutes)));
+
+    [Fact]
+    public void AggregateActiveMessage_UnreadableOrElapsedRemaining_DropsTheLeftClause()
+    {
+        // Same rule BlockActiveMessage follows: never print a bogus or "0m" span. A slot whose
+        // end cannot be read against the monotonic mark simply does not contribute one.
+        Assert.Equal("2 blocks active", mm_notify.Notifications.AggregateActiveMessage(2, null));
+        Assert.Equal("2 blocks active", mm_notify.Notifications.AggregateActiveMessage(2, TimeSpan.Zero));
+        Assert.Equal("2 blocks active", mm_notify.Notifications.AggregateActiveMessage(2, TimeSpan.FromMinutes(-5)));
+    }
+
+    [Fact]
+    public void AggregateActiveMessage_SubMinuteRemaining_UsesTheSharedShortVocabulary()
+        => Assert.Equal("3 blocks active · <1m left",
+                        mm_notify.Notifications.AggregateActiveMessage(3, TimeSpan.FromSeconds(30)));
+
     // ---- D4b: the persistent-toast PAYLOAD builder (pure XML; no WinRT is touched here) ----
 
     [Theory]

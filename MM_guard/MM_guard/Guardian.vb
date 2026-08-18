@@ -179,6 +179,13 @@ Friend Module Guardian
     ' armed). Folded into EffectiveExit so the guardian stays alive between windows and can
     ' restart a killed service for the next one; stands down (terminal) only once the Spec is
     ' cleared. Pure so the derivation is directly unit-tested. INERT until the CLI writes a Spec.
+    '
+    ' v1.1 S4: NO LONGER WIRED. The live loop stopped reading the global [Schedule] Spec (P44
+    ' replaces that legacy floor with the raw per-slot scan + the MAC'd [Guard] scalars), so
+    ' Program.vb now passes scheduleArmed:=False into EffectiveExit and gets the schedule hold
+    ' from AnyBlockHeld instead. Kept - not deleted - because it is still the parity twin of
+    ' Service1.ScheduleArmed (pinned equal by the cross-assembly [Theory]s) and S5 makes a
+    ' schedule a SLOT, at which point the guardian reads a slot's own ScheduleSpec through it.
     Friend Function ScheduleArmed(ByVal macValid As Boolean, ByVal specText As String) As Boolean
         Return macValid AndAlso Not String.IsNullOrWhiteSpace(specText)
     End Function
@@ -325,6 +332,75 @@ Friend Module Guardian
     '    capability.
     Friend Function ShouldStandDown(ByVal claimLost As Boolean, ByVal guardianProcessCount As Integer) As Boolean
         Return claimLost AndAlso guardianProcessCount > 1
+    End Function
+
+    ' ==== v1.1 S4 (P43/P44): the guardian sees SLOTS, without growing a parser ====
+    '
+    ' Until S4 the guardian's stand-down read the v9 SINGLE-BLOCK mirror only - [Time] Until,
+    ' [Time] CoolOffUntil, [Partner] UnlockedAt, [Schedule] ActiveUntil, and the legacy
+    ' [Schedule] Spec floor. v10 keeps every armed block in [Slot1]..[Slot8], so a machine can
+    ' hold N blocks the mirror never mentions; a guardian that cannot see them would stand
+    ' down - and stop SCM-restarting a killed service - while those blocks are still
+    ' enforcing. That is the fail-OPEN direction, so the fold below is a pure WIDENING: the
+    ' loop's blockActive becomes "the v9 residual still holds OR AnyBlockHeld", and nothing
+    ' here can make the guardian exit earlier than it did before.
+    '
+    ' TWO INDEPENDENT SIGNALS, either of which alone holds:
+    '
+    '   1. THE MAC'd GUARD SCALARS (P43). [Guard] HoldUntil is the EXTEND-ONLY horizon - the
+    '      latest moment any slot could still hold - written by the CLI at every arm and
+    '      cleared ONLY by the whole-machine teardown; [Guard] ArmedCount counts the slots
+    '      that keep the machinery up WITHOUT an open block of their own (schedule + pending).
+    '      Both are INSIDE the v10 canonical, so editing either is tamper-evident (macValid
+    '      False => held regardless). Extend-only means a stale scalar can only OVER-guard.
+    '
+    '   2. THE RAW PER-POSITION FLOOR (P44), scanned in Program.RawSlotFloorHeld: a non-empty
+    '      Slot<pos>.ScheduleSpec / StartAt / Until at ANY pos 1..MaxSlots. NO parser, NO
+    '      decrypt, NO MAC gate - the guardian must never grow a fifth copy of the slot
+    '      readers, and a garbage non-empty value can only over-guard. It is the backstop for
+    '      what the scalars cannot cover: a config whose [Guard] section was never written.
+    '
+    ' Both go quiet only once the slot SECTIONS ARE GONE, which is exactly what RetireSlotAt's
+    ' compaction and P39's TeardownAll do (RemoveSection on every freed position, ArmedCount=0
+    ' and HoldUntil="" written). Slots are removed, never flagged, so "the file still names a
+    ' slot" is a sound floor and the guardian genuinely does stand down after a teardown.
+
+    ' Is the extend-only [Guard] HoldUntil horizon still ahead of the service-written monotonic
+    ' mark? DEFINED AS ScheduleActive rather than re-derived: the question has the identical
+    ' shape (a stored deadline vs HighWater; "" = nothing recorded = not held; a non-empty but
+    ' unparseable deadline = HELD, fail-closed) and two hand-written copies of one policy
+    ' drift. B4: measured against HighWater, never DateTime.Now, so a rolled clock cannot
+    ' shorten the guard horizon.
+    Friend Function GuardHoldActive(ByVal guardHoldUntilText As String, ByVal highWaterText As String) As Boolean
+        Return ScheduleActive(guardHoldUntilText, highWaterText)
+    End Function
+
+    ' Does [Guard] ArmedCount hold the guardian up? Blank/absent = nothing recorded = NO hold:
+    ' a teardown writes an explicit "0", and for a config that never wrote the key at all the
+    ' RAW FLOOR is the backstop - reading "absent" as held would leave a guardian that can
+    ' never exit on any config missing the section, which is a wedge, not a defence. A parsed
+    ' count > 0 holds. A NON-EMPTY value that will not parse HOLDS (fail-closed): the only
+    ' thing "I cannot read the count" can honestly mean is "keep guarding".
+    Friend Function GuardArmedCountHolds(ByVal guardArmedCountText As String) As Boolean
+        If String.IsNullOrWhiteSpace(guardArmedCountText) Then Return False
+        Dim n As Integer
+        If Not Integer.TryParse(guardArmedCountText.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, n) Then Return True
+        Return n > 0
+    End Function
+
+    ' THE S4 HOLD. Pure, so the whole truth table is unit-tested; the live reads it consumes
+    ' (decrypting [Guard] HoldUntil, the raw slot scan, the DPAPI MAC evaluation) stay in
+    ' Program.vb behind this one call, exactly like EffectiveExit's macValid.
+    '
+    ' Not macValid => True BEFORE anything else. A tampered or unreadable config must never
+    ' stand the watchdog down, and with zero readable slots a plain "does anything hold?" fold
+    ' answers False - the empty-list fail-open that Service1.AnyBlockHeld guards against the
+    ' same way, by answering the MAC first.
+    Friend Function AnyBlockHeld(ByVal guardHoldUntilText As String, ByVal guardArmedCountText As String, ByVal rawFloorHeld As Boolean, ByVal highWaterText As String, ByVal macValid As Boolean) As Boolean
+        If Not macValid Then Return True
+        If rawFloorHeld Then Return True
+        If GuardHoldActive(guardHoldUntilText, highWaterText) Then Return True
+        Return GuardArmedCountHolds(guardArmedCountText)
     End Function
 
 End Module
