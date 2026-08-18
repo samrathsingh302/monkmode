@@ -564,6 +564,38 @@ Friend Module UrlWatch
         End Try
     End Function
 
+    '    v1.1 S7b (P45), DISPLAY-ONLY: does this pattern set name the same HOST the
+    '    redirect target points at? Used solely to decide WHICH SLOT gets credited
+    '    with a redirect in the stats sidecar - it steers no browser and gates no
+    '    action, so a wrong answer mislabels a number and nothing else.
+    '
+    '    Host equality, not pattern matching, because the target is where the browser
+    '    was SENT, not what it hit: RedirectTargetFor emits "https://<matched host>/",
+    '    whose host is the one piece of the original hit that survives. Both sides go
+    '    through NormalizeUrlForMatch first, so the P59 YouTube special case still
+    '    resolves ("https://www.youtube.com/feed/subscriptions" and "youtube.com/shorts"
+    '    both reduce to host "youtube.com").
+    '
+    '    KNOWN under-attribution, accepted: a slot whose only pattern is a subdomain
+    '    form ("m.youtube.com/shorts") does not own a target on "youtube.com", so its
+    '    redirect lands in the lifetime and day totals with no slot label. Widening the
+    '    comparison to a suffix match would credit the wrong block instead, which is
+    '    worse. Pure; never throws.
+    Friend Function PatternsOwnTarget(ByVal target As String, ByVal patterns As IEnumerable(Of String)) As Boolean
+        Try
+            Dim targetHost As String = HostOfNormalized(NormalizeUrlForMatch(target))
+            If targetHost = "" Then Return False
+            If patterns Is Nothing Then Return False
+            For Each p As String In patterns
+                If p Is Nothing Then Continue For
+                If String.Equals(HostOfNormalized(NormalizeUrlForMatch(p)), targetHost, StringComparison.Ordinal) Then Return True
+            Next
+            Return False
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     '    Does this set carry at least one pattern with any content? Nothing entries
     '    and blanks do not count - a slot armed with no --urls stores "", which
     '    splits to a list of empties, and acting on that would mean "read the

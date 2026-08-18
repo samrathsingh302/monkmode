@@ -54,6 +54,12 @@ Public Class Form1
     ' the testable ComputeCompensatedUntil helper can use it.
     Private Shared ReadOnly CA As New CultureInfo("en-CA")
     Private ReadOnly tray As New NotifyIcon()
+    ' v1.1 S7b (P53): the tray's context menu - EXACTLY the two items
+    ' TrayMenuItemLabels names, built from that one list so the pinned test and the
+    ' live menu can never drift. trayBlockedTodayItem is the DISABLED count label,
+    ' kept as a field only so the 5s poll can refresh its text in place.
+    Private ReadOnly trayMenu As New ContextMenuStrip()
+    Private trayBlockedTodayItem As ToolStripMenuItem = Nothing
     Private WithEvents pollTimer As New Timer()
     Private WithEvents appKillTimer As New Timer()
     Private WithEvents closeTimer As New Timer()
@@ -103,6 +109,23 @@ Public Class Form1
 
         tray.Icon = SystemIcons.Information
         tray.Text = "MonkMode"
+
+        ' v1.1 S7b (P53): the quick-status menu. Item 0 is the only ACTION the tray
+        ' offers and it merely shows a toast; item 1 is a disabled label. There is NO
+        ' Exit / Close / Quit / Pause item, and there never may be: this process
+        ' performs the user-session app-kill AND (S7) the URL watcher, so a one-click
+        ' exit in the tray would be a mouse-gesture self-bypass of both. ExitNotifier
+        ' stays reachable ONLY from the block-ended path.
+        Dim trayLabels As List(Of String) = TrayMenuItemLabels(0)
+        Dim statusItem As New ToolStripMenuItem(trayLabels(0))
+        AddHandler statusItem.Click, AddressOf TrayStatus_Click
+        trayMenu.Items.Add(statusItem)
+        trayBlockedTodayItem = New ToolStripMenuItem(trayLabels(1))
+        trayBlockedTodayItem.Enabled = False
+        trayMenu.Items.Add(trayBlockedTodayItem)
+        tray.ContextMenuStrip = trayMenu
+        AddHandler tray.DoubleClick, AddressOf TrayStatus_Click
+
         tray.Visible = True
 
         pollTimer.Interval = 5000
@@ -158,6 +181,7 @@ Public Class Form1
         ' interval after this launch, then announce the active manual block once (best-effort).
         reminderAnchorTick = Environment.TickCount64
         If launchMsg <> "" Then ShowToast(launchMsg)
+        RefreshTray()   ' v1.1 S7b (P52): seed the tooltip before the first 5s poll
     End Sub
 
     Private Sub pollTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles pollTimer.Tick
@@ -191,6 +215,12 @@ Public Class Form1
         ' anyway - they are gated off Done<>"yes" above - so this ordering is simply the safe one).
         If coolOffToast <> "" Then ShowToast(coolOffToast)
         If reminderToast <> "" Then ShowToast(reminderToast)
+
+        ' v1.1 S7b (P52): refresh the tray quick-status on the existing 5s beat. Its
+        ' OWN ini read, deliberately not folded into the load above: the expiry logic
+        ' in this method is the notifier's one load-bearing decision, and a cosmetic
+        ' tooltip must not be able to change what it reads or when it returns.
+        RefreshTray()
 
         If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
             pollTimer.Stop()
@@ -294,6 +324,120 @@ Public Class Form1
             Return Nothing
         End Try
     End Function
+
+    ' ============ v1.1 S7b (F3): the tray quick-status (P52 tooltip, P53 menu) ============
+    '
+    ' Everything below is DISPLAY. It reads the config (already public to this process)
+    ' and the stats sidecar, and it writes nothing at all. The tray offers exactly one
+    ' action - show a toast - so there is no gesture here that stops, pauses or exits
+    ' the notifier, and therefore none that stops app-kill or the URL watcher.
+
+    ' The historical NotifyIcon.Text ceiling. 63 characters (64 including the null) was
+    ' a hard Win32 limit for years; modern frameworks allow more, but truncating is
+    ' safe on every one of them, so we truncate rather than probe.
+    Friend Const TrayTextMaxLength As Integer = 63
+
+    ' The one action label the menu carries. A const so the "no exit item" test can
+    ' assert on the exact set rather than on a literal typed twice.
+    Friend Const TrayStatusMenuLabel As String = "Status"
+
+    ' P52's summary, UNTRUNCATED: "MonkMode - 2 blocks · 45m left · 7 blocked today".
+    ' The "· X left" clause is dropped when the shortest remaining span is unknown or
+    ' already elapsed (the same rule every other MonkMode message follows - never print
+    ' a bogus deadline). Pure; never throws.
+    Friend Shared Function BuildTraySummary(ByVal blockCount As Integer,
+                                            ByVal shortest As TimeSpan?,
+                                            ByVal blockedToday As Integer) As String
+        Dim sb As New System.Text.StringBuilder("MonkMode - ")
+        sb.Append(blockCount.ToString(CultureInfo.InvariantCulture))
+        sb.Append(" block")
+        If blockCount <> 1 Then sb.Append("s")
+        If shortest IsNot Nothing AndAlso shortest.Value.TotalSeconds > 0 Then
+            sb.Append(" · ")
+            sb.Append(Notifications.HumanizeShort(shortest.Value))
+            sb.Append(" left")
+        End If
+        sb.Append(" · ")
+        sb.Append(blockedToday.ToString(CultureInfo.InvariantCulture))
+        sb.Append(" blocked today")
+        Return sb.ToString()
+    End Function
+
+    ' P52: the summary as the TOOLTIP sees it - hard-truncated to TrayTextMaxLength.
+    ' Pure; never throws.
+    Friend Shared Function TruncateTrayText(ByVal text As String) As String
+        Dim s As String = If(text, "")
+        If s.Length <= TrayTextMaxLength Then Return s
+        Return s.Substring(0, TrayTextMaxLength)
+    End Function
+
+    ' P53: the EXACT menu item set, in order - item 0 the Status action, item 1 the
+    ' disabled count label. The live menu is built from this list and the pinned test
+    ' asserts on it, so the one place to look for "can the tray kill the notifier?" is
+    ' this function's return value. There is no third item, and no item whose label or
+    ' behaviour exits anything. Pure; never throws.
+    Friend Shared Function TrayMenuItemLabels(ByVal blockedToday As Integer) As List(Of String)
+        Dim labels As New List(Of String)
+        labels.Add(TrayStatusMenuLabel)
+        labels.Add("Blocked today: " & blockedToday.ToString(CultureInfo.InvariantCulture))
+        Return labels
+    End Function
+
+    ' P48 (display): how many attempts MonkMode stopped TODAY - app kills plus browser
+    ' redirects, merged across both sidecars. A missing, corrupt or hostile sidecar
+    ' reads as 0 (StatsSidecar is total), and 0 is a perfectly honest answer. Never
+    ' throws.
+    Private Function BlockedTodayCount() As Integer
+        Try
+            Dim today As StatsSidecar.Counts =
+                StatsSidecar.TotalForDay(StatsSidecar.ReadMerged(), StatsSidecar.DayKeyFor(DateTime.Now))
+            Return CInt(Math.Min(today.Kills + today.Redirects, CLng(Integer.MaxValue)))
+        Catch ex As Exception
+            Return 0
+        End Try
+    End Function
+
+    ' Recompute the tooltip + the disabled count label. Best-effort: on ANY failure the
+    ' tray simply keeps whatever it last showed. Called from Load and the 5s poll.
+    Private Sub RefreshTray()
+        Try
+            Dim blockCount As Integer = 0
+            Dim shortest As TimeSpan? = Nothing
+            Try
+                Dim ini As New IniFile
+                ini.Load(IniPath())
+                blockCount = RawSlotBlockCount(ini)
+                shortest = ShortestSlotRemaining(ini)
+            Catch ex As Exception
+                ' An unreadable config leaves the counts at their zero defaults; the
+                ' tooltip then states less, never something false.
+            End Try
+            Dim blockedToday As Integer = BlockedTodayCount()
+            tray.Text = TruncateTrayText(BuildTraySummary(blockCount, shortest, blockedToday))
+            If trayBlockedTodayItem IsNot Nothing Then
+                trayBlockedTodayItem.Text = TrayMenuItemLabels(blockedToday)(1)
+            End If
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' P53: the ONLY thing the tray can do - show the same summary as a toast. Shared by
+    ' the Status menu item and the double-click. Best-effort; shows nothing on failure.
+    Private Sub TrayStatus_Click(ByVal sender As Object, ByVal e As EventArgs)
+        Try
+            Dim blockCount As Integer = 0
+            Dim shortest As TimeSpan? = Nothing
+            Try
+                Dim ini As New IniFile
+                ini.Load(IniPath())
+                blockCount = RawSlotBlockCount(ini)
+                shortest = ShortestSlotRemaining(ini)
+            Catch ex As Exception
+            End Try
+            ShowToast(BuildTraySummary(blockCount, shortest, BlockedTodayCount()))
+        Catch ex As Exception
+        End Try
+    End Sub
 
     ' D4/D4b: show a notification, fail-soft (a toast is cosmetic; it must never bubble an exception
     ' into the poll/load path). All D4 toasts + the block-ended toast route through here. D4b swaps
@@ -439,8 +583,54 @@ Public Class Form1
         ' Stamped BEFORE the attempt: the cooldown bounds ATTEMPTS, so a browser that keeps
         ' refusing the SetValue is retried once per 5s, not on every 2s beat.
         System.Threading.Interlocked.Exchange(urlLastActionTick, nowTick)
-        UrlWatch.PerformRedirect(target)
+        If UrlWatch.PerformRedirect(target) Then RecordRedirect(target)
     End Sub
+
+    ' v1.1 S7b (P45), DISPLAY-ONLY: credit one redirect to the stats sidecar the
+    ' notifier alone writes (%ProgramData%\MonkMode\stats-notify.ini). Reached at most
+    ' once per P60 cooldown - i.e. once per 5s in the worst case - and ONLY after a
+    ' redirect actually happened, so re-opening the config here costs nothing on the
+    ' hot path and the watch pass above keeps its single ini read.
+    '
+    ' Best-effort end to end: the whole body is wrapped, StatsSidecar's own entry
+    ' points are total, and the failure value is "no counter this time". A counter may
+    ' never disturb the watcher, and the watcher may never disturb the app-kill beat.
+    ' grantUsersModify:=False - the notifier is NOT elevated; setting an ACL is the
+    ' service's job (P49), and this side only creates the folder if nobody has yet.
+    Private Sub RecordRedirect(ByVal target As String)
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            StatsSidecar.Apply(StatsSidecar.NotifyStatsPath(),
+                               StatsSidecar.NewDelta(SlotIdOwningTarget(ini, target), 0, 1, 0,
+                                                     StatsSidecar.DayKeyFor(DateTime.Now)),
+                               False)
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' v1.1 S7b (P45), DISPLAY-ONLY: which slot Id owns a redirect to `target`, or "" when
+    ' none can be named (the redirect then counts towards the lifetime and day totals with
+    ' no slot label - never lost). Same RAW, ungated scan as RawSlotUrlPatterns, in
+    ' POSITION order, first owner wins - see UrlWatch.PatternsOwnTarget for why host
+    ' equality is the right test and what it deliberately under-attributes. Slot IDs are
+    ' stable across the compaction a retire performs; positions are not, which is why the
+    ' sidecar keys on the Id. Pure; never throws.
+    Friend Shared Function SlotIdOwningTarget(ByVal ini As IniFile, ByVal target As String) As String
+        If ini Is Nothing Then Return ""
+        For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+            Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+            Dim pats As New List(Of String)
+            For Each tok As String In If(ini.GetKeyValue(sec, "UrlPatterns"), "").Split("|"c)
+                Dim t As String = tok.Trim()
+                If t <> "" Then pats.Add(t)
+            Next
+            If pats.Count > 0 AndAlso UrlWatch.PatternsOwnTarget(target, pats) Then
+                Return If(ini.GetKeyValue(sec, "Id"), "").Trim()
+            End If
+        Next
+        Return ""
+    End Function
 
     ' The union of the armed slots' URL patterns, re-read from disk each pass (the CLI is
     ' their only writer, and a slot armed after this notifier launched must start being
@@ -627,7 +817,10 @@ Public Class Form1
 
         ' D4: the block-ended toast, now routed through the centralised builder (same
         ' wording, pinned by a test) + the shared fail-soft ShowToast.
-        ShowToast(Notifications.BlockEndedMessage())
+        ' v1.1 S7b: it now closes with what the block actually stopped today. A zero or
+        ' unreadable count yields the historical string BYTE-UNCHANGED, so a machine
+        ' with no sidecar sees exactly the toast it saw before this slice.
+        ShowToast(Notifications.BlockEndedMessageWithCount(BlockedTodayCount()))
 
         ' give the balloon a moment to display before exiting
         closeTimer.Start()

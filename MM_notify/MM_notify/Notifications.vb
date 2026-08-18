@@ -184,6 +184,16 @@ Friend Module Notifications
         Return "Your block has ended. You're free — stay strong."
     End Function
 
+    ' v1.1 S7b: the block-ended toast WITH the day's tally appended - "... stay strong.
+    ' MonkMode blocked 7 attempts today." A non-positive count (no sidecar yet, an
+    ' unreadable one, or a genuinely quiet day) returns BlockEndedMessage() VERBATIM,
+    ' so the historical string is byte-unchanged on every machine that has no numbers
+    ' to show and the pinned wording test above keeps meaning what it meant. Pure.
+    Friend Function BlockEndedMessageWithCount(ByVal blockedToday As Integer) As String
+        If blockedToday <= 0 Then Return BlockEndedMessage()
+        Return BlockEndedMessage() & " MonkMode blocked " & CountNoun(blockedToday, "attempt") & " today."
+    End Function
+
     ' Deterministic wall-clock render for a toast ("2026-07-08 17:00"): an explicit
     ' invariant pattern (not a culture-dependent short form) so the string is stable
     ' across machines - and unit-testable by literal.

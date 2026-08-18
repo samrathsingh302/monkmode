@@ -66,6 +66,23 @@ WindowsForms-only profile. Consequences:
     Copyright (c) .NET Foundation and Contributors
     Licensed under the MIT License (licence text: THIRD-PARTY-LICENSES.md)
 
+Windows App SDK - EVALUATED AND VETOED (18/08/2026):
+v1.1 slice S7b evaluated replacing Microsoft.Toolkit.Uwp.Notifications with
+Microsoft.WindowsAppSDK (AppNotificationManager, unpackaged). It was VETOED and
+the toolkit package above is retained. Reasons, in order of finality:
+
+  - the Windows App SDK supports C# and C++/WinRT; MM_notify is VB.NET. Its build
+    targets inject a C# source file (WindowsAppSDK-VersionInfo.cs) straight into
+    the compilation, which the VB compiler cannot parse - a scratch build against
+    1.8.260804001 produced 244 compiler errors, none of them MonkMode's;
+  - an UNPACKAGED Windows App SDK app additionally requires either a machine-wide
+    WindowsAppSDK runtime install (not zero-friction for dist\) or a forced
+    self-contained build (conflicting with build-dist.ps1's default);
+  - the retained package is MIT, ships one small assembly, and is the route
+    Microsoft still documents for unpackaged Win32 toasts. It is in maintenance,
+    which is accepted: the balloon fail-safe fallback catches any delivery failure,
+    so a dead toast path degrades the notifier's cosmetics and nothing else.
+
 The MIT licence is GPLv3-compatible; the combined work remains GPLv3.
 
 Historical note - INI parser:

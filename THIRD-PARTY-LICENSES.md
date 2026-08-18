@@ -5,7 +5,12 @@ the following MIT-licensed NuGet assemblies alongside the MonkMode executables
 (no third-party SOURCE is in the tree — see NOTICE):
 
 - **Microsoft.Toolkit.Uwp.Notifications 7.1.3** — Copyright (c) .NET Foundation
-  and Contributors
+  and Contributors. Retained deliberately: the v1.1 S7b swap to
+  **Microsoft.WindowsAppSDK** was evaluated on 18/08/2026 and **vetoed** (that SDK
+  supports C#/C++ only and its targets inject a C# source file the VB compiler
+  cannot parse — 244 errors against 1.8.260804001; and an unpackaged app would
+  additionally need an external runtime install or a forced self-contained build).
+  See NOTICE for the full reasoning and the accepted consequence.
 - **Microsoft.Windows.SDK.NET / WinRT.Runtime** (C#/WinRT projection) —
   Copyright (c) Microsoft Corporation
 

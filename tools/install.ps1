@@ -153,6 +153,48 @@ foreach ($exe in $requiredExes) {
     }
 }
 
+# ---- 4b. Create the stats-sidecar directory with a Users:Modify ACE (P49) ----
+# v1.1 S7b. MonkMode keeps its counters (apps closed, browser nudges, armed-seconds
+# day-log, streaks) in %ProgramData%\MonkMode\ - NOT beside the executables, because
+# Program Files is admin-write-only by the deliberate ACL described under "WHY PROGRAM
+# FILES" above and the notifier that records browser nudges runs NON-elevated.
+#
+# A directory created under ProgramData inherits an ACL under which ordinary users can
+# read but not write, so an explicit BUILTIN\Users : Modify ACE is what makes the
+# non-elevated notifier able to write its own file. Granted here, once, by the elevated
+# installer; the LocalSystem service applies the identical ACE at runtime if the folder
+# is ever absent (StatsSidecar.EnsureDirFor).
+#
+# THIS GRANTS NOTHING THAT MATTERS TO ENFORCEMENT. No enforcement path ever reads these
+# files: they are numbers on a screen. A user who deletes, forges or rewrites them
+# changes what `monkmode stats` prints and nothing else - no block lifts, shortens or
+# moves. The four executables and the MAC'd config stay in admin-only Program Files.
+#
+# Idempotent and non-fatal: an existing directory is left in place (its history is USER
+# DATA - no-data-loss), and a failure to set the ACE is a warning, not a throw, since a
+# missing counter must never abort an install.
+$statsDir = Join-Path $env:ProgramData 'MonkMode'
+if (-not (Test-Path $statsDir)) {
+    New-Item -ItemType Directory -Path $statsDir -Force | Out-Null
+    Write-Host "Created $statsDir (MonkMode stats)."
+} else {
+    Write-Host "$statsDir already exists - leaving it and its counter history alone."
+}
+try {
+    # The well-known SID, not the name "Users": the name is localised on a non-English
+    # Windows and would fail to resolve there.
+    $usersSid = New-Object Security.Principal.SecurityIdentifier(
+        [Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+    $acl = Get-Acl -Path $statsDir
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+        $usersSid, 'Modify', 'ObjectInherit,ContainerInherit', 'None', 'Allow')
+    $acl.AddAccessRule($rule)
+    Set-Acl -Path $statsDir -AclObject $acl
+    Write-Host "Granted BUILTIN\Users : Modify on $statsDir (the notifier is not elevated)."
+} catch {
+    Write-Host "WARNING: could not set the Users:Modify ACE on $statsDir - MonkMode will still block; only the counters may not record. ($_)" -ForegroundColor Yellow
+}
+
 # ---- 5. Add the install dir to the MACHINE PATH, idempotently ----------------
 # Read the current machine PATH, split into entries, and only append if the install dir
 # is not already there (case-insensitive, trailing-backslash-insensitive) - so re-running

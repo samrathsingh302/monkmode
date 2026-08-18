@@ -37,7 +37,32 @@
          (MIT, GPLv3-compatible, free) is Microsoft's documented route for Win32 non-MSIX apps:
          ToastNotificationManagerCompat lazily + idempotently registers the AUMID, a per-user
          Start-menu shortcut, and an HKCU COM activator on the FIRST CreateToastNotifier() call -
-         all at RUNTIME inside the notifier only, never at build or in the pure unit tests. -->
+         all at RUNTIME inside the notifier only, never at build or in the pure unit tests.
+
+         v1.1 S7b (P72) - THE WINDOWS APP SDK SWAP IS VETOED; THIS PACKAGE STAYS.
+         P72 asked for an attempt at Microsoft.WindowsAppSDK (AppNotificationManager,
+         <WindowsPackageType>None</WindowsPackageType>) with an explicit self-serve veto.
+         Attempted 18/08/2026 against Microsoft.WindowsAppSDK 1.8.260804001 (the latest
+         stable 1.x on nuget.org at slice time) on a scratch copy of this project: the
+         package's build targets unconditionally inject a C# SOURCE FILE into the
+         compilation - microsoft.windowsappsdk.runtime\1.8.260804001\include\
+         WindowsAppSDK-VersionInfo.cs - which the VB compiler cannot parse. Result: 244
+         errors (BC30035 / BC30188 / BC30183 / BC30481 ...), none of them ours. The
+         Windows App SDK supports C# and C++/WinRT; this is a VB.NET project, so the swap
+         is not a matter of configuration.
+         Two further blockers stand behind that one, and would still stand if the language
+         boundary were somehow crossed: an UNPACKAGED Windows App SDK app needs either the
+         WindowsAppSDK RUNTIME installed machine-wide (an external install - the opposite
+         of the zero-friction dist\ P72 required) or <WindowsAppSDKSelfContained>, which
+         forces the whole app self-contained and conflicts with build-dist.ps1's
+         framework-dependent default.
+         ACCEPTED CONSEQUENCE of keeping 7.1.3: the Windows Community Toolkit
+         notifications package is in maintenance (no feature work), and its
+         ToastNotificationManagerCompat path is the one Microsoft still documents for
+         unpackaged Win32 apps. It works on this stack today, it is MIT, it ships one
+         small assembly, and the balloon fail-safe below catches it if it ever stops
+         working - a notification failure has never been able to crash the notifier and
+         still cannot. Recorded in NOTICE + THIRD-PARTY-LICENSES.md. -->
     <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" Version="7.1.3" />
   </ItemGroup>
 

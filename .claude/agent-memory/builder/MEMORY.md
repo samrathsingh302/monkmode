@@ -1,2 +1,3 @@
 - [.NET SDK install vs build-server lock](dotnet-sdk-install-build-server-lock.md) — new-SDK install into ~/.dotnet fails while MSBuild/Roslyn nodes hold dotnet.exe; `build-server shutdown` first
 - [PowerShell Set-Content corrupts .vb sources](powershell-setcontent-corrupts-vb-sources.md) — never script file edits via Get-Content/Set-Content: adds a BOM, mangles non-ASCII; Edit tool or Copy-Item
+- [Copy-Item keeps mtime → stale parity build](copy-item-preserves-mtime-stale-build.md) — touch a copied parity file or MSBuild skips it and tests pass against a stale assembly

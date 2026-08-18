@@ -491,6 +491,12 @@ Module Program
                 Console.WriteLine(FormatSlotRow(v))
                 Console.WriteLine(SlotExitIndent & FormatSlotExitLine(v))
             Next
+            ' v1.1 S7b (P48): what the blocks have actually stopped today, from the
+            ' display-only sidecars. "" (printed as nothing) on a quiet day or when the
+            ' sidecar is absent/corrupt - `status` must never grow a row of zeros, and it
+            ' must never fail because a counter file did.
+            Dim todayLine As String = BlockedTodayStatusLine()
+            If todayLine <> "" Then Console.WriteLine(todayLine)
             ' B7: never render a reassuring exit story over a config that failed its integrity
             ' check. ReadSlotViews already suppresses the committed / cooling-off fields in that
             ' case (so the Exit column reads code+wait, its most conservative value); say plainly
@@ -548,20 +554,78 @@ Module Program
     ' D3b: `monkmode stats` - a read-only summary of block history from the separate non-MAC stats file
     ' (Stats.vb). Display-only: ZERO enforcement authority, never touches a block. A missing/corrupt file
     ' simply reads as no/less history (Stats.ReadRecords is tolerant), so stats can never error a user out.
+    ' v1.1 S7b (P48): `stats` now shows PLANNED history (monkmode_stats, above) AND the
+    ' ACTUALS the two sidecars recorded (%ProgramData%\MonkMode\, S7b). Both halves are
+    ' independently tolerant, so either can be missing: a machine that has armed blocks but
+    ' never had the sidecar (an older install) shows only the planned half, and a machine
+    ' whose monkmode_stats was deleted still shows its streak. Only when BOTH are empty do
+    ' we print the "no blocks yet" hint.
     Private Function DoStats() As Integer
         Dim s As Stats.StatsSummary = Stats.SummarizeAsOf(Stats.ReadRecords(), DateTime.Now)
-        If Not s.HasAny Then
+        Dim actuals As List(Of String) = FormatStatsActuals(StatsSidecar.ReadMerged(),
+                                                           StatsSidecar.DayKeyFor(DateTime.Now))
+        If Not s.HasAny AndAlso actuals.Count = 0 Then
             Console.WriteLine("No blocks recorded yet. Start one with, e.g.:  monkmode block --sites reddit.com --for 2h")
             Return 0
         End If
         Console.WriteLine("MonkMode stats")
-        Console.WriteLine("  Blocks started:   " & s.TotalBlocks & "  (" & s.CompletedBlocks & " completed, " & s.ActiveOrUpcomingBlocks & " active/upcoming)")
-        Console.WriteLine("  Committed blocks: " & s.CommittedBlocks)
-        Console.WriteLine("  Total focus time: " & Humanize(s.TotalPlannedTime) & " (planned)")
-        Console.WriteLine("  Longest block:    " & Humanize(s.LongestPlannedBlock))
-        Console.WriteLine("  First block:      " & s.FirstStart.ToString("yyyy-MM-dd"))
-        Console.WriteLine("  Latest block:     " & s.LastStart.ToString("yyyy-MM-dd"))
+        If s.HasAny Then
+            Console.WriteLine("  Blocks started:   " & s.TotalBlocks & "  (" & s.CompletedBlocks & " completed, " & s.ActiveOrUpcomingBlocks & " active/upcoming)")
+            Console.WriteLine("  Committed blocks: " & s.CommittedBlocks)
+            Console.WriteLine("  Total focus time: " & Humanize(s.TotalPlannedTime) & " (planned)")
+            Console.WriteLine("  Longest block:    " & Humanize(s.LongestPlannedBlock))
+            Console.WriteLine("  First block:      " & s.FirstStart.ToString("yyyy-MM-dd"))
+            Console.WriteLine("  Latest block:     " & s.LastStart.ToString("yyyy-MM-dd"))
+        End If
+        For Each line As String In actuals
+            Console.WriteLine(line)
+        Next
         Return 0
+    End Function
+
+    ' v1.1 S7b (P47/P48), PURE + DISPLAY-ONLY: the "actuals" block of `stats`, built from
+    ' the MERGED sidecars. An EMPTY list means "nothing recorded" - which is what lets
+    ' DoStats decide whether it has anything to print at all - and that is exactly the
+    ' answer a missing, corrupt, garbage or hostile sidecar produces, since StatsSidecar
+    ' reads every failure as zeros. Emptiness is keyed on armed SECONDS: a file holding
+    ' only kills with no held time is corrupt-ish, and the honest reading of it is "we have
+    ' no measured focus time", so nothing is claimed.
+    Friend Function FormatStatsActuals(ByVal d As StatsSidecar.StatsData, ByVal todayKey As String) As List(Of String)
+        Dim lines As New List(Of String)
+        If d Is Nothing OrElse d.Lifetime.ArmedSeconds <= 0 Then Return lines
+        Dim today As StatsSidecar.Counts = StatsSidecar.TotalForDay(d, todayKey)
+        lines.Add("  Time blocked:     " & Humanize(TimeSpan.FromSeconds(d.Lifetime.ArmedSeconds)) & " (actual)")
+        lines.Add("  Apps closed:      " & d.Lifetime.Kills)
+        lines.Add("  Browser nudges:   " & d.Lifetime.Redirects)
+        lines.Add("  Focus days:       " & StatsSidecar.FocusDayCount(d) &
+                  "  (streak " & StatsSidecar.CurrentStreak(d, todayKey) &
+                  ", longest " & StatsSidecar.LongestStreak(d) & ")")
+        lines.Add("  Today:            " & Humanize(TimeSpan.FromSeconds(today.ArmedSeconds)) &
+                  " blocked, " & (today.Kills + today.Redirects) & " attempt(s) stopped")
+        Return lines
+    End Function
+
+    ' The IO half of the `status` today-line: read the merged sidecars and format them.
+    ' Best-effort - "" on any failure, so `status` can never be broken by a counter file.
+    Private Function BlockedTodayStatusLine() As String
+        Try
+            Dim today As StatsSidecar.Counts =
+                StatsSidecar.TotalForDay(StatsSidecar.ReadMerged(), StatsSidecar.DayKeyFor(DateTime.Now))
+            Return FormatBlockedTodayLine(today.Kills, today.Redirects)
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    ' v1.1 S7b (P48), PURE + DISPLAY-ONLY: `status`'s one-line "what MonkMode has stopped
+    ' today" note, or "" when it has stopped nothing (a quiet day says nothing rather than
+    ' printing a row of zeros). Counts come from the merged sidecars and have no
+    ' enforcement authority whatsoever.
+    Friend Function FormatBlockedTodayLine(ByVal kills As Long, ByVal redirects As Long) As String
+        Dim k As Long = If(kills > 0, kills, 0L)
+        Dim r As Long = If(redirects > 0, redirects, 0L)
+        If k + r <= 0 Then Return ""
+        Return "  Today: " & (k + r) & " stopped (" & k & " app close(s), " & r & " browser nudge(s))"
     End Function
 
     Private Function DoAdd(ByVal args As String()) As Integer

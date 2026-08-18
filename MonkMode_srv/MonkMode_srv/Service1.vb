@@ -1960,17 +1960,65 @@ Public Class Service1
         ' read exactly as the old If did), so a default block is unchanged; True makes it true for any
         ' session. No widen ever removes a kill (fail-closed, matching the schedule app-kill union
         ' that is likewise un-gated by macValid).
+        ' v1.1 S7b: the names of the processes this tick actually killed, for the
+        ' stats sidecar below. Collected rather than counted so each one can be
+        ' attributed to the slot that asked for it. Filled INSIDE the existing Try,
+        ' after Kill() returned without throwing, so the list holds real kills only.
+        ' The name is read into a local BEFORE Kill(): Process.ProcessName throws once
+        ' the process has exited, so reading it afterwards would drop the very kills we
+        ' are trying to count (and it is the same string the matcher just used).
+        Dim killedThisTick As New List(Of String)
         processList = System.Diagnostics.Process.GetProcesses()
         For Each Proc In processList
             If ProcessInKillScope(allSessionKillNow, Proc.SessionId) Then
                 Try
-                    If ProcessNameInKillList(killList, Proc.ProcessName) Then
+                    Dim procName As String = Proc.ProcessName
+                    If ProcessNameInKillList(killList, procName) Then
                         Proc.Kill()
+                        killedThisTick.Add(procName)
                     End If
                 Catch ex As Exception
                 End Try
             End If
         Next
+
+        ' ---- v1.1 S7b (P45/P47): the stats sidecar. DISPLAY-ONLY, ONE WRITE PER TICK ----
+        '
+        ' Records what this tick DID - apps killed (per slot) and, while a block is
+        ' held, another TimerIntervalMs/1000 seconds on today's day-log - into
+        ' %ProgramData%\MonkMode\stats-service.ini, of which the service is the sole
+        ' writer (P45). NOTHING in this service, the guardian, the notifier or the CLI's
+        ' arming path ever READS that file: it is numbers on a screen, so a deleted,
+        ' forged or hostile sidecar cannot lift, shorten or perturb a block.
+        '
+        ' Everything is inside ONE Try and every StatsSidecar entry point is itself
+        ' total - a counter may never throw into the tick. The write is skipped
+        ' entirely when the delta is empty (IsEmpty), so an idle machine with no block
+        ' held never touches the disk here.
+        '
+        ' The armed-seconds gate is enforcementHeld - the SAME value the five
+        ' self-heals above take - so the day-log measures exactly the time MonkMode
+        ' considered itself to be enforcing, including the fail-closed freeze a bad
+        ' MAC produces (during which the block genuinely IS held). The day key is the
+        ' WALL clock: a streak is a calendar idea, and this timeline has no
+        ' enforcement authority.
+        Try
+            Dim statsDelta As StatsSidecar.StatsData = Nothing
+            Dim statsDayKey As String = StatsSidecar.DayKeyFor(DateTime.Now)
+            For Each killedName As String In killedThisTick
+                statsDelta = StatsSidecar.Merge(statsDelta,
+                                                StatsSidecar.NewDelta(SlotIdOwningApp(slots, killedName), 1, 0, 0, statsDayKey))
+            Next
+            If enforcementHeld Then
+                statsDelta = StatsSidecar.Merge(statsDelta,
+                                                StatsSidecar.NewDelta("", 0, 0, CLng(TimerIntervalMs \ 1000), statsDayKey))
+            End If
+            ' True = create the directory with the P49 BUILTIN\Users:Modify ACE if it
+            ' is absent, so the NON-elevated notifier can write its own sidecar beside
+            ' this one. LocalSystem is the only party here that can set that ACE.
+            StatsSidecar.Apply(StatsSidecar.ServiceStatsPath(), statsDelta, True)
+        Catch ex As Exception
+        End Try
 
         If StrComp("no", iniTimeChanging) = 0 Then
             ' Fail CLOSED: only a parsed, genuinely past end time AND a valid B7
@@ -2862,6 +2910,30 @@ Public Class Service1
                String.Equals(If(s.AllSession, ""), "yes", StringComparison.OrdinalIgnoreCase) Then Return True
         Next
         Return False
+    End Function
+
+    ' v1.1 S7b (P45), DISPLAY-ONLY: which slot Id asked for this killed process, or "" if
+    ' none can be named. Walks the slots in POSITION order and takes the first whose Apps
+    ' name the image, through the SAME ProcessNameInKillList predicate the kill decision
+    ' itself used - so attribution can never disagree with what was killed.
+    '
+    ' Two blocks may legitimately name the same app; the FIRST is credited and the others
+    ' are not, so a per-slot count can under-attribute. That is a deliberate choice over
+    ' crediting all of them, which would make the per-slot figures sum to MORE than the
+    ' lifetime total and turn the display into nonsense. The unattributed case ("") still
+    ' counts towards lifetime and the day-log, so no kill is ever lost.
+    '
+    ' Pure; never throws; NOT gated on macValid or on whether a slot is enforcing - this
+    ' decides a LABEL on a counter, and it has no enforcement authority whatsoever.
+    Friend Shared Function SlotIdOwningApp(ByVal slots As List(Of SlotState), ByVal processName As String) As String
+        If slots Is Nothing OrElse processName Is Nothing Then Return ""
+        For Each s As SlotState In slots
+            If s Is Nothing OrElse s.Apps Is Nothing Then Continue For
+            For Each app As String In s.Apps
+                If ProcessNameInKillList(app, processName) Then Return If(s.Id, "")
+            Next
+        Next
+        Return ""
     End Function
 
     ' P36: the POSITION (1-based) holding the slot whose Id is slotId, or 0 if no position
