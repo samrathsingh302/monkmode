@@ -78,6 +78,17 @@ Public Class Form1
     Private urlLastActionTick As Long = 0
     Private urlWatchInFlight As Integer = 0
 
+    ' v1.1 S7d (P50/P51): the loopback block page. The server object exists for the
+    ' life of the notifier but binds NOTHING until a block is actually held, and its
+    ' socket work all happens on its own background thread - the fields here are the
+    ' UI side only. blockPageBindAnchorTick is the Environment.TickCount64 of the last
+    ' bind ATTEMPT, feeding P50's once-a-minute re-bind gate; it is seeded at Load one
+    ' full interval in the past so the FIRST attempt is immediate (an unseeded 0 would
+    ' otherwise delay the first bind by up to a minute on a freshly booted machine,
+    ' where TickCount64 is itself still under 60000).
+    Private ReadOnly pageServer As New BlockPageServer()
+    Private blockPageBindAnchorTick As Long = 0
+
     ' D4 notification state (all in-memory; the notifier persists NOTHING new - no
     ' MAC field, no write that could race the service):
     '   coolOffAnnounced - latches the "cooling-off started" toast so the 5s poll
@@ -182,6 +193,9 @@ Public Class Form1
         reminderAnchorTick = Environment.TickCount64
         If launchMsg <> "" Then ShowToast(launchMsg)
         RefreshTray()   ' v1.1 S7b (P52): seed the tooltip before the first 5s poll
+        ' v1.1 S7d (P50): make the first bind attempt due immediately, then try it.
+        blockPageBindAnchorTick = Environment.TickCount64 - BlockPage.RebindRetryIntervalMs
+        RefreshBlockPage()
     End Sub
 
     Private Sub pollTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles pollTimer.Tick
@@ -221,6 +235,10 @@ Public Class Form1
         ' in this method is the notifier's one load-bearing decision, and a cosmetic
         ' tooltip must not be able to change what it reads or when it returns.
         RefreshTray()
+
+        ' v1.1 S7d (P50): same beat, same stance as the tray - its own ini read, its
+        ' own swallow, and no ability to change what the expiry branch below reads.
+        RefreshBlockPage()
 
         If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
             pollTimer.Stop()
@@ -438,6 +456,108 @@ Public Class Form1
         Catch ex As Exception
         End Try
     End Sub
+
+    ' ============ v1.1 S7d (P50/P51): the loopback block page lifecycle ============
+    '
+    ' DISPLAY, like the tray above it. The page is rendered HERE, on the UI thread's
+    ' 5s beat, and handed to the server as finished bytes; the server's request path
+    ' reads no file and writes no state (see BlockPage.vb). So this method is the only
+    ' place the block page touches the config at all, and it touches it read-only.
+    '
+    ' The rules, in order:
+    '   - an UNREADABLE config changes NOTHING (return): the page keeps saying what it
+    '     last said, exactly as the tray keeps its last tooltip. The one path that
+    '     genuinely ends the page is the block-ended path, which stops it explicitly.
+    '   - no block named in the config => stop the listener. The page must never be up
+    '     while nothing is blocked (it would answer for a domain that now resolves
+    '     normally), so this is the un-bind trigger.
+    '   - a block held => refresh the page, and if the socket is not up, try to bind -
+    '     but no more than once per RebindRetryIntervalMs (P50).
+    ' Never throws.
+    Private Sub RefreshBlockPage()
+        Try
+            Dim ini As New IniFile
+            Try
+                ini.Load(IniPath())
+            Catch ex As Exception
+                Return
+            End Try
+
+            ' The same raw, ungated floor RawSlotApps / RawSlotUrlPatterns use: a
+            ' position counts as a block the moment the config names it. Over-counting
+            ' costs one extra page; under-counting would pull the page down under a
+            ' live block, so the widest reading is the right one here too.
+            If RawSlotBlockCount(ini) <= 0 Then
+                pageServer.StopServing()
+                Return
+            End If
+
+            pageServer.SetBody(BlockPage.BuildBlockPageHtml(BlockPageSlots(ini), HighWaterMark(ini)))
+
+            If Not pageServer.IsListening Then
+                Dim nowTick As Long = Environment.TickCount64
+                If BlockPage.ShouldRetryBind(blockPageBindAnchorTick, nowTick, BlockPage.RebindRetryIntervalMs) Then
+                    blockPageBindAnchorTick = nowTick
+                    ' A False here is the expected outcome on a machine whose port 80
+                    ' is taken - the notifier is not elevated and does not own the box.
+                    ' Nothing to do about it but try again in a minute.
+                    pageServer.TryStart(BlockPage.LoopbackPort)
+                End If
+            End If
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' Stop serving the page. Called from every path that ends the notifier's working
+    ' life, so the socket can never outlive the block. Never throws.
+    Private Sub StopBlockPage()
+        Try
+            pageServer.StopServing()
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' The monotonic [Time] HighWater mark as PLAINTEXT en-CA, "" if absent or
+    ' unreadable (and the page then lists no slot at all rather than a bogus span -
+    ' the same fail-soft ShortestSlotRemaining takes). Never throws.
+    Private Function HighWaterMark(ByVal ini As IniFile) As String
+        Try
+            Dim raw As String = ini.GetKeyValue("Time", "HighWater")
+            If raw = "" Then Return ""
+            Return enc.DecryptData(raw)
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    ' The slot rows the page may list: Id, site count, and the slot's own end. Sites
+    ' are PLAINTEXT-as-stored (P10) so only Until needs decrypting. Slots with no
+    ' Until (PENDING, schedule) are handed over with UntilText="" and dropped by
+    ' BuildBlockPageHtml - the exclusion lives in the PURE function so it is the
+    ' thing the tests pin. Bound by MaxSlots rather than the stored SlotCount, like
+    ' every other notifier scan, so a forged SlotCount cannot blank the page.
+    ' Never throws.
+    Private Function BlockPageSlots(ByVal ini As IniFile) As List(Of BlockPage.SlotLine)
+        Dim rows As New List(Of BlockPage.SlotLine)
+        Try
+            For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+                Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+                Dim untilEnc As String = ini.GetKeyValue(sec, "Until")
+                If untilEnc = "" Then Continue For
+                Dim row As New BlockPage.SlotLine
+                row.Id = If(ini.GetKeyValue(sec, "Id"), "")
+                row.SiteCount = Notifications.CountPackedList(ini.GetKeyValue(sec, "Sites"))
+                Try
+                    row.UntilText = enc.DecryptData(untilEnc)
+                Catch ex As Exception
+                    Continue For
+                End Try
+                rows.Add(row)
+            Next
+        Catch ex As Exception
+        End Try
+        Return rows
+    End Function
 
     ' D4/D4b: show a notification, fail-soft (a toast is cosmetic; it must never bubble an exception
     ' into the poll/load path). All D4 toasts + the block-ended toast route through here. D4b swaps
@@ -805,6 +925,7 @@ Public Class Form1
     Private Sub AnnounceBlockEnded()
         appKillTimer.Stop()
         urlWatchTimer.Stop()   ' v1.1 S7 (P62): stopped with the app-kill beat it mirrors
+        StopBlockPage()        ' v1.1 S7d (P50): the page comes down with the block
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
@@ -849,6 +970,10 @@ Public Class Form1
             tray.Dispose()
         Catch
         End Try
+        ' v1.1 S7d: also reached on the paths that exit WITHOUT AnnounceBlockEnded
+        ' (NeedsAlerted="no", and the Load catch), so the socket is released on every
+        ' exit, not just the announced one.
+        StopBlockPage()
         Application.Exit()
     End Sub
 
