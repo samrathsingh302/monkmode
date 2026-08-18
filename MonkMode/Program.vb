@@ -22,17 +22,19 @@
 '      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps a.exe,b.exe] [--default-app-preset games]  (required first-run onboarding)
 '      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
-'      monkmode status
+'                      [--urls "*/watch*"] [--start +90m]
+'      monkmode status                     (a row per armed block, with each one's exit)
 '      monkmode stats                      (read-only summary of your block history)
-'      monkmode add    --sites c.com[,d.com]
-'      monkmode unblock                    (request cooling-off — lifts after ~1h active time)
+'      monkmode add    --sites c.com[,d.com] [--id N]
+'      monkmode unblock [--id N]           (request cooling-off — lifts after ~1h active time)
 '      monkmode unblock --cancel           (cancel a pending cooling-off; stay blocked)
 '      monkmode unblock --code <CODE>      (submit the partner code — service verifies + lifts)
 '      monkmode unblock --force            (escape hatch — tears down an active block)
 '      monkmode help
 '
-'    A block, once started, cannot be shortened or started anew until the
-'    current one expires (the service enforces this). 'add' only adds sites.
+'    v1.1: `block` arms a NEW block beside the ones already running (up to 8), so
+'    every verb that addresses one takes --id. A block, once started, cannot be
+'    shortened (the service enforces this). 'add' only adds sites, to one block.
 '
 '    This file is part of MonkMode (GPLv3).
 
@@ -277,7 +279,7 @@ Module Program
                 Return 1
             End If
             ' P27: an unbounded PENDING slot would squat one of the 8 slots indefinitely.
-            If parsedStart > armNow.AddDays(MaxStartDelayDays) Then
+            If StartIsTooFarAhead(parsedStart, armNow) Then
                 Console.Error.WriteLine("--start can be at most " & MaxStartDelayDays & " days ahead.")
                 Return 1
             End If
@@ -316,18 +318,17 @@ Module Program
             Return 1
         End If
 
-        ' P27: an --until at or before the start is a contradiction, not a zero-length block.
-        If untilDate <= windowStart AndAlso startAt.HasValue Then
-            Console.Error.WriteLine("The block must start before it ends.")
-            Return 1
-        End If
-
-        ' The 60s floor, re-anchored on the ENFORCEMENT window (identical to the pre-v1.1
-        ' check for an immediate block, where windowStart is now). Message unchanged.
-        If untilDate <= windowStart.AddSeconds(60) Then
-            Console.Error.WriteLine("The block must end at least a minute in the future.")
-            Return 1
-        End If
+        ' P27: an --until at or before the start is a contradiction, not a zero-length block;
+        ' and the 60s floor, re-anchored on the ENFORCEMENT window (identical to the pre-v1.1
+        ' check for an immediate block, where windowStart is now). Both messages unchanged.
+        Select Case ClassifyBlockWindow(startAt.HasValue, windowStart, untilDate)
+            Case WindowRefusal.EndsBeforeStart
+                Console.Error.WriteLine("The block must start before it ends.")
+                Return 1
+            Case WindowRefusal.TooShort
+                Console.Error.WriteLine("The block must end at least a minute in the future.")
+                Return 1
+        End Select
 
         ' C6b/C6c: optional --cooloff sets THIS block's cooling-off DURATION - how long the
         ' self-serve `unblock` exit takes to lift. Parsed up front (shared TryParseCoolOffArg:
@@ -460,15 +461,52 @@ Module Program
         ' leave early, they authorise `monkmode unblock --code <CODE>` and the block
         ' lifts within ~10s. A fresh code is minted for every new block.
         Console.WriteLine("")
-        Console.WriteLine("Emergency unlock code (give it to your accountability partner NOW - it will NOT be shown again):")
+        ' P31: the header keeps the literal "Emergency unlock code" and the code stays on the
+        ' IMMEDIATELY following line, indented - tools\smoke\cv-d-smoke.ps1's ParseCode (:113-118)
+        ' reads exactly that shape. "for block <id>" is appended so a machine running several
+        ' blocks tells the partner WHICH one this code opens.
+        Console.WriteLine(FormatUnlockCodeHeader(arm.Id))
         Console.WriteLine("    " & partnerCode)
-        Console.WriteLine("To end the block early, they run:  monkmode unblock --code <CODE>")
+        Console.WriteLine("To end block " & arm.Id & " early, they run:  monkmode unblock --code <CODE>")
         Return 0
     End Function
 
     Private Function DoStatus() As Integer
         If Not Blocker.ServiceIsInstalled() Then
             Console.WriteLine("MonkMode: no block has ever been installed on this machine.")
+            Return 0
+        End If
+        ' P32 (v1.1 S5): with slots armed, `status` is the SLOT TABLE - one fixed-width row per
+        ' block plus its Exit sentence. Read-only: ReadSlotViews opens the config and writes
+        ' nothing (no MAC re-stamp, no backup refresh, no trigger), so this is safe to run
+        ' against a live block at any moment. It comes FIRST because a v10 config's [Time]
+        ' Until / [Schedule] Spec are the over-blocking v9 MIRROR of the slots - reading the
+        ' mirror here would collapse eight blocks into one misleading line.
+        Dim macValid As Boolean = False
+        Dim views As List(Of Blocker.SlotView) = Blocker.ReadSlotViews(macValid)
+        If views.Count > 0 Then
+            Console.WriteLine(FormatStatusHeading(views.Count))
+            Console.WriteLine(FormatSlotTableHeader())
+            For Each v As Blocker.SlotView In views
+                Console.WriteLine(FormatSlotRow(v))
+                Console.WriteLine(SlotExitIndent & FormatSlotExitLine(v))
+            Next
+            ' B7: never render a reassuring exit story over a config that failed its integrity
+            ' check. ReadSlotViews already suppresses the committed / cooling-off fields in that
+            ' case (so the Exit column reads code+wait, its most conservative value); say plainly
+            ' why none of it can be acted on.
+            If Not macValid Then
+                Console.WriteLine("")
+                Console.WriteLine("  NOTE: the stored configuration failed its integrity check, so MonkMode is FROZEN: nothing lifts, and the exit lines above cannot be acted on until the blocks end and you re-arm.")
+            End If
+            ' The table is read off the CONFIG, which stays true whether or not the service is
+            ' up - so say which half is paused rather than implying either "all fine" or
+            ' "nothing is blocked". The hosts block itself survives a stopped service; what
+            ' stops is app-kill, self-repair and the countdown to the next exit.
+            If Not Blocker.ServiceIsRunning() Then
+                Console.WriteLine("")
+                Console.WriteLine("  NOTE: the MonkMode service isn't running at the moment, so app-kill and self-repair are paused (the blocked sites stay in your hosts file). It starts itself again automatically.")
+            End If
             Return 0
         End If
         ' C5b (c4): a schedule-only block reads as BlockIsActive()=False (its [Time] Until is the past
@@ -533,31 +571,76 @@ Module Program
             Console.Error.WriteLine("Provide sites to add with --sites a.com,b.com")
             Return 1
         End If
+        ' P42 (v1.1 S5): `add` is SLOT-ADDRESSED and SERVICE-ADJUDICATED. The CLI validates the
+        ' request and drops `monkmode_add.request.<id>`; the service grows THAT slot's
+        ' MAC-covered Sites (growth-only) on its next tick and P37 then reconciles the hosts
+        ' snapshot from config truth. S3a/S3b's honest refusal ("'add' can't extend a block yet")
+        ' is retired with it: the old CLI-side path wrote the v9 [User] CustomSites plus the
+        ' snapshot and NO slot, so the per-tick reconciliation stripped the added sites back out
+        ' within ~10s.
+        Dim armedIds As List(Of Integer) = Blocker.ArmedSlotIds()
+        If armedIds.Count > 0 Then
+            Dim targetArg As String = GetOption(args, "--id")
+            Dim target As Integer
+            If targetArg <> "" Then
+                If Not Integer.TryParse(targetArg.Trim(), target) OrElse Not armedIds.Contains(target) Then
+                    Console.Error.WriteLine("No armed block #" & targetArg.Trim() & ". Run 'monkmode status' to see the armed blocks.")
+                    Return 1
+                End If
+            ElseIf armedIds.Count > 1 Then
+                ' The P33 rule applied to `add`: with several blocks running, an unnamed `add`
+                ' would silently widen whichever one happened to be first. Widening the wrong
+                ' block is not a lift, but it is a block the user never asked for and cannot
+                ' undo before the timer ends - so name it.
+                Console.Error.WriteLine("More than one block is active. Name the one you mean:  monkmode add --id <N> --sites " & String.Join(",", domains))
+                For Each line As String In Blocker.ArmedSlotLines()
+                    Console.Error.WriteLine(line)
+                Next
+                Return 1
+            Else
+                target = armedIds(0)
+            End If
+            ' B7: the service never widens a FROZEN config (that would mean re-stamping bytes
+            ' it did not verify), so an `add` against one would be accepted, binned and
+            ' reported as applied. Refuse it here with the same message `block` gives.
+            If Not Blocker.ConfigIsMacValid() Then
+                Console.Error.WriteLine("The current MonkMode configuration failed its integrity check, so it is frozen and cannot be added to.")
+                Console.Error.WriteLine("Wait for the running block(s) to end, or use 'monkmode unblock --force' once they have.")
+                Return Blocker.ExitArmFailed
+            End If
+            ' P40: the service reads a content-bearing trigger only up to TriggerMaxBytes and
+            ' deletes an oversize one WITHOUT changing state, so RequestAdd refuses rather than
+            ' write a request that will be binned. It also UNIONS with any request still
+            ' pending for this block, so a second `add` inside one ~10s tick cannot overwrite
+            ' (and silently lose) sites the CLI has already reported as accepted - which means
+            ' the cap is measured on the MERGED request, and a refusal here leaves the pending
+            ' one intact and applying.
+            If Not Blocker.RequestAdd(target, domains) Then
+                Console.Error.WriteLine("That's too many sites for one 'add' (a pending request is capped at " & Blocker.TriggerMaxBytes & " bytes, and block " & target & " already has one waiting).")
+                Console.Error.WriteLine("The sites already queued for block " & target & " still apply within ~10s - run this 'add' again afterwards, or split it up.")
+                Return 1
+            End If
+            Console.WriteLine("Added to block " & target & "; MonkMode applies it within ~10s.")
+            ' Honest about latency: the trigger is durable, so a stopped service applies it at
+            ' its next start rather than losing it - but "~10s" would be a lie right now.
+            If Not Blocker.ServiceIsRunning() Then
+                Console.WriteLine("  (the MonkMode service isn't running at the moment - it applies this the moment it next starts.)")
+            End If
+            Return 0
+        End If
+
         ' SD-c1: `add` targets a manual block. When a schedule is armed, edit the schedule instead
         ' (re-run `monkmode schedule` with the full site list) - the schedule's sites live in its
-        ' MAC-covered Spec, not the manual snapshot `add` appends to.
+        ' MAC-covered Spec, not a slot `add` can address.
         If Blocker.ScheduleIsArmed() Then
             Console.Error.WriteLine("A schedule is armed. To change its sites, re-run 'monkmode schedule --sites ... --windows ...' with the full list.")
             Return 1
         End If
-        ' v1.1 S3a: `add` writes the extra sites to the v9 [User] CustomSites and the hosts
-        ' snapshot, and to NO slot. The service now reconciles that snapshot to the SLOTS on
-        ' every tick (P37) and repairs hosts to match, so an added site would silently
-        ' disappear again within ~10s. Refuse honestly instead of appearing to work - a second
-        ' block covers the same need today, and P42/S5 makes `add` service-adjudicated.
-        If Blocker.AnySlotArmed() Then
-            Console.Error.WriteLine("'add' can't extend a block yet in this version. Start another block for the extra sites instead:")
-            Console.Error.WriteLine("  monkmode block --sites " & String.Join(",", domains) & " --for <duration>")
-            Console.Error.WriteLine("It runs alongside the block you already have.")
-            Return 1
-        End If
-        If Not Blocker.BlockIsActive() Then
-            Console.Error.WriteLine("No active block to add to. Start one with 'monkmode block'.")
-            Return 1
-        End If
-        Blocker.AppendAddToHosts(domains)
-        Console.WriteLine("Added to the active block: " & String.Join(", ", domains))
-        Return 0
+        ' No slot to address. The v9 CLI-side append (Blocker.AppendAddToHosts) is deliberately
+        ' NOT used as a fallback: it writes sites that no slot owns, which the next tick's P37
+        ' reconciliation removes again. Refusing is honest and costs one `block` command.
+        Console.Error.WriteLine("No block slot to add to. Start one with:  monkmode block --sites " & String.Join(",", domains) & " --for <duration>")
+        Return 1
     End Function
 
     ' C5b (c3): `schedule` arms/edits/clears a SCHEDULE-ONLY block - a recurring wall-clock rule
@@ -1078,6 +1161,40 @@ Module Program
         Return False
     End Function
 
+    ' P27 (pure): is this --start too far ahead to arm? An unbounded PENDING slot would squat
+    ' one of the 8 slots indefinitely, so the delay is capped at MaxStartDelayDays. Over-
+    ' refusing at arm time is never fail-open: nothing is armed, and the user retypes it.
+    Friend Function StartIsTooFarAhead(ByVal parsedStart As DateTime, ByVal armNow As DateTime) As Boolean
+        Return parsedStart > armNow.AddDays(MaxStartDelayDays)
+    End Function
+
+    ' P27 (pure): the two ENFORCEMENT-WINDOW refusals, both decided on `windowStart` (the
+    ' --start moment for a delayed block, now for an immediate one) rather than on the wall
+    ' clock - `--for` on a delayed block measures its duration from the START, so anchoring
+    ' either check on "now" would silently accept a block with no enforcement time in it.
+    Friend Enum WindowRefusal
+        None = 0
+        EndsBeforeStart = 1
+        TooShort = 2
+    End Enum
+
+    Friend Function ClassifyBlockWindow(ByVal delayed As Boolean, ByVal windowStart As DateTime, ByVal endsAt As DateTime) As WindowRefusal
+        ' An end at or before a DELAYED start is a contradiction, not a too-short block - say
+        ' which, so the user fixes the right flag.
+        If delayed AndAlso endsAt <= windowStart Then Return WindowRefusal.EndsBeforeStart
+        If endsAt <= windowStart.AddSeconds(60) Then Return WindowRefusal.TooShort
+        Return WindowRefusal.None
+    End Function
+
+    ' P31: the one-time accountability code's header line. The literal "Emergency unlock code"
+    ' and the code on the IMMEDIATELY FOLLOWING indented line are what
+    ' tools\smoke\cv-d-smoke.ps1's ParseCode (:113-118) reads, so the shape is pinned by test
+    ' here rather than left to a Console.WriteLine no test can see.
+    Friend Function FormatUnlockCodeHeader(ByVal slotId As Integer) As String
+        Return "Emergency unlock code for block " & slotId.ToString(CultureInfo.InvariantCulture) &
+               " (give it to your accountability partner NOW - it will NOT be shown again):"
+    End Function
+
     ' C6c: parse an optional --cooloff argument (shared by `setup` and `block`) into seconds,
     ' applying the same duration grammar (TryParseDuration) and the shared 365d sanity cap
     ' (Blocker.MaxCoolOffSeconds). Returns True with seconds=0 when --cooloff is ABSENT (each
@@ -1121,14 +1238,114 @@ Module Program
     ' active block always has SOME exit story). Friend so it is unit-tested by literal - the branch
     ' selection is display logic worth pinning. coolOffRemaining is Blocker.CoolOffPendingRemaining()
     ' (Nothing = none pending); a committed block ignores it (self-serve cooling-off is disabled).
-    Friend Function FormatCoolOffStatusLine(ByVal committed As Boolean, ByVal coolOffRemaining As TimeSpan?) As String
+    ' v1.1 S5 (P31): reused VERBATIM per slot, gaining only "--id <N>" inside the two command
+    ' hints (slotId = "" keeps the pre-v1.1 single-block wording, which is what the v9
+    ' fallback branch of `status` still prints). The three literal texts are load-bearing for
+    ' tools\smoke\cv-d-smoke.ps1 - "committed block" (:141) and "cooling-off pending" (:165)
+    ' are matched by the live smoke, so they must survive any edit here verbatim.
+    Friend Function FormatCoolOffStatusLine(ByVal committed As Boolean, ByVal coolOffRemaining As TimeSpan?, Optional ByVal slotId As String = "") As String
+        ' "?" is ArmedSlotLines'/ReadSlotViews' unreadable-id placeholder: never build a
+        ' command hint the user cannot type.
+        Dim target As String = If(slotId Is Nothing OrElse slotId = "" OrElse slotId = "?", "", " --id " & slotId)
         If committed Then
             Return "Exit:  committed block - the accountability code (shown at block start) is the only early exit, or wait for the timer."
         End If
         If coolOffRemaining IsNot Nothing Then
-            Return "Exit:  cooling-off pending - lifts in about " & Humanize(coolOffRemaining.Value) & " of active time. Run 'monkmode unblock --cancel' to stay blocked."
+            Return "Exit:  cooling-off pending - lifts in about " & Humanize(coolOffRemaining.Value) & " of active time. Run 'monkmode unblock" & target & " --cancel' to stay blocked."
         End If
-        Return "Exit:  run 'monkmode unblock' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now."
+        Return "Exit:  run 'monkmode unblock" & target & "' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now."
+    End Function
+
+    ' ---- P32 (v1.1 S5): the `status` slot table - pure, fixed-width, pinned by literal ----
+    '
+    ' Column widths (chars): Id 3 right - 2sp - State 8 left - 2sp - Ends/Starts 24 left -
+    ' 2sp - Sites 5 right - Apps 5 right - URLs 5 right - 2sp - Exit token. An over-long cell
+    ' is never TRUNCATED (a clipped datetime or block id is worse than a ragged line): it
+    ' simply pushes the columns after it right, which is what a PENDING row's
+    ' "starts <stamp> (<dur>)" cell does.
+    Private Const SlotColId As Integer = 3
+    Private Const SlotColState As Integer = 8
+    Private Const SlotColWhen As Integer = 24
+    Private Const SlotColCount As Integer = 5
+    Private Const SlotColGap As String = "  "
+
+    ' The Exit sentence sits under its row, indented to the State column (P32's sample).
+    Friend Const SlotExitIndent As String = "     "
+
+    ' Timestamps in the table are rendered in a FIXED, culture-independent form: the column is
+    ' fixed-width, and a user reading two rows must be able to compare them at a glance.
+    Private Function FormatStamp(ByVal dt As DateTime) As String
+        Return dt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+    End Function
+
+    Friend Function FormatStatusHeading(ByVal blockCount As Integer) As String
+        Return "MonkMode: " & blockCount.ToString(CultureInfo.InvariantCulture) & If(blockCount = 1, " block active", " blocks active")
+    End Function
+
+    Friend Function FormatSlotTableHeader() As String
+        Return FormatSlotRowCells("Id", "State", "Ends / Starts", "Sites", "Apps", "URLs", "Exit")
+    End Function
+
+    ' The width contract itself, independent of any SlotView - so the layout is pinned by
+    ' literal tests that never touch an ini.
+    Friend Function FormatSlotRowCells(ByVal id As String, ByVal state As String, ByVal whenText As String,
+                                       ByVal sites As String, ByVal apps As String, ByVal urls As String,
+                                       ByVal exitToken As String) As String
+        Return If(id, "").PadLeft(SlotColId) & SlotColGap &
+               If(state, "").PadRight(SlotColState) & SlotColGap &
+               If(whenText, "").PadRight(SlotColWhen) & SlotColGap &
+               If(sites, "").PadLeft(SlotColCount) &
+               If(apps, "").PadLeft(SlotColCount) &
+               If(urls, "").PadLeft(SlotColCount) & SlotColGap &
+               If(exitToken, "")
+    End Function
+
+    Friend Function FormatSlotRow(ByVal v As Blocker.SlotView) As String
+        If v Is Nothing Then Return ""
+        Return FormatSlotRowCells(v.Id, v.State, FormatSlotWhenCell(v),
+                                  v.Sites.ToString(CultureInfo.InvariantCulture),
+                                  v.Apps.ToString(CultureInfo.InvariantCulture),
+                                  v.Urls.ToString(CultureInfo.InvariantCulture),
+                                  SlotExitToken(v))
+    End Function
+
+    ' The "Ends / Starts" cell. ACTIVE shows its end; PENDING shows when it STARTS plus the
+    ' planned length (its end does not exist yet - the service computes it at activation,
+    ' P29); SCHEDULE shows the live window state.
+    Friend Function FormatSlotWhenCell(ByVal v As Blocker.SlotView) As String
+        If v Is Nothing Then Return "?"
+        If v.State = Blocker.SlotStateSchedule Then
+            If v.WindowOpen AndAlso v.WindowUntil > DateTime.MinValue Then
+                Return "window OPEN until " & v.WindowUntil.ToString("HH:mm", CultureInfo.InvariantCulture)
+            End If
+            Return "no window open now"
+        End If
+        If v.State = Blocker.SlotStatePending Then
+            Dim planned As String = If(v.DurationSeconds > 0, " (" & Humanize(TimeSpan.FromSeconds(v.DurationSeconds)) & ")", "")
+            Return "starts " & If(v.StartAt > DateTime.MinValue, FormatStamp(v.StartAt), "?") & planned
+        End If
+        If v.Ends > DateTime.MinValue Then Return FormatStamp(v.Ends)
+        Return "?"
+    End Function
+
+    ' The one-word Exit column. Committed is checked BEFORE cooling-off, matching
+    ' FormatCoolOffStatusLine: a committed block has no self-serve cooling-off at all, so a
+    ' deadline stored against one could only be stale.
+    Friend Function SlotExitToken(ByVal v As Blocker.SlotView) As String
+        If v Is Nothing Then Return ""
+        If v.State = Blocker.SlotStateSchedule Then Return "window"
+        If v.State = Blocker.SlotStatePending Then Return "cancel"
+        If v.Committed Then Return "committed"
+        If v.CoolOffRemaining IsNot Nothing Then Return "cooling-off"
+        Return "code+wait"
+    End Function
+
+    ' The full-sentence Exit line printed under each row.
+    Friend Function FormatSlotExitLine(ByVal v As Blocker.SlotView) As String
+        If v Is Nothing Then Return ""
+        If v.State = Blocker.SlotStateSchedule Then Return "Exit:  an open window can't be ended early; it closes on its own."
+        If v.State = Blocker.SlotStatePending Then Return "Exit:  not started yet - 'monkmode unblock --id " & v.Id & " --cancel' cancels it freely until it starts."
+        Return FormatCoolOffStatusLine(v.Committed, v.CoolOffRemaining, v.Id)
     End Function
 
     ' D5 (friendly validation, pure): the "--flags" in args NOT in the known set (case-insensitive) -
@@ -1193,15 +1410,15 @@ Module Program
         Console.WriteLine("")
         Console.WriteLine("Usage:")
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
-        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h] [--all-session-kill]")
-        Console.WriteLine("  monkmode status  (an active block + time left + how to exit / a pending cooling-off, or the armed schedule's live window state)")
+        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h] [--all-session-kill] [--urls ""*/watch*""] [--start +90m]")
+        Console.WriteLine("  monkmode status  (one row per armed block - time left, what it covers, and how to exit each one)")
         Console.WriteLine("  monkmode stats   (read-only summary of your block history: counts, total focus time, longest block)")
-        Console.WriteLine("  monkmode add --sites c.com")
+        Console.WriteLine("  monkmode add --sites c.com [--id N]   (adds sites to ONE block; --id is required when more than one is running)")
         Console.WriteLine("  monkmode schedule --sites a.com,b.com [--apps chrome.exe] --windows ""Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00""")
         Console.WriteLine("  monkmode schedule --clear   (stop future windows; an open window still runs to its end)")
         Console.WriteLine("  monkmode schedule --show    (print the armed schedule; read-only)")
         Console.WriteLine("  monkmode schedule --validate --sites a.com --windows ""Mon-Fri 09:00-17:00""  (check a schedule without arming it)")
-        Console.WriteLine("  monkmode unblock           (request cooling-off: the block lifts after ~1h of active machine time)")
+        Console.WriteLine("  monkmode unblock [--id N]  (request cooling-off: the block lifts after ~1h of active machine time; --id is required when more than one block is running)")
         Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
         Console.WriteLine("  monkmode unblock --code <CODE>  (submit the partner accountability code; the service verifies it and lifts within ~10s)")
         Console.WriteLine("  monkmode unblock --force   (escape hatch: tears down an active block + removes the service)")
@@ -1215,6 +1432,9 @@ Module Program
         Console.WriteLine("  - --all-session-kill kills blocked apps in EVERY logged-in Windows session, not just the one you ran 'block' in (useful if you fast-user-switch to a second account to dodge the kill). No effect unless you block apps.")
         Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM; an end BEFORE the start means overnight (e.g. ""Mon-Fri 22:30-04:00"" covers Tue-Sat 00:00-04:00)). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
+        Console.WriteLine("  - You can run up to " & MonkMode.ConfigIntegrity.MaxSlots & " blocks at once: 'monkmode block' starts a NEW one beside the others, and 'monkmode status' lists them with their ids. Use --id <N> to add to, or exit, a particular one.")
+        Console.WriteLine("  - --start delays a block: '--start +90m' / '--start 2h' / '--start ""2026-08-10 07:00""'. --for then measures from the START (so '--start +90m --for 2h' blocks for 2h, beginning in 90 minutes), it can be at most " & MaxStartDelayDays & " days ahead, and until it starts you can cancel it freely with 'monkmode unblock --id <N> --cancel'.")
+        Console.WriteLine("  - --urls attaches URL patterns to a block (e.g. --urls ""*/watch*,*reddit.com/r/*""), for pages rather than whole sites.")
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")
         Console.WriteLine("  - --app-preset kills a whole category of well-known apps at once (comma-separate several): " & String.Join(", ", Blocker.KnownAppPresetNames()) & ". Combine it with --apps to add your own.")
         Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")

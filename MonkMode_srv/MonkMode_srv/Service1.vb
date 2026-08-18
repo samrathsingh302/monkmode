@@ -610,7 +610,10 @@ Public Class Service1
     Friend Shared Function EnumerateTriggerFilesIn(ByVal stateDir As String) As List(Of String)
         Dim names As New List(Of String)
         Try
-            For Each pattern As String In New String() {CoolOffRequestPrefix & "*", CoolOffCancelPrefix & "*", PartnerCodePrefix & "*"}
+            ' v1.1 S5 (P42): the `add` family joins the SAME capped, ordinal-sorted budget -
+            ' P41 sized it at 2 x MaxSlots for exactly this. Deferring an add delays a WIDEN
+            ' by <=10s, which is the harmless direction.
+            For Each pattern As String In New String() {CoolOffRequestPrefix & "*", CoolOffCancelPrefix & "*", PartnerCodePrefix & "*", AddRequestPrefix & "*"}
                 For Each full As String In System.IO.Directory.GetFiles(stateDir, pattern)
                     names.Add(System.IO.Path.GetFileName(full))
                 Next
@@ -734,6 +737,111 @@ Public Class Service1
         Catch ex As Exception
         End Try
     End Sub
+
+    ' ---- P42 (v1.1 S5): `monkmode add` becomes SERVICE-ADJUDICATED ----
+    '
+    ' The CLI validates the requested sites and drops `monkmode_add.request.<id>`; this step
+    ' grows THAT slot's MAC-covered `Sites` through the one per-slot writer (P36), and the
+    ' existing P37 reconciliation then rewrites the snapshot from config truth and the B2
+    ' self-heal propagates it into hosts. Nothing here touches hosts directly.
+    '
+    ' GROWTH-ONLY, and that is the whole safety argument: a request can only ever ADD entries
+    ' to one slot's list, so a forged, replayed or garbage trigger can block MORE, never less.
+    ' It has no timing authority, cannot address another slot's fields, and cannot shorten,
+    ' lift or retire anything. An unknown/retired id (P40) deletes the trigger and changes
+    ' nothing - the id routes, it never authorises.
+    '
+    ' Consume-after-persist, like the two exit families: the trigger is deleted only once the
+    ' write lands, so a crash between them simply re-applies next tick (the merge is
+    ' idempotent - a re-applied request adds nothing new and is then deleted).
+    Private Sub ProcessAddRequests(ByVal slots As List(Of SlotState), ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
+        ProcessAddRequestsAt(Application.StartupPath, Application.StartupPath + "\monkmode_settings.ini",
+                             slots, macValid, triggerNames)
+    End Sub
+
+    ' The testable core with the state directory and config path made explicit.
+    Friend Sub ProcessAddRequestsAt(ByVal stateDir As String, ByVal iniPath As String, ByVal slots As List(Of SlotState), ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
+        Try
+            If slots Is Nothing OrElse triggerNames Is Nothing OrElse triggerNames.Count = 0 Then Return
+            For Each name As String In triggerNames
+                Dim id As String = TriggerIdFromName(name, AddRequestPrefix)
+                If id = "" Then Continue For
+                Dim addPath As String = System.IO.Path.Combine(stateDir, AddRequestPrefix + id)
+                Dim slot As SlotState = FindSlotById(slots, id)
+                If slot Is Nothing Then
+                    ' P40: unknown / retired / garbage id - delete, no state change, no freeze.
+                    DeleteTriggerFile(addPath)
+                    Continue For
+                End If
+                If Not macValid Then
+                    ' A frozen config is never widened and never re-stamped (the B7 rule). The
+                    ' request cannot be applied while frozen and a frozen config is only left by
+                    ' re-arming, so hold nothing over: delete it, exactly as the cooling-off and
+                    ' partner-code families do, rather than leaking the P41 budget for ever.
+                    DeleteTriggerFile(addPath)
+                    Continue For
+                End If
+                ' Length-capped read, same rule as the partner-code candidate: an over-large
+                ' trigger is a DoS lever, not a real request, so it reads as "" and is binned.
+                Dim requested As String = ""
+                Try
+                    Dim fi As New FileInfo(addPath)
+                    If fi.Length <= TriggerMaxBytes Then requested = System.IO.File.ReadAllText(addPath)
+                Catch ex As Exception
+                    requested = ""
+                End Try
+                Dim grown As String = MergeSiteList(slot.Sites, requested)
+                If grown = "" Then
+                    ' Oversize, unreadable, empty, all-invalid or entirely redundant - there is
+                    ' nothing to apply, so consume the trigger and change nothing.
+                    DeleteTriggerFile(addPath)
+                    Continue For
+                End If
+                If PersistSlotFieldAt(iniPath, id, "Sites", grown, False) Then
+                    ' In-memory too, so THIS tick's hosts/snapshot union already carries the new
+                    ' sites (the widening direction; a failed persist just retries next tick).
+                    slot.Sites = SplitPackedList(grown, ";"c)
+                    DeleteTriggerFile(addPath)
+                End If
+            Next
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' P42 (pure): the growth-only merge - the slot's existing entries in order, then every
+    ' requested entry not already present (case-insensitive). Requested entries are split on
+    ' newlines, commas and semicolons (the CLI writes one per line; the others are accepted so
+    ' a hand-dropped trigger behaves).
+    '
+    ' An entry is accepted ONLY if it can survive storage: non-empty, no ";" (the pack
+    ' separator) and no whitespace. Anything else is DROPPED, not stored - a token that breaks
+    ' the packed list breaks the canonical, which would freeze the block the user was trying
+    ' to extend. Dropping is also the exact fail-closed stance TryExpandPresets takes.
+    '
+    ' Returns the new packed value, or "" when nothing would change (the caller writes
+    ' nothing). Pure + Shared.
+    Friend Shared Function MergeSiteList(ByVal existing As List(Of String), ByVal requestedRaw As String) As String
+        Dim merged As New List(Of String)
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If existing IsNot Nothing Then
+            For Each e As String In existing
+                Dim s As String = If(e, "").Trim()
+                If s <> "" AndAlso seen.Add(s) Then merged.Add(s)
+            Next
+        End If
+        Dim before As Integer = merged.Count
+        If requestedRaw IsNot Nothing Then
+            For Each tok As String In requestedRaw.Split(New Char() {ControlChars.Cr, ControlChars.Lf, ","c, ";"c})
+                Dim s As String = tok.Trim()
+                If s = "" Then Continue For
+                If s.IndexOf(";"c) >= 0 Then Continue For
+                If s.IndexOfAny(New Char() {" "c, ControlChars.Tab}) >= 0 Then Continue For
+                If seen.Add(s) Then merged.Add(s)
+            Next
+        End If
+        If merged.Count = before Then Return ""      ' nothing new: write nothing
+        Return String.Join(";", merged) & ";"
+    End Function
 
     ' C5b (b2) live wiring: the per-tick schedule window step - the sibling of
     ' ProcessCoolOffSignals/ProcessPartnerCodeSignal, polled AFTER them (inside tickLock
@@ -1569,6 +1677,12 @@ Public Class Service1
             ' over the user's own change-of-mind about the slow path). Returns the
             ' post-verify UnlockedAt so THIS tick's heartbeat decides off it.
             ProcessPartnerCodeSignal(slots, macValid, triggerNames)
+            ' P42 (v1.1 S5): apply any `add` requests AFTER both exit families, so a tick that
+            ' carries an exit AND an add resolves the exit first (a slot being retired is never
+            ' widened on its way out). It runs BEFORE the unions below so an accepted add is in
+            ' this tick's hosts/snapshot truth rather than the next one's. Growth-only: it can
+            ' never remove a site, drop a hold or shorten a block.
+            ProcessAddRequests(slots, macValid, triggerNames)
             ' C5b (b2): poll the schedule windows AFTER cooling-off + code (still inside
             ' tickLock + the TimeChanging="no" guard). The FIRST step that can WRITE a
             ' non-empty [Schedule] ActiveUntil - the window->duration conversion (§6.1):

@@ -379,11 +379,124 @@ Module Blocker
     ' Entries in a ";"-packed list (trimmed, empties dropped) - the display counter for
     ' ArmedSlotLines. Fail-soft: anything unreadable counts as 0.
     Private Function CountPacked(ByVal packed As String) As Integer
+        Return CountPackedWith(packed, ";"c)
+    End Function
+
+    ' The same count for an arbitrary separator - UrlPatterns is "|"-packed (P55), every
+    ' other list is ";"-packed. Fail-soft: anything unreadable counts as 0.
+    Private Function CountPackedWith(ByVal packed As String, ByVal separator As Char) As Integer
         Dim n As Integer = 0
-        For Each tok As String In If(packed, "").Split(";"c)
+        For Each tok As String In If(packed, "").Split(separator)
             If tok.Trim() <> "" Then n += 1
         Next
         Return n
+    End Function
+
+    ' ---- P32 (v1.1 S5): the READ MODEL behind the `monkmode status` slot table ----
+    '
+    ' One row's worth of DATA per armed slot - deliberately no formatting: every string the
+    ' user sees is built by the pure formatters in Program.vb, so the whole table layout is
+    ' pinned by literal unit tests without an ini in sight.
+    '
+    ' The three P16-derived states are spelled out here once (SCHEDULE / PENDING / ACTIVE);
+    ' the enforcement copy of that derivation lives in the service (ClassifySlot) and is not
+    ' duplicated - this is display only and carries ZERO authority.
+    Friend Class SlotView
+        Public Id As String = ""
+        Public State As String = ""              ' ACTIVE | PENDING | SCHEDULE
+        Public StartAt As DateTime = DateTime.MinValue
+        Public Ends As DateTime = DateTime.MinValue
+        Public DurationSeconds As Long
+        Public WindowOpen As Boolean             ' SCHEDULE only: a window is open right now
+        Public WindowUntil As DateTime = DateTime.MinValue
+        Public Sites As Integer
+        Public Apps As Integer
+        Public Urls As Integer
+        Public Committed As Boolean
+        Public CoolOffRemaining As TimeSpan?     ' Nothing = none pending
+    End Class
+
+    Friend Const SlotStateActive As String = "ACTIVE"
+    Friend Const SlotStatePending As String = "PENDING"
+    Friend Const SlotStateSchedule As String = "SCHEDULE"
+
+    ' Read every armed slot as a display row. READ-ONLY: this opens the config and writes
+    ' NOTHING - not the MAC, not a backup, not a trigger - because `status` must be safe to
+    ' run against a live block at any moment. Fail-SOFT throughout (an unreadable field
+    ' degrades to a placeholder, never an exception), matching ArmedSlotLines.
+    '
+    ' `macValid` is reported back so the caller can say plainly that a frozen config is
+    ' frozen. The two EXIT-relevant fields are MAC-GATED exactly like BlockIsCommitted /
+    ' CoolOffPendingRemaining: a tampered config must never render a reassuring exit story
+    ' (a forged `Committed=no` or a forged cooling-off deadline would otherwise read as an
+    ' exit that does not exist).
+    Friend Function ReadSlotViews(ByRef macValid As Boolean) As List(Of SlotView)
+        Dim views As New List(Of SlotView)
+        macValid = False
+        Try
+            If Not File.Exists(IniPath()) Then Return views
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            macValid = ConfigMacIsValidForIni(ini)
+            Dim highWater As String = DecryptOrEmpty(ini.GetKeyValue("Time", "HighWater"))
+            For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+                Dim sec As String = SlotSection(pos)
+                Dim v As New SlotView
+                v.Id = If(ini.GetKeyValue(sec, "Id"), "").Trim()
+                If v.Id = "" Then v.Id = "?"
+                v.Sites = CountPacked(ini.GetKeyValue(sec, "Sites"))
+                v.Apps = CountPacked(ini.GetKeyValue(sec, "Apps"))
+                v.Urls = CountPackedWith(ini.GetKeyValue(sec, "UrlPatterns"), "|"c)
+                v.StartAt = SlotDate(ini, pos, "StartAt")
+                v.Ends = SlotDate(ini, pos, "Until")
+                Dim secs As Long
+                If Long.TryParse(If(ini.GetKeyValue(sec, "DurationSeconds"), ""),
+                                 NumberStyles.Integer, CultureInfo.InvariantCulture, secs) AndAlso secs > 0 Then v.DurationSeconds = secs
+                If If(ini.GetKeyValue(sec, "ScheduleSpec"), "") <> "" Then
+                    v.State = SlotStateSchedule
+                    Dim activeUntilPlain As String = DecryptOrEmpty(ini.GetKeyValue(sec, "ScheduleActiveUntil"))
+                    v.WindowOpen = activeUntilPlain <> "" AndAlso Not ScheduleWindowElapsed(activeUntilPlain, highWater)
+                    v.WindowUntil = SlotDate(ini, pos, "ScheduleActiveUntil")
+                ElseIf v.StartAt > DateTime.MinValue AndAlso v.Ends = DateTime.MinValue Then
+                    v.State = SlotStatePending
+                Else
+                    v.State = SlotStateActive
+                End If
+                If macValid Then
+                    v.Committed = String.Equals(If(ini.GetKeyValue(sec, "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
+                    v.CoolOffRemaining = CoolOffRemainingFrom(DecryptOrEmpty(ini.GetKeyValue(sec, "CoolOffUntil")), highWater)
+                End If
+                views.Add(v)
+            Next
+        Catch
+        End Try
+        Return views
+    End Function
+
+    ' Is the stored config's integrity stamp valid? Read-only, and fail-SAFE in the direction
+    ' that matters for its callers: any read failure reads as NOT valid, i.e. frozen, so a
+    ' write path gated on this refuses rather than proceeding blind. Never throws.
+    Friend Function ConfigIsMacValid() As Boolean
+        Try
+            If Not File.Exists(IniPath()) Then Return False
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            Return ConfigMacIsValidForIni(ini)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ' Decrypt a stored value, or "" when it is absent/unreadable. An empty stored value is
+    ' NEVER handed to the cipher (DecryptData throws on valid-Base64-invalid-ciphertext, and
+    ' a display path must not throw). Never throws.
+    Private Function DecryptOrEmpty(ByVal stored As String) As String
+        Try
+            If stored Is Nothing OrElse stored = "" Then Return ""
+            Return enc.DecryptData(stored)
+        Catch
+            Return ""
+        End Try
     End Function
 
     ' D5 (rich status): the MONOTONIC cooling-off remaining for `status` - CoolOffUntil - HighWater
@@ -1597,7 +1710,12 @@ Module Blocker
     End Sub
 
     ' ---- add sites to an active block ----
-
+    '
+    ' v1.1 S5 (P42): RETIRED FROM THE CLI PATH - `monkmode add` now drops a slot-addressed
+    ' request trigger (RequestAdd) and the service grows that slot's own MAC-covered Sites.
+    ' This writer is kept, not deleted: it is the producer for the etc\add_to_hosts channel
+    ' the SERVICE still consumes (Service1.ProcessAddToHosts), so removing it would leave that
+    ' channel with a reader and no writer. It has no caller in the CLI today.
     Public Sub AppendAddToHosts(ByVal domains As IEnumerable(Of String))
         Dim entries As String = BuildHostsEntries(domains)
         Dim addFile As String = Path.Combine(EtcDir(), "add_to_hosts")
@@ -1867,6 +1985,7 @@ Module Blocker
                 ' Re-affirm the schedule-only sentinel (idempotent - an armed schedule-only config
                 ' already carries it; keeps the invariant explicit).
                 ini.SetKeyValue("Time", "Until", enc.EncryptData(ScheduleOnlyExpiredUntil))
+                ini.SetKeyValue("Guard", "ArmedCount", ScheduleGuardArmedCount(spec))
                 If macValid Then RestampMacWithExistingKey(ini)
                 ini.Save(IniPath())
                 RefreshBackup(ini)
@@ -1914,11 +2033,35 @@ Module Blocker
             ini.AddSection("Schedule")
             ini.SetKeyValue("Schedule", "Spec", spec)
 
+            ' v1.1 S5: the MAC'd guardian hold for a schedule-only (v9-shaped) config.
+            ini.AddSection("Guard")
+            ini.SetKeyValue("Guard", "ArmedCount", ScheduleGuardArmedCount(spec))
+
             StampFreshMac(ini)
             ini.Save(IniPath())
             RefreshBackup(ini)
         End If
     End Sub
+
+    ' v1.1 S5 (pure): the [Guard] ArmedCount a SCHEDULE-ONLY config carries - "1" while a Spec
+    ' is armed, "0" once it is cleared.
+    '
+    ' Why this exists. S4 deleted the guardian's legacy floor on the global [Schedule] Spec
+    ' (P44 replaced it with a raw per-SLOT scan), which was right for v10 configs but left the
+    ' v9-shaped schedule-only config - the one `monkmode schedule` still writes - with NOTHING
+    ' holding the guardian BETWEEN windows: killing the service in a gap would leave it dead
+    ' until the next window. [Guard] ArmedCount is MAC-covered (it is a canonical field) and
+    ' Guardian.GuardArmedCountHolds already holds on a positive count, so one MAC'd scalar
+    ' restores the hold with no parser and no new guardian read. Extend-only in spirit: it is
+    ' cleared ONLY by an explicit `schedule --clear` (or a full teardown), so a stale "1" can
+    ' only ever over-guard - the guardian watching an ended schedule costs a process, while
+    ' the converse loses B1 cover on a live block.
+    '
+    ' (The full fix - a schedule being a SLOT of its own - remains deferred; see the S5
+    ' handback. This is the fail-closed floor until it lands.)
+    Friend Function ScheduleGuardArmedCount(ByVal spec As String) As String
+        Return If(String.IsNullOrWhiteSpace(spec), "0", "1")
+    End Function
 
     ' ---- C5b (c4): read-only schedule DISPLAY helpers (schedule --show / status) ----
     '
@@ -2414,6 +2557,109 @@ Module Blocker
     Public Sub RequestPartnerCode(ByVal slotId As Integer, ByVal code As String)
         File.WriteAllText(Path.Combine(AppDir(), PartnerCodePrefix & slotId.ToString(CultureInfo.InvariantCulture)), code)
     End Sub
+
+    ' P42 (v1.1 S5): `add` becomes SERVICE-ADJUDICATED. The CLI drops the content-bearing
+    ' `monkmode_add.request.<id>` trigger carrying the requested sites; the SERVICE grows that
+    ' slot's MAC-covered `Sites` (growth-only) on its next tick and P37 then reconciles the
+    ' hosts snapshot from config truth.
+    '
+    ' Why not keep writing hosts here: the pre-S5 `add` appended to the v9 [User] CustomSites
+    ' and to the hosts snapshot and to NO slot, so the P37 reconciliation stripped the added
+    ' sites back out within ~10s. It could not be fixed by writing a slot from the CLI either -
+    ' the CLI would have to re-stamp a config the service rewrites every tick, which is the
+    ' lost-update race ArmSlot needs a five-attempt confirm loop to survive. A trigger has no
+    ' such race: it carries a REQUEST with zero authority, and the one per-slot writer (P36)
+    ' applies it under a re-validated MAC.
+    '
+    ' The id is a routing hint only (P40): an unknown/retired one deletes the trigger and
+    ' changes nothing. Content is the requested sites, one per line.
+    '
+    ' UNIONS WITH A PENDING REQUEST rather than overwriting it. The trigger name is fixed per
+    ' slot, so two `add`s inside one ~10s tick would otherwise have the second REPLACE the
+    ' first - and the CLI has already told the user the first one was accepted, so those sites
+    ' would vanish silently. The union makes a burst of adds behave exactly like one add of
+    ' the whole set. Fail-WIDER on a bad read: an unreadable or garbage pending file
+    ' contributes whatever parses (possibly nothing) and never blocks or shrinks the new
+    ' request - refusing an add because a stale trigger is unreadable would be the worse
+    ' failure, and the merge can only ever grow the list.
+    '
+    ' Returns False, WRITING NOTHING, when the merged request would exceed the cap the service
+    ' reads: the pending trigger is left intact so its already-promised sites still land, and
+    ' the caller refuses the NEW add. Refusing the new one is the fail-closed direction - the
+    ' alternative (write it anyway) makes the service bin the whole file, losing both.
+    Public Function RequestAdd(ByVal slotId As Integer, ByVal domains As IEnumerable(Of String)) As Boolean
+        Dim path As String = AddRequestPath(slotId)
+        Dim merged As String = MergeAddRequestContent(PendingAddRequestContent(slotId), domains)
+        If Not AddRequestFits(merged) Then Return False
+        File.WriteAllText(path, merged)
+        Return True
+    End Function
+
+    Friend Function AddRequestPath(ByVal slotId As Integer) As String
+        Return Path.Combine(AppDir(), AddRequestPrefix & slotId.ToString(CultureInfo.InvariantCulture))
+    End Function
+
+    ' Whatever a still-pending request for this slot already carries, or "" when there is
+    ' none / it cannot be read. Never throws: "" simply means the merge contributes only the
+    ' new sites, which is the widening direction.
+    Friend Function PendingAddRequestContent(ByVal slotId As Integer) As String
+        Try
+            Dim path As String = AddRequestPath(slotId)
+            If Not File.Exists(path) Then Return ""
+            Dim fi As New FileInfo(path)
+            If fi.Length > TriggerMaxBytes Then Return ""   ' the service would bin it anyway
+            Return File.ReadAllText(path)
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ' The trigger body: one entry per line, trimmed, empties dropped - the entries a PENDING
+    ' request already carries first (order kept), then the new ones not already there
+    ' (case-insensitive). The pending side is parsed with the SAME tolerance and the SAME
+    ' malformed-token rule the service applies (Service1.MergeSiteList): split on newlines,
+    ' commas and semicolons, and drop anything carrying whitespace or ";" - a token the
+    ' service would refuse must not be echoed back into the file, or it would ride there for
+    ' ever. New entries keep the caller's own list verbatim-but-trimmed, so the CLI is no
+    ' stricter than it was.
+    '
+    ' Pure, so the caller's cap check measures EXACTLY the bytes that get written and the
+    ' service then reads.
+    Friend Function MergeAddRequestContent(ByVal pendingRaw As String, ByVal domains As IEnumerable(Of String)) As String
+        Dim parts As New List(Of String)
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If pendingRaw IsNot Nothing Then
+            For Each tok As String In pendingRaw.Split(New Char() {ControlChars.Cr, ControlChars.Lf, ","c, ";"c})
+                Dim s As String = tok.Trim()
+                If s = "" Then Continue For
+                If s.IndexOfAny(New Char() {" "c, ControlChars.Tab, ";"c}) >= 0 Then Continue For
+                If seen.Add(s) Then parts.Add(s)
+            Next
+        End If
+        If domains IsNot Nothing Then
+            For Each d As String In domains
+                Dim s As String = If(d, "").Trim()
+                If s <> "" AndAlso seen.Add(s) Then parts.Add(s)
+            Next
+        End If
+        Return String.Join(Environment.NewLine, parts)
+    End Function
+
+    ' The trigger body for a request with nothing pending. Kept as the no-pending case of the
+    ' merge so there is one definition of the body's shape.
+    Friend Function BuildAddRequestContent(ByVal domains As IEnumerable(Of String)) As String
+        Return MergeAddRequestContent("", domains)
+    End Function
+
+    ' P40: the service reads a content-bearing trigger only up to TriggerMaxBytes and DELETES
+    ' an oversize one without changing any state. So the CLI refuses an over-long list up
+    ' front rather than reporting "MonkMode applies it within ~10s" about a request that will
+    ' be silently binned. Same value as Service1.TriggerMaxBytes (parity-pinned by test).
+    Friend Const TriggerMaxBytes As Long = 4096
+
+    Friend Function AddRequestFits(ByVal content As String) As Boolean
+        Return System.Text.Encoding.UTF8.GetByteCount(If(content, "")) <= TriggerMaxBytes
+    End Function
 
     ' The ids of every armed slot, ascending by position - what the `unblock` surface
     ' addresses its triggers at. Fail-SOFT (an unreadable config yields an empty list): the

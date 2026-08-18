@@ -67,6 +67,31 @@ public class StatusDisplayPureTests
             "Exit:  run 'monkmode unblock' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
             MonkMode.Program.FormatCoolOffStatusLine(false, null));
 
+    // ---- v1.1 S5 (P31): the SAME three branches, reused per slot with an --id ----
+    // The four tests above are the v9 fallback branch of `status` (and v1.0's wording); the
+    // three below are what every row of the slot table prints. The whole rest of the S5 CLI
+    // surface - the table layout, the exit tokens, the cv-d substrings, the --start refusals
+    // and the add channel - lives in SlotCliTests.cs.
+
+    [Fact]
+    public void FormatCoolOffStatusLine_WithASlotId_NamesTheBlockInBothCommandHints()
+    {
+        Assert.Equal(
+            "Exit:  run 'monkmode unblock --id 4' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
+            MonkMode.Program.FormatCoolOffStatusLine(false, null, "4"));
+        Assert.Equal(
+            "Exit:  cooling-off pending - lifts in about 1h of active time. Run 'monkmode unblock --id 4 --cancel' to stay blocked.",
+            MonkMode.Program.FormatCoolOffStatusLine(false, TimeSpan.FromHours(1), "4"));
+    }
+
+    [Fact]
+    public void FormatCoolOffStatusLine_CommittedLine_IsIdenticalWithOrWithoutASlotId()
+        // It carries no command to aim, so P31's "--id inside the two command hints" leaves it
+        // untouched - and cv-d-smoke.ps1:141 matches this line whichever way status renders it.
+        => Assert.Equal(
+            MonkMode.Program.FormatCoolOffStatusLine(true, null),
+            MonkMode.Program.FormatCoolOffStatusLine(true, null, "4"));
+
     // ---- CoolOffRemainingFrom: deadline - HighWater, non-positive => not pending ----
 
     [Fact]
