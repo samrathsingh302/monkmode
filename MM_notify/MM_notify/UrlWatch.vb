@@ -16,19 +16,20 @@
 '    You should have received a copy of the GNU General Public License
 '    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-'    MonkMode - notifier: the URL-watch PURE layer (v1.1 F2a, pins P56-P60)
+'    MonkMode - notifier: the URL watcher (v1.1 F2a pure layer, pins P56-P60;
+'    F2b seam + live UIA, pins P54/P61)
 '
-'    Four side-effect-free functions plus the exact-home predicate. This file is
-'    the whole decision surface of the F2 URL watcher: given a foreground browser
-'    URL and the union of the active slots' patterns, decide (a) what the URL
-'    reduces to, (b) whether it is blocked, (c) where to send the browser
-'    instead, and (d) whether enough time has passed to act again.
-'
-'    NOTHING here touches UIAutomation, the disk, the registry or the clock -
-'    that is S7's job and it lives behind the P61 seam. Same testable-core +
-'    live-wrapper shape as Notifications.vb and SingleInstance.vb, so the entire
-'    surface is brute-force unit-tested cross-assembly (mm_notify.UrlWatch.X via
-'    InternalsVisibleTo) with no browser and no notifier in the room.
+'    Four side-effect-free functions plus the exact-home predicate. The first half
+'    of this file is the whole decision surface of the F2 URL watcher: given a
+'    foreground browser URL and the union of the active slots' patterns, decide
+'    (a) what the URL reduces to, (b) whether it is blocked, (c) where to send the
+'    browser instead, and (d) whether enough time has passed to act again. The
+'    second half (S7, from "F2b" below) is the seam and the live UIAutomation
+'    wrappers behind it. Same testable-core + live-wrapper shape as
+'    Notifications.vb and SingleInstance.vb, so the entire DECISION surface is
+'    brute-force unit-tested cross-assembly (mm_notify.UrlWatch.X via
+'    InternalsVisibleTo) with no browser and no notifier in the room: the tests
+'    assign the hooks, and no UIA type is ever loaded in a test run.
 '
 '    THE CONTRACT THAT SHAPES EVERY LINE: this layer is BEST-EFFORT NUDGING, not
 '    enforcement. The hosts-file block (B2, self-healed by the service every 10s)
@@ -52,6 +53,9 @@
 
 Option Explicit On
 Option Strict Off
+
+Imports System.Runtime.InteropServices
+Imports System.Windows.Automation
 
 Friend Module UrlWatch
 
@@ -411,6 +415,372 @@ Friend Module UrlWatch
             If s(i) = a OrElse s(i) = b Then Return i
         Next
         Return -1
+    End Function
+
+    ' ==================================================================
+    ' F2b (v1.1 S7) - the watcher: P54 targeting, the P61 seam, the live UIA
+    ' ==================================================================
+    '
+    '    Everything below is the OUTSIDE of the decision surface: which windows we
+    '    look at, how the URL is read, and how the redirect is performed. It obeys
+    '    one rule above all others, and every Try in this half exists for it:
+    '
+    '        A UIA FAILURE MUST NEVER REACH THE NOTIFIER.
+    '
+    '    The notifier is also the user-session app-kill loop (Form1.appKillTimer),
+    '    and mm_notify dying means blocked apps stop being killed - a URL nudge
+    '    taking the kill loop down with it would be a bypass manufactured by a
+    '    convenience feature (R12). So: every entry point here is TOTAL, every UIA
+    '    call sits inside a Try that swallows, and Form1 additionally runs the whole
+    '    pass on a POOL THREAD so a UIA call that BLOCKS (a busy browser can hold a
+    '    cross-process UIA read for seconds) cannot stall the 2s app-kill beat
+    '    either. Nothing here can lift, shorten or weaken a block: the hosts-file
+    '    block (B2) is the enforcement, this is a nudge on top of it.
+
+    '    P54: the processes whose foreground window is worth reading. Firefox is out
+    '    of scope (it is not a Chromium Views omnibox; documented residual R13).
+    Friend ReadOnly BrowserProcessNames As String() = {"chrome", "msedge", "brave"}
+
+    '    Is this foreground process one we watch? Case-insensitive, tolerating a
+    '    ".exe" suffix (Process.ProcessName has none; a caller or a test may).
+    '
+    '    EXACT, not the substring test the BLOCKING predicates use, and that is
+    '    deliberate: this is a TARGETING axis, not a blocking one. Widening it does
+    '    not block more - it makes the watcher hunt for an address bar inside
+    '    unrelated apps, and the redirect actor's SetValue would then be typing a
+    '    URL into whatever Edit control that app happens to expose. Narrow is the
+    '    safe direction HERE; the cost of a miss is a browser we do not nudge, and
+    '    the hosts block still stops the page loading.
+    Friend Function IsWatchedBrowser(ByVal processName As String) As Boolean
+        If processName Is Nothing Then Return False
+        Dim n As String = processName.Trim()
+        If n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) Then n = n.Substring(0, n.Length - 4)
+        If n.Length = 0 Then Return False
+        For Each b As String In BrowserProcessNames
+            If String.Equals(n, b, StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' P61 - the seam
+    ' ------------------------------------------------------------------
+
+    '    The three hooks are Nothing in production and the live UIA implementations
+    '    run; a test assigns them and NO UIAutomation type is ever loaded in a test
+    '    run (the same RenameHookForTests/SetAttrHookForTests pattern the service
+    '    uses for its hosts rename and read-only attribute).
+    Friend Delegate Function ForegroundUrlReader() As String
+    Friend Delegate Function ForegroundProcessNameReader() As String
+    Friend Delegate Sub RedirectPerformer(ByVal target As String)
+
+    '    One step of the live redirect (focus / type / Enter). Not a hook - the
+    '    steps are supplied by LivePerformRedirect - but it is what lets the step
+    '    ORDER and the focus-refusal rule be tested with no browser present.
+    Friend Delegate Sub RedirectStep()
+
+    Friend UrlReaderHook As ForegroundUrlReader = Nothing
+    Friend ProcessNameHook As ForegroundProcessNameReader = Nothing
+    Friend RedirectHook As RedirectPerformer = Nothing
+
+    '    The foreground window's process name, or "" for anything unreadable.
+    '    Never throws.
+    Friend Function ForegroundProcessNameSafe() As String
+        Try
+            Dim hook As ForegroundProcessNameReader = ProcessNameHook
+            If hook IsNot Nothing Then Return If(hook(), "")
+            Return LiveForegroundProcessName()
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    '    The URL currently shown in the foreground browser's address bar, or "" for
+    '    anything unreadable. Never throws.
+    Friend Function ReadForegroundUrlSafe() As String
+        Try
+            Dim hook As ForegroundUrlReader = UrlReaderHook
+            If hook IsNot Nothing Then Return If(hook(), "")
+            Return LiveReadForegroundUrl()
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    '    Steer the foreground browser to `target`. True only when the redirect was
+    '    actually performed. "" target => False and NOTHING happens (the caller
+    '    gets "" from TickTarget whenever there is no hit, so this is the second
+    '    lock on "no hit, no action"). Never throws.
+    Friend Function PerformRedirect(ByVal target As String) As Boolean
+        If String.IsNullOrEmpty(target) Then Return False
+        Try
+            Dim hook As RedirectPerformer = RedirectHook
+            If hook IsNot Nothing Then
+                hook(target)
+                Return True
+            End If
+            Return LivePerformRedirect(target)
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' the tick decision (P54 + P57-P60 + the seam, one total function)
+    ' ------------------------------------------------------------------
+
+    '    One watch beat: given the foreground process name, the union of the active
+    '    slots' URL patterns and the tick pair, return the URL to redirect to, or
+    '    "" for "do nothing". Reads the address bar THROUGH THE SEAM, and only
+    '    after three gates have passed:
+    '
+    '      1. the foreground process is a watched browser (P54) - so a non-browser
+    '         foreground never causes a UIA read at all;
+    '      2. at least one non-blank pattern exists - so a machine with no armed
+    '         block, or armed blocks that carry no --urls, never reads either. This
+    '         gate is what makes "the watcher does NOTHING when no slot has
+    '         patterns" a property of the code rather than of the pattern matcher's
+    '         behaviour on an empty set;
+    '      3. the P60 cooldown has elapsed - checked BEFORE the read, because a
+    '         read we are forbidden to act on is pure cost.
+    '
+    '    TOTAL: the whole body is wrapped, so a hook that throws, a collection that
+    '    throws while enumerating, or any future addition here yields "" (do
+    '    nothing) rather than an exception in the notifier. "Do nothing" is the
+    '    correct failure value for a nudge - the hosts block is unaffected by it.
+    Friend Function TickTarget(ByVal processName As String,
+                               ByVal patterns As IEnumerable(Of String),
+                               ByVal lastActionTick As Long,
+                               ByVal nowTick As Long) As String
+        Try
+            If Not IsWatchedBrowser(processName) Then Return ""
+            If Not HasAnyPattern(patterns) Then Return ""
+            If Not ShouldActOnHit(lastActionTick, nowTick, RedirectCooldownMs) Then Return ""
+            Dim url As String = ReadForegroundUrlSafe()
+            If url Is Nothing OrElse url.Length = 0 Then Return ""
+            Return RedirectTargetFor(url, patterns)
+        Catch ex As Exception
+            Return ""
+        End Try
+    End Function
+
+    '    Does this set carry at least one pattern with any content? Nothing entries
+    '    and blanks do not count - a slot armed with no --urls stores "", which
+    '    splits to a list of empties, and acting on that would mean "read the
+    '    address bar forever for nothing".
+    Friend Function HasAnyPattern(ByVal patterns As IEnumerable(Of String)) As Boolean
+        If patterns Is Nothing Then Return False
+        For Each p As String In patterns
+            If p IsNot Nothing AndAlso p.Trim().Length > 0 Then Return True
+        Next
+        Return False
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' the live UIA layer - NEVER reached from a test (the hooks stand in)
+    ' ------------------------------------------------------------------
+
+    '    The Chromium omnibox's UIA AutomationId. NOT a contract and NOT the same
+    '    across the three browsers - it is a Views view-class ordinal, so it shifts
+    '    with the build. Measured 18/08/2026 by tools\smoke\f2-url-smoke.ps1:
+    '    Brave "view_1012" (and Chrome the same, per the research note), but Edge
+    '    "view_1021". Hence the ClassName pass below, which is what actually catches
+    '    Edge.
+    Private Const OmniboxAutomationId As String = "view_1012"
+
+    '    The omnibox's Views class name - the SUFFIX, not the whole string: Chrome
+    '    and Edge report "OmniboxViewViews" and Brave reports
+    '    "BraveOmniboxViewViews" (both measured 18/08/2026 by the same probe). A
+    '    suffix test covers all three and any similarly-prefixed fork; an equality
+    '    test would have silently missed Brave.
+    Private Const OmniboxClassNameSuffix As String = "OmniboxViewViews"
+
+    '    VK_RETURN. The redirect is SetValue + Enter: SetValue alone only edits the
+    '    text in the address bar, it does not navigate.
+    Private Const VkReturn As Byte = 13    ' VK_RETURN (0x0D)
+    Private Const KeyEventKeyUp As UInteger = 2UI
+
+    <DllImport("user32.dll")>
+    Private Function GetForegroundWindow() As IntPtr
+    End Function
+
+    <DllImport("user32.dll", SetLastError:=True)>
+    Private Function GetWindowThreadProcessId(ByVal hWnd As IntPtr, ByRef lpdwProcessId As UInteger) As UInteger
+    End Function
+
+    '    keybd_event rather than SendKeys.SendWait: the watch pass runs on a POOL
+    '    thread (Form1), and SendKeys' behaviour off the UI thread depends on which
+    '    of its two implementations is in play. This one is a plain synthesized key
+    '    event to the foreground window, thread-agnostic.
+    <DllImport("user32.dll", EntryPoint:="keybd_event")>
+    Private Sub SendKeyEvent(ByVal bVk As Byte, ByVal bScan As Byte, ByVal dwFlags As UInteger, ByVal dwExtraInfo As UIntPtr)
+    End Sub
+
+    '    The foreground window's process name (no ".exe"), "" when there is no
+    '    foreground window or the process has already gone. Callers wrap.
+    Private Function LiveForegroundProcessName() As String
+        Dim h As IntPtr = GetForegroundWindow()
+        If h = IntPtr.Zero Then Return ""
+        Dim pid As UInteger = 0UI
+        GetWindowThreadProcessId(h, pid)
+        If pid = 0UI Then Return ""
+        Using p As Process = Process.GetProcessById(CInt(pid))
+            Return If(p.ProcessName, "")
+        End Using
+    End Function
+
+    '    Read the FOREGROUND window's address bar. Foreground only, by design: a
+    '    background window's omnibox would be a different browser window the user
+    '    is not looking at, and a background TAB has no omnibox of its own at all
+    '    (one Views omnibox per window, showing the ACTIVE tab). So a blocked page
+    '    sitting in a background tab is a documented F2 residual - it is the hosts
+    '    block's job, not the watcher's.
+    '
+    '    POLL, NEVER SUBSCRIBE. Chrome's native UIA provider floods property-change
+    '    events on every keystroke (it froze NVDA for seconds); this is called once
+    '    per 2s beat from a pool thread and holds no subscription.
+    Private Function LiveReadForegroundUrl() As String
+        Dim h As IntPtr = GetForegroundWindow()
+        If h = IntPtr.Zero Then Return ""
+        Dim root As AutomationElement = AutomationElement.FromHandle(h)
+        If root Is Nothing Then Return ""
+        Dim box As AutomationElement = FindOmnibox(root)
+        If box Is Nothing Then Return ""
+        Dim vp As ValuePattern = TryCast(box.GetCurrentPattern(ValuePattern.Pattern), ValuePattern)
+        If vp Is Nothing Then Return ""
+        Return If(vp.Current.Value, "")
+    End Function
+
+    '    SetValue + Enter on the foreground window's address bar. False when there
+    '    is nothing to type into. Focus first: SetValue on an unfocused omnibox is
+    '    accepted but the Enter would go to whatever DOES have focus (usually the
+    '    page), so the navigation would never happen.
+    '
+    '    The foreground window is re-read here rather than carried over from the
+    '    read: the user may have alt-tabbed in between, and typing into the window
+    '    they are looking at NOW is the only defensible choice. What stops that
+    '    being dangerous is FindOmnibox's strict identification - if the new
+    '    foreground window is not a Chromium browser it has no element matching the
+    '    omnibox id or class, so this returns False and nothing is typed anywhere.
+    '
+    '    The three ACTIONS are handed to PerformRedirectSteps rather than run here,
+    '    so their ORDER and their refusal rule are unit-testable without a browser;
+    '    this function is only the lookup that finds what to hand it.
+    Private Function LivePerformRedirect(ByVal target As String) As Boolean
+        Dim h As IntPtr = GetForegroundWindow()
+        If h = IntPtr.Zero Then Return False
+        Dim root As AutomationElement = AutomationElement.FromHandle(h)
+        If root Is Nothing Then Return False
+        Dim box As AutomationElement = FindOmnibox(root)
+        If box Is Nothing Then Return False
+        Dim vp As ValuePattern = TryCast(box.GetCurrentPattern(ValuePattern.Pattern), ValuePattern)
+        If vp Is Nothing OrElse vp.Current.IsReadOnly Then Return False
+        Return PerformRedirectSteps(Sub() box.SetFocus(),
+                                    Sub() vp.SetValue(target),
+                                    AddressOf PressEnter)
+    End Function
+
+    '    The two synthesized VK_RETURN events, down then up.
+    Private Sub PressEnter()
+        SendKeyEvent(VkReturn, 0, 0UI, UIntPtr.Zero)
+        SendKeyEvent(VkReturn, 0, KeyEventKeyUp, UIntPtr.Zero)
+    End Sub
+
+    '    The redirect's three steps, in order, with the one rule that matters:
+    '
+    '        IF FOCUS FAILS, NOTHING IS TYPED AND NO KEY IS SENT.
+    '
+    '    Focus is a PRECONDITION, not a best effort. The Enter is a SYNTHESIZED
+    '    GLOBAL KEY EVENT - it goes wherever focus currently is - so sending it
+    '    after a failed SetFocus means pressing Enter on whatever the user is
+    '    actually in: a page element, a button, a half-filled form. That is the one
+    '    way this whole feature could do something the user did not ask for, and it
+    '    would be doing it on THEIR keyboard focus, not on a block. Refusing costs
+    '    one nudge; the next beat past the cooldown tries again, and the hosts block
+    '    (the actual enforcement) never depended on this at all.
+    '
+    '    Extracted from LivePerformRedirect purely so this refusal can be pinned by
+    '    a test: the steps arrive as delegates, so UrlWatchSeamTests can hand it a
+    '    focus step that throws and assert the other two were never invoked. No UIA
+    '    type appears in the signature, so a test run still loads no UIAutomation.
+    '    Total: a Nothing step or a throw from any step yields False.
+    Friend Function PerformRedirectSteps(ByVal takeFocus As RedirectStep,
+                                         ByVal typeTarget As RedirectStep,
+                                         ByVal pressEnter As RedirectStep) As Boolean
+        If takeFocus Is Nothing OrElse typeTarget Is Nothing OrElse pressEnter Is Nothing Then Return False
+        Try
+            takeFocus()
+        Catch ex As Exception
+            Return False
+        End Try
+        Try
+            typeTarget()
+            pressEnter()
+        Catch ex As Exception
+            ' A SetValue that throws leaves the omnibox untouched; one that throws
+            ' AFTER writing leaves the target text sitting there unnavigated, which
+            ' is inert - the user's next keystroke replaces it.
+            Return False
+        End Try
+        Return True
+    End Function
+
+    '    The address-bar element inside a browser window, or Nothing.
+    '
+    '    Two ways in, most specific first, each isolated so a provider that throws
+    '    on one still gets the other tried:
+    '      1. ControlType=Edit AND AutomationId="view_1012" - Chrome and Brave;
+    '      2. ControlType=Edit AND a ClassName ending "OmniboxViewViews" - Edge
+    '         (whose id ordinal is view_1021) and Brave's "BraveOmniboxViewViews".
+    '    Neither pass alone covers all three browsers - that is the measured fact
+    '    behind having both (18/08/2026 probe).
+    '
+    '    THERE IS DELIBERATELY NO "just take the first Edit control" FALLBACK. If
+    '    neither pass identifies the box, we do not know we are looking at an
+    '    address bar, and the actor's next move is to TYPE INTO whatever we hand it
+    '    - a find bar, a search field, a form on the page. Giving up costs the
+    '    nudge; the hosts block still stops the page, and the probe script (which
+    '    DOES print the first-Edit fallback) is what would show a future Chromium
+    '    renaming this. Name is not matched on either ("Address and search bar" is
+    '    localised, so it would miss on a non-English Windows).
+    '
+    '    Both passes are scoped to the browser WINDOW's subtree, and the browser
+    '    CHROME (toolbar/omnibox) is a Views tree separate from the page's renderer
+    '    tree, so this does not force renderer accessibility on.
+    Private Function FindOmnibox(ByVal root As AutomationElement) As AutomationElement
+        Dim isEdit As New PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)
+        Dim byId As AutomationElement = TryFindFirst(root, New AndCondition(isEdit,
+            New PropertyCondition(AutomationElement.AutomationIdProperty, OmniboxAutomationId)))
+        If byId IsNot Nothing Then Return byId
+
+        ' The class test is a suffix comparison, which no PropertyCondition can
+        ' express, so this pass enumerates the window's Edit controls instead. One
+        ' extra tree walk at most, and only on the browsers the id pass misses.
+        Dim edits As AutomationElementCollection = Nothing
+        Try
+            edits = root.FindAll(TreeScope.Descendants, isEdit)
+        Catch ex As Exception
+            Return Nothing
+        End Try
+        If edits Is Nothing Then Return Nothing
+        For Each el As AutomationElement In edits
+            Try
+                Dim cls As String = If(el.Current.ClassName, "")
+                If cls.EndsWith(OmniboxClassNameSuffix, StringComparison.OrdinalIgnoreCase) Then Return el
+            Catch ex As Exception
+                ' This element's provider faulted; the next one may not.
+            End Try
+        Next
+        Return Nothing
+    End Function
+
+    '    FindFirst over the window's descendants, Nothing on any provider failure.
+    Private Function TryFindFirst(ByVal root As AutomationElement, ByVal cond As Condition) As AutomationElement
+        Try
+            Return root.FindFirst(TreeScope.Descendants, cond)
+        Catch ex As Exception
+            Return Nothing
+        End Try
     End Function
 
 End Module

@@ -42,6 +42,26 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- v1.1 S7 (F2b): managed UI Automation (System.Windows.Automation) for the URL watcher -
+         AutomationElement / ValuePattern, i.e. the UIAutomationClient + UIAutomationTypes
+         assemblies. They live in the WPF HALF of Microsoft.WindowsDesktop.App, and
+         <UseWindowsForms> resolves that framework under its WindowsForms PROFILE, which filters
+         them out: a bare <Reference Include="UIAutomationClient" /> does NOT resolve (verified
+         18/08/2026 - MSB3245 "Could not locate the assembly", then BC30002 on every UIA type).
+         Taking the framework reference WITHOUT a profile is the least-machinery fix that does
+         resolve; <UseWPF>true</UseWPF> also works but additionally switches on the XAML/baml
+         build targets this project has no use for (and it makes the two <Reference> items
+         redundant, warning MSB3243).
+         PAYLOAD: a framework-dependent build (build-dist.ps1's default) ships nothing new - the
+         assemblies come from the installed .NET 10 desktop runtime. A -SelfContained build now
+         also bundles the WPF/UIA assemblies: +33 files, +54 MB, measured 18/08/2026. Recorded in
+         NOTICE + THIRD-PARTY-LICENSES.md (MIT, GPLv3-compatible).
+         THE NOTIFIER ONLY. The CLI, service and guardian keep the WindowsForms profile - none of
+         them reads a browser - so nothing about the enforcement core moves. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
     <Import Include="System" />
     <Import Include="System.Collections" />

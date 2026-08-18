@@ -46,6 +46,26 @@ following MIT-licensed assemblies alongside the MonkMode executables:
     Copyright (c) Microsoft Corporation
     Licensed under the MIT License (licence text: THIRD-PARTY-LICENSES.md)
 
+Binary distribution - .NET runtime assemblies (added 18/08/2026):
+The notifier's F2 URL watcher reads the foreground browser's address bar through
+managed UI Automation (System.Windows.Automation), which lives in the WPF half of
+the Microsoft.WindowsDesktop.App shared framework. MM_notify.vbproj therefore
+takes the FULL Microsoft.WindowsDesktop.App framework reference rather than the
+WindowsForms-only profile. Consequences:
+
+  - framework-dependent builds (tools\build-dist.ps1, the default) ship NOTHING
+    new: the assemblies come from the .NET 10 desktop runtime already required on
+    the machine;
+  - SELF-CONTAINED builds (build-dist.ps1 -SelfContained, the payload
+    tools\install.ps1 copies) now also bundle the WPF/UI-Automation assemblies of
+    that framework - UIAutomationClient, UIAutomationTypes, UIAutomationProvider,
+    UIAutomationClientSideProviders, PresentationCore, PresentationFramework*,
+    System.Xaml and their native helpers (measured 18/08/2026: +33 files, +54 MB).
+
+    Microsoft.WindowsDesktop.App (.NET 10 desktop runtime)
+    Copyright (c) .NET Foundation and Contributors
+    Licensed under the MIT License (licence text: THIRD-PARTY-LICENSES.md)
+
 The MIT licence is GPLv3-compatible; the combined work remains GPLv3.
 
 Historical note - INI parser:

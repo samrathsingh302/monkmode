@@ -57,7 +57,20 @@ Public Class Form1
     Private WithEvents pollTimer As New Timer()
     Private WithEvents appKillTimer As New Timer()
     Private WithEvents closeTimer As New Timer()
+    ' v1.1 S7 (F2b, P62): the URL watcher's own 2s beat. Separate from appKillTimer
+    ' deliberately - the two do unrelated work and the watcher's pass runs off the UI
+    ' thread, so sharing a tick would only entangle their failure modes.
+    Private WithEvents urlWatchTimer As New Timer()
     Private iniProcessList As String = ""
+
+    ' v1.1 S7 URL-watch state. urlLastActionTick is the Environment.TickCount64 of the
+    ' last redirect ATTEMPT (P60's 5s cooldown is measured off it - attempt, not success,
+    ' so a browser that keeps refusing the SetValue is retried once per cooldown rather
+    ' than once per beat). urlWatchInFlight is a 0/1 re-entrancy latch: at most one pass
+    ' is ever in flight, so a UIA read that blocks for seconds cannot pile up passes.
+    ' Both are touched from a pool thread, hence Interlocked throughout.
+    Private urlLastActionTick As Long = 0
+    Private urlWatchInFlight As Integer = 0
 
     ' D4 notification state (all in-memory; the notifier persists NOTHING new - no
     ' MAC field, no write that could race the service):
@@ -95,6 +108,7 @@ Public Class Form1
         pollTimer.Interval = 5000
         appKillTimer.Interval = 2000
         closeTimer.Interval = 6000
+        urlWatchTimer.Interval = 2000        ' P62
     End Sub
 
     Private Sub Form1_Load(ByVal sender As Object, ByVal e As EventArgs) Handles MyBase.Load
@@ -139,6 +153,7 @@ Public Class Form1
 
         pollTimer.Start()
         appKillTimer.Start()
+        urlWatchTimer.Start()   ' v1.1 S7 (P62): same lifecycle as the app-kill beat
         ' D4: seed the periodic-reminder anchor so the first "still blocked" nudge waits a full
         ' interval after this launch, then announce the active manual block once (best-effort).
         reminderAnchorTick = Environment.TickCount64
@@ -371,6 +386,76 @@ Public Class Form1
         Next
     End Sub
 
+    ' ============ v1.1 S7 (F2b): the URL watcher's beat ============
+    '
+    ' P62's 2s tick does almost nothing itself: it takes a re-entrancy latch and hands the
+    ' pass to a POOL THREAD. That indirection is the whole point. A UI-thread pass would put
+    ' a cross-process UIAutomation read - which a busy browser can hold open for seconds -
+    ' directly in front of appKillTimer's 2s beat, so a slow browser would stall the loop that
+    ' kills blocked apps. Here the UI thread returns immediately and, at worst, the watcher
+    ' skips beats while one pass is still running.
+    '
+    ' The latch is released in the pass's Finally, so a pass that throws (it cannot - every
+    ' entry point in UrlWatch is total - but a ThreadPool item that dies would otherwise wedge
+    ' the watcher permanently) still re-opens the gate.
+    Private Sub urlWatchTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles urlWatchTimer.Tick
+        If System.Threading.Interlocked.CompareExchange(urlWatchInFlight, 1, 0) <> 0 Then Return
+        Try
+            System.Threading.ThreadPool.QueueUserWorkItem(
+                Sub()
+                    Try
+                        RunUrlWatchPass()
+                    Catch ex As Exception
+                    Finally
+                        System.Threading.Interlocked.Exchange(urlWatchInFlight, 0)
+                    End Try
+                End Sub)
+        Catch ex As Exception
+            ' The queue itself refused (pool exhaustion). Re-open the latch and wait for
+            ' the next beat; never let this reach the timer.
+            System.Threading.Interlocked.Exchange(urlWatchInFlight, 0)
+        End Try
+    End Sub
+
+    ' One watch pass, on a pool thread. Fail-soft end to end: every step's failure value is
+    ' "do nothing this beat", and the block is untouched either way (the watcher is a nudge
+    ' on top of the hosts block, never enforcement).
+    '
+    ' Order matters for cost, not for correctness: the foreground process is a cheap
+    ' user32 read, so a machine where the user is not in a browser never opens the config at
+    ' all, and neither the disk nor UIAutomation is touched.
+    Private Sub RunUrlWatchPass()
+        ' Read once, then hand the SAME name to TickTarget - which re-applies the P54 gate
+        ' itself, so the decision function is complete on its own and this early exit is
+        ' purely the cost saving it looks like.
+        Dim procName As String = UrlWatch.ForegroundProcessNameSafe()
+        If Not UrlWatch.IsWatchedBrowser(procName) Then Return
+        Dim patterns As List(Of String) = ActiveUrlPatterns()
+        If patterns.Count = 0 Then Return
+        Dim nowTick As Long = Environment.TickCount64
+        Dim target As String = UrlWatch.TickTarget(procName, patterns,
+                                                   System.Threading.Interlocked.Read(urlLastActionTick), nowTick)
+        If target Is Nothing OrElse target.Length = 0 Then Return
+        ' Stamped BEFORE the attempt: the cooldown bounds ATTEMPTS, so a browser that keeps
+        ' refusing the SetValue is retried once per 5s, not on every 2s beat.
+        System.Threading.Interlocked.Exchange(urlLastActionTick, nowTick)
+        UrlWatch.PerformRedirect(target)
+    End Sub
+
+    ' The union of the armed slots' URL patterns, re-read from disk each pass (the CLI is
+    ' their only writer, and a slot armed after this notifier launched must start being
+    ' watched within one beat - the S4 lesson from the app-kill mirror). Empty on ANY
+    ' failure: an unreadable config means no redirect, never a redirect against a stale set.
+    Private Function ActiveUrlPatterns() As List(Of String)
+        Try
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            Return RawSlotUrlPatterns(ini)
+        Catch ex As Exception
+            Return New List(Of String)
+        End Try
+    End Function
+
     ' Computes the clock-change-compensated end time from the persisted
     ' [CurrentTime] Now and [Time] Until strings (both already decrypted,
     ' en-CA). Returns Nothing when either value fails to parse: deriving a new
@@ -529,6 +614,7 @@ Public Class Form1
 
     Private Sub AnnounceBlockEnded()
         appKillTimer.Stop()
+        urlWatchTimer.Stop()   ' v1.1 S7 (P62): stopped with the app-kill beat it mirrors
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
@@ -670,6 +756,30 @@ Public Class Form1
         For pos As Integer = 1 To ConfigIntegrity.MaxSlots
             Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
             For Each tok As String In If(ini.GetKeyValue(sec, "Apps"), "").Split(";"c)
+                Dim t As String = tok.Trim()
+                If t <> "" AndAlso seen.Add(t) Then outList.Add(t)
+            Next
+        Next
+        Return outList
+    End Function
+
+    ' v1.1 S7 (F2b): every slot's UrlPatterns entries, first-occurrence order, deduped
+    ' case-insensitively. UrlPatterns is plaintext-as-stored (P8) and "|"-packed (P55 - both
+    ' "|" and ";" are refused inside a pattern at arm time, so the split is unambiguous).
+    '
+    ' Same raw, ungated scan as RawSlotApps above and for the same reasons: no MAC gate, no
+    ' decrypt, bound by MaxSlots rather than the stored SlotCount (so forging SlotCount=0
+    ' cannot silence the watcher), and not gated on whether a slot is enforcing this instant.
+    ' The over-approximation is CHEAP HERE in a way it is not for app-kill: the widest reading
+    ' costs at most one tick of over-nudging, and slots are REMOVED at retire/teardown, so the
+    ' union empties exactly when the blocks end. Nothing/absent => empty. Pure; never throws.
+    Friend Shared Function RawSlotUrlPatterns(ByVal ini As IniFile) As List(Of String)
+        Dim outList As New List(Of String)
+        If ini Is Nothing Then Return outList
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+            Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+            For Each tok As String In If(ini.GetKeyValue(sec, "UrlPatterns"), "").Split("|"c)
                 Dim t As String = tok.Trim()
                 If t <> "" AndAlso seen.Add(t) Then outList.Add(t)
             Next

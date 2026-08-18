@@ -9,7 +9,21 @@ the following MIT-licensed NuGet assemblies alongside the MonkMode executables
 - **Microsoft.Windows.SDK.NET / WinRT.Runtime** (C#/WinRT projection) —
   Copyright (c) Microsoft Corporation
 
-Both are distributed under the MIT License:
+A **self-contained** build (`tools\build-dist.ps1 -SelfContained`, the payload
+`tools\install.ps1` deploys) additionally bundles the .NET desktop runtime. Since
+18/08/2026 that bundle includes the WPF / UI-Automation half of it, because the
+notifier's URL watcher reads the browser address bar through managed UI
+Automation (`System.Windows.Automation`, in `UIAutomationClient` /
+`UIAutomationTypes`) — see NOTICE for the exact file delta:
+
+- **Microsoft.WindowsDesktop.App** (.NET 10 desktop runtime: `UIAutomation*`,
+  `PresentationCore`, `PresentationFramework*`, `System.Xaml`, …) — Copyright (c)
+  .NET Foundation and Contributors
+
+A framework-dependent build ships none of these — they come from the .NET 10
+desktop runtime installed on the machine.
+
+All of the above are distributed under the MIT License:
 
 ```
 MIT License
