@@ -900,6 +900,86 @@ Public Class Form1
         End Try
     End Function
 
+    ' ============ FX6 (F8): THE ONE NOTIFIER WRITER FOR THE SHARED CONFIG ============
+    '
+    ' ONE means one: all FOUR of this process's writes to monkmode_settings.ini come through
+    ' here - SystemEvents_TimeChanged's two halves, AnnounceBlockEnded's [User] NeedsAlerted,
+    ' and Program.ReassertTimeChangingFailSoft (the AppDomain crash backstop). If a fifth ever
+    ' appears it belongs here too; a second raw Load/Save copy re-opens exactly what follows.
+    '
+    ' THE HOLE. The notifier's config writes were Load -> SetKeyValue -> Save, and IniFile.Save
+    ' rewrites the WHOLE file from that in-memory model while leaving [Integrity] Mac exactly
+    ' as loaded. Anything the service or the CLI wrote in the load->Save window was therefore
+    ' silently ROLLED BACK - and because the stale MAC travels with the stale canonical it came
+    ' from, the rolled-back file still VERIFIES, so nothing downstream can tell. The losses are
+    ' real ones: a [Partner] UnlockedAt the service had just verified (the user's one-time code
+    ' is consumed and the unlock vanishes) or an applied `add` (sites lost AFTER the trigger was
+    ' eaten - an UNDER-block). Every other writer in the system re-locates and re-validates
+    ' before it writes; the notifier was the one that did not.
+    '
+    ' THE DISCIPLINE:
+    '   * re-read HERE, immediately before the write - never save a model loaded earlier (the
+    '     clock-change handler's model was 2000ms old);
+    '   * NO-OP when the key already reads the wanted value: the commonest call then touches
+    '     the file not at all, which is the strongest possible form of "roll nothing back";
+    '   * a GENERATION check on [Integrity] Mac taken as late as possible before the Save.
+    '     Every legitimate writer re-stamps that MAC over its changed canonical, so a Mac that
+    '     moved since our own read means somebody else's write landed - abandon ours and retry
+    '     against fresh bytes.
+    '
+    ' DELIBERATELY NOT MAC-GATED: the two keys this writes ([Time] TimeChanging, [User]
+    ' NeedsAlerted) sit OUTSIDE the canonical, and refusing to lower TimeChanging on a frozen
+    ' config would be the F7 wedge all over again. Nothing here re-stamps, so no unverified
+    ' config is ever blessed by it.
+    '
+    ' HONEST RESIDUALS: (a) this is not a lock - a write landing between the probe and
+    ' IniFile.Save's rename still wins; it shrinks the window from the whole load-modify-save
+    ' span to the Save itself. (b) A racing writer that touches ONLY non-MAC-covered keys is
+    ' invisible to the token by construction. Both are bounded by the fact that everything
+    ' written here is housekeeping: no enforcement field is ever this writer's to change.
+    Friend Const SharedConfigWriteAttempts As Integer = 3
+    Friend Const SharedConfigWriteRetryMs As Integer = 50
+
+    ' TEST SEAM (FX6/F8) - the service's RetireSaveHookForTests pattern. Fired after this
+    ' writer's own read, immediately before the generation probe and the Save: the exact window
+    ' a racing service/CLI write has. <ThreadStatic>; PRODUCTION never assigns it, so the field
+    ' stays Nothing and the write is behaviourally unchanged.
+    <ThreadStatic>
+    Friend Shared SharedConfigWriteHookForTests As Action(Of String)
+
+    ' Returns True iff the key ends up holding `value` (including the no-op case). False means
+    ' the write was abandoned - fail-SOFT by design, because every caller's key is housekeeping
+    ' and a missed write costs at most one duplicate toast or one bounded TimeChanging hold
+    ' (Service1.TimeChangeHoldActive), never a lifted or narrowed block.
+    Friend Shared Function SaveSharedConfigKey(ByVal iniPath As String, ByVal section As String,
+                                               ByVal key As String, ByVal value As String) As Boolean
+        For attempt As Integer = 1 To SharedConfigWriteAttempts
+            Try
+                ' No config, nothing to update. IniFile.Load answers an EMPTY model for a
+                ' missing path rather than throwing, so without this the notifier would CREATE
+                ' a one-key stub where no config exists - which the service then reads as a
+                ' structurally-unusable primary and recovers over. Never write a config into
+                ' being; only the CLI arms.
+                If Not File.Exists(iniPath) Then Return False
+                Dim ini As New IniFile
+                ini.Load(iniPath)
+                If StrComp(ini.GetKeyValue(section, key), value) = 0 Then Return True   ' already so: write NOTHING
+                Dim genAtLoad As String = ini.GetKeyValue(IntegritySection, IntegrityMacName)
+                ini.SetKeyValue(section, key, value)
+                If SharedConfigWriteHookForTests IsNot Nothing Then SharedConfigWriteHookForTests(iniPath)
+                Dim probe As New IniFile
+                probe.Load(iniPath)
+                If String.Equals(If(genAtLoad, ""), If(probe.GetKeyValue(IntegritySection, IntegrityMacName), ""), StringComparison.Ordinal) Then
+                    ini.Save(iniPath)
+                    Return True
+                End If
+            Catch ex As Exception
+            End Try
+            If attempt < SharedConfigWriteAttempts Then System.Threading.Thread.Sleep(SharedConfigWriteRetryMs)
+        Next
+        Return False
+    End Function
+
     ' Cooperate with a system-clock change. B4 (the monotonic HighWater mark) owns
     ' clock-rollback now - expiry is decided off real elapsed time, not the wall
     ' clock - so this handler NO LONGER rewrites [Time] Until. It used to, and that
@@ -921,16 +1001,15 @@ Public Class Form1
     ' here (the notifier no longer rewrites [Time] Until), safe to delete in a later cleanup.
     Private Sub SystemEvents_TimeChanged(ByVal sender As Object, ByVal e As EventArgs)
         Try
-            Dim ini As New IniFile
-            ini.Load(IniPath())
-            ini.SetKeyValue("Time", "TimeChanging", "yes")
-            ini.Save(IniPath())
+            ' FX6 (F8): both halves go through the ONE writer above - re-read, no-op when
+            ' already so, generation-checked - instead of whole-file-saving a model of our own.
+            ' The "no" half not landing is no longer a permanent wedge either: FX6 (F7) makes
+            ' the service treat a raise that outlives its bound as orphaned.
+            SaveSharedConfigKey(IniPath(), "Time", "TimeChanging", "yes")
 
             System.Threading.Thread.Sleep(2000)
 
-            ini.Load(IniPath())
-            ini.SetKeyValue("Time", "TimeChanging", "no")
-            ini.Save(IniPath())
+            SaveSharedConfigKey(IniPath(), "Time", "TimeChanging", "no")
         Catch ex As Exception
         End Try
     End Sub
@@ -939,13 +1018,10 @@ Public Class Form1
         appKillTimer.Stop()
         urlWatchTimer.Stop()   ' v1.1 S7 (P62): stopped with the app-kill beat it mirrors
         StopBlockPage()        ' v1.1 S7d (P50): the page comes down with the block
-        Try
-            Dim ini As New IniFile
-            ini.Load(IniPath())
-            ini.SetKeyValue("User", "NeedsAlerted", "no")
-            ini.Save(IniPath())
-        Catch ex As Exception
-        End Try
+        ' FX6 (F8): through the ONE writer - this ran at block-END, i.e. exactly when the
+        ' service is rewriting the config to tear the block down, so it was the likeliest of
+        ' the three to roll a real write back.
+        SaveSharedConfigKey(IniPath(), "User", "NeedsAlerted", "no")
 
         RemoveRunEntry()
 

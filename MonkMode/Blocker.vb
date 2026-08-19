@@ -1258,6 +1258,12 @@ Module Blocker
     Friend Const ArmAttempts As Integer = 5
     Friend Const ArmRetryMs As Integer = 250
 
+    ' FX6 (F10) TEST SEAM: see the call site in TryArmSlotOnce (between the Save and the
+    ' confirm re-read). <ThreadStatic> so it is confined to the test thread that sets it;
+    ' PRODUCTION never assigns it.
+    <ThreadStatic>
+    Friend ArmConfirmHookForTests As Action(Of String)
+
     ' Exit codes the arm refusals map to (0/1/2/3/4 across the whole CLI).
     Friend Const ExitCapReached As Integer = 3
     Friend Const ExitArmFailed As Integer = 2
@@ -1339,6 +1345,22 @@ Module Blocker
     ' The section name for a slot POSITION (1-based), matching [Slot1]..[Slot8].
     Private Function SlotSection(ByVal position As Integer) As String
         Return "Slot" & position.ToString(CultureInfo.InvariantCulture)
+    End Function
+
+    ' FX6 (F10): the POSITION (1-based) holding the slot whose Id is `wantedId`, or 0 if none
+    ' does - the CLI's own copy of Service1.FindSlotPositionById (separate assemblies; the CLI
+    ' cannot reference the service). Positions are NOT stable: a service-side retire compacts
+    ' every later slot down one, so anything that keys off a position captured before a reload
+    ' is reading a different block. Uses the CLAMPED SlotCount, never the raw stored value, so
+    ' a forged count cannot widen the scan. Ids are compared as the stored TEXT, trimmed,
+    ' ordinally - the same comparison the service makes. Pure; never throws.
+    Friend Function FindSlotPositionById(ByVal ini As IniFile, ByVal wantedId As Integer) As Integer
+        If ini Is Nothing Then Return 0
+        Dim wanted As String = wantedId.ToString(CultureInfo.InvariantCulture)
+        For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+            If String.Equals(If(ini.GetKeyValue(SlotSection(pos), "Id"), "").Trim(), wanted, StringComparison.Ordinal) Then Return pos
+        Next
+        Return 0
     End Function
 
     ' A slot's stored encrypted datetime as a DateTime, or MinValue when absent/
@@ -1746,6 +1768,13 @@ Module Blocker
             Return result
         End Try
 
+        ' FX6 (F10) TEST SEAM - the Service1.RetireSaveHookForTests pattern. Fired at the ONE
+        ' instant that matters: after our Save, immediately before the confirm re-read. That is
+        ' the window a service-side retire has to compact a slot out from under us, and it
+        ' cannot be staged from a single-threaded test any other way. <ThreadStatic>; PRODUCTION
+        ' never assigns it, so the field stays Nothing and the arm is behaviourally unchanged.
+        If ArmConfirmHookForTests IsNot Nothing Then ArmConfirmHookForTests(IniPath())
+
         ' 5. CONFIRM: re-read from disk. Our slot must be there AND the MAC must validate,
         '    or the write was lost (or overwritten) and this attempt did not happen.
         Dim check As New IniFile
@@ -1755,11 +1784,17 @@ Module Blocker
             result.Outcome = ArmOutcome.WriteRace
             Return result
         End Try
-        Dim confirmedId As Integer
-        If Not Integer.TryParse(If(check.GetKeyValue(SlotSection(position), "Id"), ""),
-                                NumberStyles.Integer, CultureInfo.InvariantCulture, confirmedId) _
-           OrElse confirmedId <> id _
-           OrElse Not ConfigMacIsValidForIni(check) Then
+        ' FX6 (F10): confirm the id at ANY position, never at the position we wrote it to. A
+        ' service-side retire landing between the Save above and this re-read COMPACTS every
+        ' later slot down one, so a position-keyed confirm reads the next slot's id (or "" at
+        ' the freed trailing section), calls its own landed write a lost race and retries -
+        ' appending a SECOND identical slot with a fresh id and a fresh partner code, while the
+        ' first (armed, MAC-stamped) duplicate's code was a local that has just been
+        ' overwritten and is unrecoverable. Our id is unique and monotone (P17: NextSlotId
+        ' never goes backwards, and a retire never lowers it), so finding it ANYWHERE is proof
+        ' our write landed - and the position it sits at NOW is the truth to report back.
+        Dim confirmedPosition As Integer = FindSlotPositionById(check, id)
+        If confirmedPosition = 0 OrElse Not ConfigMacIsValidForIni(check) Then
             result.Outcome = ArmOutcome.WriteRace
             Return result
         End If
@@ -1771,7 +1806,9 @@ Module Blocker
 
         result.Outcome = ArmOutcome.Armed
         result.Id = id
-        result.Position = position
+        ' FX6 (F10): the CONFIRMED position (where the slot is now), not the one we wrote to -
+        ' they differ by exactly the compaction a racing retire performed.
+        result.Position = confirmedPosition
         result.PartnerCode = partnerCodePlain
         result.FreshRewrite = fresh
         Return result

@@ -115,20 +115,44 @@ Module Program
     ' ONLY crash residue is [Time] TimeChanging left "yes": SystemEvents_TimeChanged
     ' sets it "yes" for ~2s during a clock change, and if the process dies in that
     ' window the service pauses its expiry evaluation indefinitely - a stuck,
-    ' un-liftable block (fail-CLOSED, but a real usability wedge, since only the
-    ' notifier ever writes the flag back to "no"). Reset it so a crash can't wedge
-    ' the block on. This does NOT weaken enforcement: B4's monotonic HighWater and
+    ' un-liftable block (fail-CLOSED, but a real usability wedge). Reset it so a
+    ' crash can't wedge the block on. Since FX6 this is no longer the ONLY way the
+    ' flag comes down - the service stops obeying a raise that outlives its bound and
+    ' the heartbeat lowers the orphan (Service1.TimeChangeHoldActive) - so this
+    ' handler is now the fast path, not the last line of defence.
+    ' This does NOT weaken enforcement: B4's monotonic HighWater and
     ' the B7 MAC still govern expiry, and TimeChanging is NOT a MAC-covered field
     ' (so this write can neither cause an early lift nor invalidate the MAC). Never
     ' throws (a throw from an UnhandledException handler is undefined behaviour).
     Private Sub OnUnhandledException(ByVal sender As Object, ByVal e As UnhandledExceptionEventArgs)
         Try
-            Dim iniPath As String = Application.StartupPath & "\monkmode_settings.ini"
-            If Not System.IO.File.Exists(iniPath) Then Return
-            Dim ini As New IniFile
-            ini.Load(iniPath)
-            ini.SetKeyValue("Time", "TimeChanging", "no")
-            ini.Save(iniPath)
+            ReassertTimeChangingFailSoft(Application.StartupPath & "\monkmode_settings.ini")
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    ' The testable core, with the config path made explicit - the
+    ' Service1.ReassertHostsFailClosed pattern (the live wrapper above just feeds it the real
+    ' path), so the suite drives the REAL backstop write against a test-owned file.
+    '
+    ' FX6 (F8) FOLD-IN: this goes through Form1.SaveSharedConfigKey, the ONE notifier writer,
+    ' instead of the raw Load -> SetKeyValue -> Save it used to be. That old shape was the
+    ' F8 class verbatim - a whole-file rewrite from this handler's own model, which would
+    ' silently roll back whatever the service or the CLI had written in the window (an applied
+    ' `add`, a just-verified [Partner] UnlockedAt) and leave the result still MAC-VALID,
+    ' because the stale MAC travelled with the stale canonical. A crash is exactly when the
+    ' rest of the machine is least likely to be idle, so it was not the safest place to keep
+    ' the unguarded copy.
+    '
+    ' Fail-SOFT is right here and is now cheap: an abandoned lower leaves the flag raised, and
+    ' since FX6 (F7) the service stops obeying a raise that outlives TimeChangeHoldMaxSeconds,
+    ' so the worst case is a bounded hold rather than the permanent wedge this handler existed
+    ' to prevent. SaveSharedConfigKey is itself total (it swallows and returns False), and the
+    ' caller keeps its own Try anyway - a throw out of an UnhandledException handler is
+    ' undefined behaviour.
+    Friend Sub ReassertTimeChangingFailSoft(ByVal iniPath As String)
+        Try
+            Form1.SaveSharedConfigKey(iniPath, "Time", "TimeChanging", "no")
         Catch ex As Exception
         End Try
     End Sub

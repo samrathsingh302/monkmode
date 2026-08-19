@@ -47,6 +47,13 @@ Public Class Service1
     Public hostDirS As String = sWinDir + "\system32\drivers\etc\hosts"
     Dim iniDateUntil As DateTime
     Dim iniTimeChanging As String
+    ' FX6 (F7): the MONOTONIC moment (Environment.TickCount64) this service instance first
+    ' observed the CURRENT unbroken run of a raised [Time] TimeChanging flag; 0 = the flag
+    ' reads "no". In-memory on purpose - the flag itself sits OUTSIDE the MAC-covered
+    ' canonical and survives a reboot, so it cannot carry its own age, and a persisted age
+    ' would be raw-editable anyway. TickCount64 (not the wall clock) because the whole
+    ' episode this measures IS a clock change. See TimeChangeHoldActive.
+    Private timeChangeRaisedAtMono As Long = 0
     Dim encryptionW As New Simple3Des("mm_textbox")
     Dim culture As CultureInfo = New CultureInfo("en-CA")
 
@@ -1012,6 +1019,127 @@ Public Class Service1
         End Try
     End Function
 
+    ' ============ FX6 (F9): THE LOST-UPDATE GUARD FOR THE WHOLE-FILE SERVICE WRITERS ============
+    '
+    ' THE HOLE. RetireSlotAt and the heartbeat's Restamp are load -> verify -> modify -> Save,
+    ' and IniFile.Save rewrites the WHOLE file from the in-memory model. A CLI arm that lands
+    ' between the load and the Save is therefore silently rolled back - and ArmSlot's confirm
+    ' loop protects the arm from LOSING the race, not from winning it and being overwritten
+    ' afterwards. The user is then told a block is armed and is shown its ONE-TIME partner code
+    ' (the plaintext exists only in that console line) for a slot the service has just deleted:
+    ' an UNDER-block whose exit code is gone with it. The re-read at retire step (2) does not
+    ' cover this - it makes the SNAPSHOT safe against a racing arm, not the config write.
+    '
+    ' THE TOKEN IS THE MAC WE ALREADY HAVE. Every legitimate writer re-stamps [Integrity] Mac
+    ' over the changed canonical, and an arm always moves MAC-covered fields ([Slots] SlotCount
+    ' plus the new slot's own canonical block), so a Mac byte-identical to the one we loaded is
+    ' proof that no MAC-covered write landed in between. No new field, no canonical bump, and
+    ' nothing to keep in four-copy parity.
+    '
+    ' NOT A LOCK, deliberately: the house rule (Blocker.ArmAttempts) is that a wedged CLI must
+    ' never be able to stall the enforcement tick, so the loser here is always the SERVICE
+    ' write, which is idempotent and simply happens on the next 10s tick.
+    '
+    ' FAIL-CLOSED. Refusing to write leaves a slot armed one tick longer or HighWater one tick
+    ' behind - both over-block. It can never lift, shorten or narrow anything, and it never
+    ' re-stamps (a refusal writes nothing at all).
+    '
+    ' HONEST RESIDUAL: this shrinks the exposure from the whole load-modify-Save span to the
+    ' Save itself; it does not eliminate it. A write landing between the probe below and
+    ' IniFile.Save's rename still wins, and a racing write that touches ONLY non-MAC-covered
+    ' keys (the notifier's housekeeping flags) is invisible to this token by construction.
+    Friend Shared Function ConfigGenerationToken(ByVal iniPath As String) As String
+        Try
+            ' An ABSENT file is "changed", not "no MAC": IniFile.Load answers an EMPTY model for
+            ' a missing path rather than throwing, and an empty model's Mac ("") would otherwise
+            ' compare equal to another "" and wave a write through. Both callers already require
+            ' macValid (impossible on an empty ini) before they reach the guard, so this is
+            ' belt-and-braces - but the token must not lie about what it can see.
+            If Not System.IO.File.Exists(iniPath) Then Return Nothing
+            Dim probe As New IniFile
+            probe.Load(iniPath)
+            Return If(probe.GetKeyValue(IntegritySection, IntegrityMacName), "")
+        Catch ex As Exception
+            Return Nothing      ' unreadable right now: the caller must treat that as "changed"
+        End Try
+    End Function
+
+    ' PURE (unit-pinned): is the config still the generation the caller loaded? Nothing on
+    ' either side (an unreadable probe) answers False - we never overwrite a file we could not
+    ' just read. Ordinal, because this is a Base64 MAC and not text.
+    Friend Shared Function ConfigGenerationUnchanged(ByVal loadedToken As String, ByVal currentToken As String) As Boolean
+        If loadedToken Is Nothing OrElse currentToken Is Nothing Then Return False
+        Return String.Equals(loadedToken, currentToken, StringComparison.Ordinal)
+    End Function
+
+    ' TEST SEAM (FX6/F9) - the RetireSaveHookForTests twin, fired inside RestampHeartbeatAt
+    ' after its model is built and immediately before the generation probe + Save.
+    ' <ThreadStatic>, never assigned in production.
+    <ThreadStatic>
+    Friend Shared RestampSaveHookForTests As Action(Of String)
+
+    ' The heartbeat's Restamp WRITE, lifted out of timer_Elapsed unchanged except for the two
+    ' FX6 additions below, and with the config path made explicit so unit tests drive the REAL
+    ' write path against a test-owned file and never the deployed config.
+    '
+    ' #4 (audit P2->P3) TOCTOU FIX (unchanged): macValid was computed on the tick's EARLIER
+    ' read; this RELOADS. A script that swaps a past [Time] Until + stale MAC into the
+    ' read->reload window must not get blessed by the re-stamp. Re-validate on the RELOADED
+    ' object and only re-stamp if it STILL verifies; otherwise behave as Hold - no re-stamp,
+    ' no lift (fail-closed), next tick re-evaluates fresh.
+    '
+    ' FX6 (F7): `clearOrphanedTimeChanging` lowers an ORPHANED [Time] TimeChanging here, in a
+    ' write whose bytes were just re-verified. That restores the cooperation protocol after a
+    ' notifier was killed inside its own window - without it the flag stays raised for ever,
+    ' is ignored for ever (TimeChangeHoldActive), and the next GENUINE clock change would go
+    ' unhonoured. The caller passes True only for a raise that outlived its bound, so this can
+    ' never stamp "no" over an episode that is actually in progress. The key is outside the
+    ' canonical, so writing it changes no MAC-covered byte.
+    '
+    ' FX6 (F9): the lost-update guard, exactly as in RetireSlotAt - a MAC-covered write that
+    ' landed since our reload (a CLI arm) abandons this save. Skipping a heartbeat costs one
+    ' tick of HighWater advance, which OVER-blocks by 10s and converges on the next tick.
+    ' Returns True iff the config was rewritten. NEVER throws (it runs inside the tick).
+    Friend Function RestampHeartbeatAt(ByVal iniPath As String, ByVal newHw As String, ByVal clearOrphanedTimeChanging As Boolean) As Boolean
+        Try
+            Dim iniFile = New IniFile
+            iniFile.Load(iniPath)
+            If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            Dim genAtLoad As String = iniFile.GetKeyValue(IntegritySection, IntegrityMacName)
+            If clearOrphanedTimeChanging Then iniFile.SetKeyValue("Time", "TimeChanging", "no")
+            iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
+            ' B4: persist the advanced high-water mark in the SAME save as the heartbeat (one
+            ' write). newHw is "now" on a Trusted tick and the unchanged stored value on a
+            ' jump/rollback (monotonic), so this only ever moves HighWater forward at the real
+            ' tick rate. Skip when newHw is "" (a tick that couldn't read it - never blank a
+            ' good value).
+            If newHw <> "" Then
+                iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+            End If
+            ' The heartbeat just rewrote [CurrentTime] Now AND [Time] HighWater, both
+            ' MAC-covered fields, so re-stamp [Integrity] Mac over the new canonical with the
+            ' existing key - safe here because the MAC was re-verified just above (the only
+            ' changes are ours). Reuses the stored key; never re-arms.
+            RestampMacWithExistingKey(iniFile)
+            If RestampSaveHookForTests IsNot Nothing Then RestampSaveHookForTests(iniPath)
+            If Not ConfigGenerationUnchanged(genAtLoad, ConfigGenerationToken(iniPath)) Then Return False
+            iniFile.Save(iniPath)
+            ' C1b: the primary is MAC-valid (re-validated above) and freshly saved - refresh the
+            ' shadow backup so a later corrupt primary restores to THIS state (current
+            ' HighWater/Now), not a stale one. Guarded on the in-memory MAC, so this can never
+            ' overwrite the good backup with a bad primary.
+            Try
+                ConfigBackup.CopyIfSourceValid(iniPath,
+                                               System.IO.Path.Combine(System.IO.Path.GetDirectoryName(iniPath), ConfigBackup.BackupFileName),
+                                               ConfigMacIsValidForIni(iniFile))
+            Catch ex As Exception
+            End Try
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' v1.1 S3a: the PER-SLOT window poll - the slot twin of ProcessScheduleWindows, running
     ' the same pure decision (EvaluateWindows -> NextScheduleActiveUntil) once per slot that
     ' carries a rule, and persisting each result through PersistSlotField. Updates the
@@ -1167,6 +1295,15 @@ Public Class Service1
     <ThreadStatic>
     Friend Shared RetireReloadHookForTests As Action(Of String)
 
+    ' TEST SEAM (FX6/F9) - the sibling of the hook above, at the OTHER instant that matters:
+    ' after the retire has built its whole-file model, immediately before the generation probe
+    ' and the Save. That is the window a racing CLI arm has, and staging it from outside a
+    ' single-threaded test is not otherwise possible. <ThreadStatic>, never assigned in
+    ' PRODUCTION (the field stays Nothing and the retire is behaviourally unchanged), Friend so
+    ' only the in-repo test assembly can see it.
+    <ThreadStatic>
+    Friend Shared RetireSaveHookForTests As Action(Of String)
+
     ' The testable core with every path made explicit (the PersistSlotFieldAt pattern), so the
     ' retire matrix and the crash-point ordering tests drive the REAL code against test-owned
     ' files and never the deployed config or the live hosts file. Returns True iff the config
@@ -1179,6 +1316,10 @@ Public Class Service1
             ' A frozen config is never retired FROM: re-stamping over unverified bytes is the
             ' B7 fail-open bug, and a tampered config is already enforcing (Hold).
             If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            ' FX6 (F9): the generation this whole-file rewrite is derived from, captured BEFORE
+            ' RestampMacWithExistingKey changes the in-memory Mac. Re-checked against the file
+            ' immediately before the Save below.
+            Dim genAtLoad As String = iniFile.GetKeyValue(IntegritySection, IntegrityMacName)
             Dim count As Integer = ConfigIntegrity.ParseSlotCount(iniFile.GetKeyValue("Slots", "SlotCount"))
             If count <= 0 Then Return False
             Dim pos As Integer = FindSlotPositionById(iniFile, slotId)
@@ -1221,6 +1362,15 @@ Public Class Service1
             ' every remaining slot's apps independently, so no remaining block loses a kill.
             RefreshV9ListMirror(iniFile, remaining)
             RestampMacWithExistingKey(iniFile)
+            ' RetireSaveHookForTests is Nothing in production - this is a plain fall-through;
+            ' the hook only lets a test stage a racing arm into this exact window.
+            If RetireSaveHookForTests IsNot Nothing Then RetireSaveHookForTests(iniPath)
+            ' FX6 (F9): LOST-UPDATE GUARD. Abandon the whole-file rewrite if another writer's
+            ' MAC-covered write (a CLI arm appending a slot) landed since our load - saving here
+            ' would delete a slot the user has already been told is armed, and burn its one-time
+            ' partner code with it. Returning False is the documented "the config was not
+            ' rewritten": nothing is stamped, the slot stays armed and the next tick retires it.
+            If Not ConfigGenerationUnchanged(genAtLoad, ConfigGenerationToken(iniPath)) Then Return False
             iniFile.Save(iniPath)
             Try
                 ConfigBackup.CopyIfSourceValid(iniPath,
@@ -1725,7 +1875,9 @@ Public Class Service1
             ' diverge by that episode, which only ever OVER-blocks (never lifts).
             prevTickWallNow = lastTickWallNow
             tickWallNow = DateTime.Now.ToString(culture)
-            If StrComp("no", iniTimeChanging) = 0 Then lastTickWallNow = tickWallNow
+            ' FX6 (F7): the gate is now TimeChangeHoldsNow (a raise that outlives its bound is
+            ' an orphan and stops gating), not the raw StrComp - see TimeChangeHoldActive.
+            If Not TimeChangeHoldsNow() Then lastTickWallNow = tickWallNow
             ' B1: advance on the REAL monotonic elapsed regardless of wall DIRECTION
             ' (a backward roll or forward jump credits mono instead of freezing, so
             ' the block ends at its real duration - the P2 fix). A Trusted tick is
@@ -1754,7 +1906,9 @@ Public Class Service1
         ' clock-change state transition). Returns the POST-signal deadline so
         ' this tick's heartbeat below decides off it - a cancel processed here
         ' wins over an elapse the same tick (fail-closed: stay blocked).
-        If StrComp("no", iniTimeChanging) = 0 Then
+        ' FX6 (F7): TimeChangeHoldsNow, not the raw StrComp - an orphaned raise (the notifier
+        ' killed inside its own ~2s window) must not gate the exit machinery for ever.
+        If Not TimeChangeHoldsNow() Then
             ' P41: one capped, ordinal-sorted enumeration of the trigger zone per tick, shared
             ' by both pollers - so a directory stuffed with trigger files cannot stall the tick,
             ' and the surplus is simply deferred (fail-closed: a deferred exit trigger holds).
@@ -2114,7 +2268,10 @@ Public Class Service1
         Catch ex As Exception
         End Try
 
-        If StrComp("no", iniTimeChanging) = 0 Then
+        ' FX6 (F7): TimeChangeHoldsNow, not the raw StrComp. This gate is the one that also
+        ' fences [Time] HighWater's only persistence, which is exactly why an orphaned raise
+        ' froze the block for ever - and why releasing it can only ever end a block LATE.
+        If Not TimeChangeHoldsNow() Then
             ' Fail CLOSED: only a parsed, genuinely past end time AND a valid B7
             ' MAC lifts the block; an unparseable Until or a tampered/invalid MAC
             ' skips the expiry action this tick (block stays standing).
@@ -2175,42 +2332,12 @@ Public Class Service1
                     ' the existing stopMe() teardown from the hosts strip onward.
                     TeardownAll()
                 Case TickAction.Restamp
-                    Dim iniFile = New IniFile
-                    iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-                    ' #4 (audit P2->P3) TOCTOU FIX: macValid (above) was computed on
-                    ' the EARLIER read; this branch RELOADS the ini. A script that
-                    ' swaps a past [Time] Until + stale MAC into the read->reload
-                    ' window must not get blessed by the re-stamp below. Re-validate
-                    ' the MAC on the RELOADED object and only re-stamp if it STILL
-                    ' verifies; otherwise treat the tick as Hold - no re-stamp, no lift
-                    ' (fail-closed), next tick re-evaluates fresh. The sibling sites
-                    ' (OnStart, AppendAddToHosts, notifier) already validate the same
-                    ' object they mutate; the heartbeat was the one site that reloaded.
-                    If ConfigMacIsValidForIni(iniFile) Then
-                        iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
-                        ' B4: persist the advanced high-water mark in the SAME save as the
-                        ' heartbeat (one write). newHw is "now" on a Trusted tick and the
-                        ' unchanged stored value on a jump/rollback (monotonic), so this
-                        ' only ever moves HighWater forward at the real tick rate. Skip
-                        ' when newHw is "" (a tick that couldn't read it - never blank a
-                        ' good value).
-                        If newHw <> "" Then
-                            iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
-                        End If
-                        ' The heartbeat just rewrote [CurrentTime] Now AND [Time] HighWater,
-                        ' both MAC-covered fields, so re-stamp [Integrity] Mac over the new
-                        ' canonical with the existing key - safe here because the MAC was
-                        ' re-verified just above (the only changes are ours). Reuses the
-                        ' stored key; never re-arms.
-                        RestampMacWithExistingKey(iniFile)
-                        iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-                        ' C1b: the primary is MAC-valid (re-validated just above) and
-                        ' freshly saved - refresh the shadow backup so a later corrupt
-                        ' primary restores to THIS state (current HighWater/Now), not a
-                        ' stale one. Guarded on the in-memory MAC, so this can never
-                        ' overwrite the good backup with a bad primary.
-                        RefreshBackupFromValid(iniFile)
-                    End If
+                    ' FX6: the write itself lives in RestampHeartbeatAt (the PersistSlotFieldAt/
+                    ' RetireSlotAt "testable core with the path made explicit" pattern), so the
+                    ' unit suite can drive the REAL heartbeat write against a test-owned file.
+                    ' The orphaned-flag argument is the F7 half: the gate above is open, so a
+                    ' still-raised flag here is by definition one that outlived its bound.
+                    RestampHeartbeatAt(Application.StartupPath + "\monkmode_settings.ini", newHw, TimeChangeFlagIsOrphaned())
                 Case TickAction.Hold
                     ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
                     ' Fail CLOSED - do NOT re-stamp (that would re-bless the tamper and
@@ -2234,6 +2361,75 @@ Public Class Service1
     ' BlockHasExpired call (OnStart deliberately uses the stricter 0).
     Friend Const TimerIntervalMs As Integer = 10000
     Friend Const ExpiryGraceSeconds As Long = 5
+
+    ' ================= FX6 (F7): THE TimeChanging FLAG SELF-EXPIRES =================
+    '
+    ' THE WEDGE THIS CLOSES. The notifier raises [Time] TimeChanging = "yes", sleeps ~2s and
+    ' lowers it (MM_notify Form1.SystemEvents_TimeChanged), and this service pauses BOTH its
+    ' exit machinery and its HighWater persistence while it is raised - the trigger polls,
+    ' ProcessScheduleWindows, ActivateDueSlots, RetireDueSlots and the whole heartbeat/
+    ' ClassifyTick block all sit behind that one gate. Kill the notifier INSIDE those 2s
+    ' (`taskkill /f` is the documented B1 move, and it skips the AppDomain backstop that
+    ' would have lowered the flag) and the raise is ORPHANED: the flag is outside the
+    ' canonical so nothing detects it, it survives a reboot, and every intended exit -
+    ' natural expiry, cooling-off, partner code - is gated off FOR EVER. `unblock --force`
+    ' becomes the only way out of a block that has genuinely finished. Reachable
+    ' NON-elevated: changing the time zone is a default user right and broadcasts
+    ' WM_TIMECHANGE. The same wedge follows from a config that simply has no [Time]
+    ' TimeChanging key at all, since the gate tests for the literal "no".
+    '
+    ' THE FIX: the flag holds for a BOUNDED span of monotonic time and then stops being
+    ' obeyed. A genuine episode is ~2s, so 5 minutes is two orders of magnitude of headroom -
+    ' an in-progress clock change is still fully held, which is the property the flag exists
+    ' for.
+    '
+    ' WHY LETTING IT GO IS FAIL-CLOSED. While the flag holds, [Time] HighWater is never
+    ' persisted (its one write lives inside the gate), so the stored high-water mark FREEZES
+    ' at the moment of the wedge and every later tick re-advances from that frozen value at
+    ' the real monotonic rate. A block therefore OVER-runs by exactly the wedged span and
+    ' cannot be one second short when the gate re-opens: releasing the gate can never lift
+    ' early, it can only let a block that has already served its full time end. Nor does the
+    ' release touch a self-heal, a matcher or a MAC - hosts, the kill list and the freeze
+    ' semantics are untouched either way.
+    Friend Const TimeChangeHoldMaxSeconds As Long = 300
+
+    ' PURE (unit-pinned): does a TimeChanging flag still gate this tick? "no" never gates -
+    ' that is the byte-identical StrComp the tick has always used. Anything else (a raised
+    ' "yes", an absent key, garbage) gates until it has been continuously observed for MORE
+    ' than maxSeconds of monotonic time; past that it is treated as orphaned and ignored.
+    ' Note the fail-closed direction on each axis: a fresh raise gates (a real clock change
+    ' is honoured), an unreadable/garbled value gates (we do not know what is happening), and
+    ' only the passage of real time - which the wedge itself cannot fake, because
+    ' Environment.TickCount64 is immune to the clock - ever releases it.
+    Friend Shared Function TimeChangeHoldActive(ByVal flagText As String, ByVal raisedForSeconds As Long, ByVal maxSeconds As Long) As Boolean
+        If StrComp("no", flagText) = 0 Then Return False
+        Return raisedForSeconds <= maxSeconds
+    End Function
+
+    ' The live side of the gate: maintain the monotonic raise anchor and answer the pure
+    ' classifier above. Idempotent, so the tick may consult it at each of its gate sites
+    ' without the answer drifting (the bound is minutes; the sites are microseconds apart).
+    ' The anchor starts at FIRST OBSERVATION, so a flag left raised across a reboot buys
+    ' itself one more bounded hold on the next service start - bounded is the whole point.
+    Private Function TimeChangeHoldsNow() As Boolean
+        If StrComp("no", iniTimeChanging) = 0 Then
+            timeChangeRaisedAtMono = 0
+            Return False
+        End If
+        Dim nowMono As Long = Environment.TickCount64
+        If timeChangeRaisedAtMono = 0 Then timeChangeRaisedAtMono = nowMono
+        Return TimeChangeHoldActive(iniTimeChanging, (nowMono - timeChangeRaisedAtMono) \ 1000L, TimeChangeHoldMaxSeconds)
+    End Function
+
+    ' True when the flag is raised AND has outlived its bound - i.e. it is an orphan, not a
+    ' clock change in progress. The heartbeat's own (MAC-re-validated) write lowers it when
+    ' this is True, which restores the protocol: without that, a permanently raised flag
+    ' would be permanently ignored and the NEXT genuine clock change would go unhonoured.
+    ' Deliberately never True for a fresh raise, so the service can never stamp "no" over a
+    ' notifier episode that is actually running.
+    Private Function TimeChangeFlagIsOrphaned() As Boolean
+        Return StrComp("no", iniTimeChanging) <> 0 AndAlso Not TimeChangeHoldsNow()
+    End Function
 
     ' B3 SafeBoot: the registry subkeys that make the MONKMODE service start in
     ' Safe Mode (Minimal) and Safe Mode with Networking (Network). Without them
