@@ -1,6 +1,6 @@
 ---
 name: powershell-setcontent-corrupts-vb-sources
-description: Never splice monk-mode .vb/.cs files with PowerShell Get-Content/Set-Content — it adds a UTF-8 BOM and mangles non-ASCII (§ became Â§); use the Edit tool or Copy-Item instead
+description: Never script monk-mode .vb/.cs edits through PowerShell Get-Content/Set-Content (BOM + mangled non-ASCII) or a Python read/write (CRLF flattened to LF); use the Edit tool or Copy-Item
 metadata:
   type: feedback
 ---
@@ -15,6 +15,15 @@ added `efbbbf` to three files and turned `§4C` into `Â§4C` inside unrelated c
 invisible in the intended hunk, obvious only in `git diff --stat` (the line counts came out
 far larger than the replacement) and in a `head -c3 | xxd` BOM check. Recovered with
 `git checkout --` on the three files.
+
+The same trap has a **Python** shape: a `io.open(p).read()` / `write()` round-trip in text
+mode flattens the file's CRLF endings to LF (universal newlines on read, `newline=''` on
+write emits what it was given). On 19/08/2026 (FX7) a scripted 5-replacement pass over
+`AppDomainBackstopTests.cs` converted the whole file to LF while landing only 2 of the
+replacements; git hid it (`core.autocrlf=true` normalises the diff), so the tell was the
+"LF will be replaced by CRLF" warning plus a suspiciously small `--stat`. Recovered with
+`git checkout --` and redone as 5 Edit calls. Verify endings with
+`grep -vc $'\r' <file>` — it must be 0 for every repo source file.
 
 **How to apply:** whenever tempted to script an identical edit across the four
 project copies. `Copy-Item` for whole-file duplication (ConfigIntegrity.vb / IniFile.vb
