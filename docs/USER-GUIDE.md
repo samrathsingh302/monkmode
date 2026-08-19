@@ -190,9 +190,9 @@ monkmode block [--sites a.com,b.com] [--preset social,video] \
 ```
 
 You must give at least one duration (`--for` or `--until`) and at least one
-thing to block (any of `--sites`/`--preset`/`--apps`/`--app-preset`/`--file`, or
-inherited account defaults). If you name nothing and have no defaults, it
-refuses ("Nothing to block.").
+thing to block (any of `--sites`/`--preset`/`--apps`/`--app-preset`/`--file`/
+`--urls`, or inherited account defaults). If you name nothing and have no
+defaults, it refuses ("Nothing to block.").
 
 ### Sources of what to block
 
@@ -206,8 +206,16 @@ refuses ("Nothing to block.").
 
 Explicit sources are merged; if you name **no** site source at all, the
 account-default blocklist fills in (and likewise for apps), independently per
-dimension. An unknown preset **aborts the block up front** with a friendly error
-(fail-closed — a typo never silently under-blocks).
+dimension. The one exception is a **URL-only** block (`--urls` and nothing else,
+which is what `mm-shorts` sends): it inherits neither default, so a "Shorts only"
+command blocks shorts only. An unknown preset **aborts the block up front** with
+a friendly error (fail-closed — a typo never silently under-blocks).
+
+Any site, app or URL-pattern value carrying a **control character** (anything
+below `0x20`, including tab, plus `0x7F`) is refused up front — the whole command,
+with the offending value named, and nothing armed. Such a character would be
+written verbatim into the config and split the stored line when it was read back,
+freezing this and every other running block permanently.
 
 ### Duration
 

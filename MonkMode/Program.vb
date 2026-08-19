@@ -207,19 +207,6 @@ Module Program
             Next
         End If
 
-        ' D1b: inherit the account-default blocklist when this block names NO explicit site source
-        ' (--sites/--preset/--file all produced nothing). An explicit source OVERRIDES the default
-        ' (you get exactly the sites you asked for); the default only fills in when you named none -
-        ' the direct analogue of the C6c cooling-off inheritance below. SetupIsComplete was already
-        ' required above, and SetupDefaultSites fail-closes to empty on any tamper, so this can only
-        ' ADD sites to THIS new arm (never lift/shorten a live block). A block naming only --apps (no
-        ' site source) likewise picks up the standing default sites - that is the point of a default
-        ' blocklist. The expanded defaults then ride WriteHostsBlock + [User] CustomSites, MAC-covered
-        ' exactly like a hand-typed --sites domain.
-        If domains.Count = 0 Then
-            domains.AddRange(Blocker.SetupDefaultSites())
-        End If
-
         Dim apps As New List(Of String)
         apps.AddRange(SplitList(GetOption(args, "--apps")))
 
@@ -237,30 +224,66 @@ Module Program
             apps.AddRange(presetApps)
         End If
 
-        ' D2b: inherit the account-default app list when this block names NO explicit app source
-        ' (--apps/--app-preset both produced nothing). Symmetric with the D1b default-sites inherit
-        ' above: an explicit --apps/--app-preset OVERRIDES the default; the default only fills in when
-        ' you named none. SetupIsComplete was required above and SetupDefaultApps fail-closes to empty
-        ' on any tamper, so this can only ADD apps to THIS new arm (never lift/shorten a live block).
-        ' The inherited names ride PackApps -> [Process] List, MAC-covered exactly like a hand-typed
-        ' --apps name. Site and app defaults inherit INDEPENDENTLY per dimension: `block --sites x.com`
-        ' with a default app list still picks up the default apps, mirroring how the D1b default sites
-        ' fill in for an --apps-only block. Over-block-safe; the armed apps are printed at Sites/Apps.
-        If apps.Count = 0 Then
-            apps.AddRange(Blocker.SetupDefaultApps())
-        End If
-
-        If domains.Count = 0 AndAlso apps.Count = 0 Then
-            Console.Error.WriteLine("Nothing to block. Provide --sites, --preset, --apps, and/or --app-preset.")
-            Return 1
-        End If
-
         ' P55 (v1.1): optional --urls attaches per-slot URL patterns to THIS block. Parsed
-        ' up front so a bad list fails before any side effect. Inert this slice - the
-        ' patterns are stored MAC-covered and the browser watcher consumes them later.
+        ' up front so a bad list fails before any side effect. The patterns are stored
+        ' MAC-covered and the F2b browser watcher consumes them.
+        '
+        ' FX4 (F4): this parse MOVED UP, above the default inheritance and the emptiness gate.
+        ' Both of those predate --urls and read only domains/apps, which broke the shipped
+        ' URL-only wrappers (mm-shorts / `mm-lock shorts` compose `block --urls ... --for X`
+        ' with no --sites at all): with no account defaults the gate below refused the command
+        ' outright, and WITH defaults the two inherits below silently turned a "Shorts/Reels
+        ' only" command into a full hosts block of the default site list plus every default app,
+        ' for the whole duration, uncancellable. --urls has to be known before either decision.
         Dim urlPatterns As String = "", urlErr As String = ""
         If Not Blocker.TryBuildUrlPatterns(GetOption(args, "--urls"), urlPatterns, urlErr) Then
             Console.Error.WriteLine(urlErr)
+            Return 1
+        End If
+
+        ' D1b/D2b: inherit the account-default blocklist / app list when this block names NO explicit
+        ' source of its own (--sites/--preset/--file produced nothing; --apps/--app-preset produced
+        ' nothing). An explicit source OVERRIDES the default (you get exactly what you asked for); the
+        ' default only fills in when you named none - the direct analogue of the C6c cooling-off
+        ' inheritance below. The two dimensions still inherit INDEPENDENTLY, so `block --sites x.com`
+        ' with a default app list still picks up the default apps, and an --apps-only block still picks
+        ' up the default sites. SetupIsComplete was required above and both readers fail-close to empty
+        ' on any tamper, so this can only ADD to THIS new arm (never lift/shorten a live block). The
+        ' inherited values ride WriteHostsBlock + [User] CustomSites / PackApps -> [Process] List,
+        ' MAC-covered exactly like hand-typed ones.
+        '
+        ' FX4 (F4) - THE ONE EXCEPTION, ShouldInheritDefaults: a URL-ONLY invocation inherits NOTHING.
+        ' "URL-only" is exact and narrow - --urls produced patterns AND no site source AND no app
+        ' source produced anything - and in that one case both inherits are skipped. Anywhere else
+        ' (including --sites x.com --urls ..., which is not URL-only) the pre-FX4 semantics stand
+        ' untouched, and a bare `block --for 2h` with defaults configured behaves exactly as before.
+        ' Rationale: with --urls the user HAS named what to block, so the "you named nothing, here are
+        ' your defaults" premise is simply false; honouring it turns a page-level block into a
+        ' machine-wide one the user never asked for and cannot cut short. This narrows only what a NEW
+        ' arm inherits - it can never lift, shorten or unblock anything already running.
+        If Blocker.ShouldInheritDefaults(domains.Count, apps.Count, urlPatterns <> "") Then
+            If domains.Count = 0 Then domains.AddRange(Blocker.SetupDefaultSites())
+            If apps.Count = 0 Then apps.AddRange(Blocker.SetupDefaultApps())
+        End If
+
+        ' FX4 (F4): --urls now counts as something to block, so a URL-only arm passes this gate.
+        If Blocker.HasNothingToBlock(domains.Count, apps.Count, urlPatterns <> "") Then
+            Console.Error.WriteLine(Blocker.NothingToBlockMessage)
+            Return 1
+        End If
+
+        ' FX4 (F30): refuse control characters in ANY site/app value BEFORE the first side effect.
+        ' Every site/app source has converged on these two lists by now - --sites, --preset, --file
+        ' lines, --apps, --app-preset and the inherited setup defaults - so this is the CLI's single
+        ' chokepoint for them (--urls was checked inside TryBuildUrlPatterns above, and ArmSlot
+        ' re-checks all three as the writer backstop). One such character would be written verbatim
+        ' into the ini, split the line on reload, and freeze this AND every other armed block
+        ' permanently with no cooling-off and no partner-code exit. Refuse the whole arm, name the
+        ' value, write nothing - never strip or truncate.
+        Dim ctrlErr As String = ""
+        If Not Blocker.TryRejectControlChars("site", domains, ctrlErr) OrElse
+           Not Blocker.TryRejectControlChars("app", apps, ctrlErr) Then
+            Console.Error.WriteLine(ctrlErr)
             Return 1
         End If
 
@@ -416,6 +439,12 @@ Module Program
             Console.Error.WriteLine("A schedule is armed, and a schedule and a manual block can't run together.")
             Console.Error.WriteLine("Clear it first with 'monkmode schedule --clear' (any open window still runs to its end), then start the block.")
             Return 3
+        ElseIf arm.Outcome = Blocker.ArmOutcome.BadInput Then
+            ' FX4 (F30): the writer's own control-character refusal. Normally unreachable (the
+            ' check above already refused), so reaching it means a value slipped past the CLI
+            ' chokepoint - same refusal, nothing written.
+            Console.Error.WriteLine(arm.Message)
+            Return 1
         ElseIf arm.Outcome = Blocker.ArmOutcome.Frozen Then
             ' B7: the stored config failed its integrity check. Re-stamping it would
             ' re-bless a tamper, so MonkMode refuses to change anything at all.
@@ -664,6 +693,15 @@ Module Program
         domains.AddRange(SplitList(GetOption(args, "--sites")))
         If domains.Count = 0 Then
             Console.Error.WriteLine("Provide sites to add with --sites a.com,b.com")
+            Return 1
+        End If
+        ' FX4 (F30): `add` grows a LIVE slot's MAC-covered Sites, so a control character here would
+        ' brick the config on the service's next tick instead of at arm time - refused up front,
+        ' before the request trigger is written. (The service's own MergeSiteList drops whitespace-
+        ' bearing tokens, but that is a silent SUBSET, exactly the under-block this repo refuses.)
+        Dim addCtrlErr As String = ""
+        If Not Blocker.TryRejectControlChars("site", domains, addCtrlErr) Then
+            Console.Error.WriteLine(addCtrlErr)
             Return 1
         End If
         ' P42 (v1.1 S5): `add` is SLOT-ADDRESSED and SERVICE-ADJUDICATED. The CLI validates the

@@ -937,6 +937,12 @@ Module Blocker
         For Each d As String In presetDomains
             If seen.Add(d) Then domains.Add(d)
         Next
+        ' FX4 (F30): a control character in a stored DEFAULT would ride into every later arm (and
+        ' bricks the SETUP ini itself the same way). Refuse before the setup write, no partial state.
+        If Not TryRejectControlChars("default site", domains, errorMsg) Then
+            packed = ""
+            Return False
+        End If
         packed = String.Join(",", domains)
         Return True
     End Function
@@ -969,7 +975,121 @@ Module Blocker
         For Each a As String In presetApps
             If seen.Add(a) Then apps.Add(a)
         Next
+        If Not TryRejectControlChars("default app", apps, errorMsg) Then
+            packed = ""
+            Return False
+        End If
         packed = String.Join(",", apps)
+        Return True
+    End Function
+
+    ' ---- FX4 (F4): what a NEW arm inherits, and when it has nothing to block ----
+    '
+    ' Both decisions predate `--urls` and read only the site/app counts, which broke the shipped
+    ' URL-only wrappers two ways at once (mm-shorts composes `block --urls <patterns> --for X` with
+    ' no --sites and no --apps): with no account defaults set the emptiness gate refused it outright,
+    ' and WITH defaults set the inherits below quietly widened a "Shorts/Reels only" command into a
+    ' hosts block of the whole default site list plus every default app, for the full duration.
+    '
+    ' PURE + count-driven so the rule is pinned by unit tests rather than by reading DoBlock.
+    '
+    ' ShouldInheritDefaults: may the account defaults fill in AT ALL for this invocation? Only a
+    ' URL-ONLY arm (patterns given, and NEITHER a site source NOR an app source produced anything)
+    ' says no; every other shape keeps the pre-FX4 per-dimension inheritance exactly as it was, so a
+    ' bare `block --for 2h` still inherits both lists. Narrowing what a NEW arm inherits can never
+    ' lift, shorten or unblock anything already running - the defaults only ever fed new arms.
+    Friend Function ShouldInheritDefaults(ByVal explicitDomainCount As Integer,
+                                         ByVal explicitAppCount As Integer,
+                                         ByVal hasUrlPatterns As Boolean) As Boolean
+        If explicitDomainCount > 0 OrElse explicitAppCount > 0 Then Return True
+        Return Not hasUrlPatterns
+    End Function
+
+    ' HasNothingToBlock: the emptiness refusal, now counting --urls as a thing to block. Evaluated
+    ' AFTER any inheritance, so it still answers "is this arm empty" and not "did you type a flag".
+    Friend Function HasNothingToBlock(ByVal domainCount As Integer,
+                                      ByVal appCount As Integer,
+                                      ByVal hasUrlPatterns As Boolean) As Boolean
+        Return domainCount = 0 AndAlso appCount = 0 AndAlso Not hasUrlPatterns
+    End Function
+
+    ' The refusal sentence, here rather than inline so a test can pin that it names --urls (a user
+    ' told to "provide --sites, --preset, --apps and/or --app-preset" would never learn that a
+    ' URL-only block is legal).
+    Friend ReadOnly Property NothingToBlockMessage As String
+        Get
+            Return "Nothing to block. Provide --sites, --preset, --apps, --app-preset and/or --urls."
+        End Get
+    End Property
+
+    ' ---- FX4 (F30): CONTROL CHARACTERS ARE REFUSED AT ARM TIME, never stripped ----
+    '
+    ' A control character inside ANY stored list value bricks the config permanently. IniFile.Save
+    ' writes `key & "=" & value` verbatim (IniFile.vb:216) and IniFile.Load splits on \r\n / \n / \r
+    ' (:177-200), so a value carrying LF or CR is written as ONE line and read back as TWO: the key
+    ' keeps only the head, the tail is swallowed as a malformed line, and the RELOADED canonical no
+    ' longer equals the canonical that was MAC-stamped. macValid goes False and STAYS False - which
+    ' is fail-CLOSED (nothing lifts) but also unrecoverable: every OTHER armed block freezes with it,
+    ' cooling-off and the partner code stop working, and only `unblock --force` gets out.
+    '
+    ' So the input side refuses instead. Refusing an arm can never lift anything (nothing is written,
+    ' nothing torn down), which is why the check sits BEFORE every side effect on each route.
+    '
+    ' Scope: everything below 0x20 PLUS 0x7F (DEL). TAB (0x09) is included deliberately - a tab in a
+    ' hostname or an executable name is never legitimate, and PackList/PackApps only Trim() the ends,
+    ' so an interior tab would ride straight into the ini. Nothing is stripped or truncated: the WHOLE
+    ' arm is refused with the offending value named, the same refuse-not-subset stance TryExpandPresets
+    ' takes on an unknown preset - a silently-repaired value is a block the user never asked for.
+    Friend Function IsControlChar(ByVal c As Char) As Boolean
+        Dim code As Integer = AscW(c)
+        Return code < &H20 OrElse code = &H7F
+    End Function
+
+    ' One control character rendered for a console message (\n rather than an actual newline, which
+    ' would smear the error across two lines and hide what was wrong).
+    Friend Function RenderControlChar(ByVal c As Char) As String
+        Select Case AscW(c)
+            Case 9 : Return "\t"
+            Case 10 : Return "\n"
+            Case 13 : Return "\r"
+            Case Else : Return "\x" & AscW(c).ToString("X2", CultureInfo.InvariantCulture)
+        End Select
+    End Function
+
+    ' The offending value made printable: control chars escaped, everything else verbatim, so the
+    ' user can see WHICH of their sites carried the character and where.
+    Friend Function RenderValueForMessage(ByVal s As String) As String
+        If s Is Nothing Then Return ""
+        Dim sb As New System.Text.StringBuilder()
+        For Each c As Char In s
+            If IsControlChar(c) Then sb.Append(RenderControlChar(c)) Else sb.Append(c)
+        Next
+        Return sb.ToString()
+    End Function
+
+    ' FAIL-CLOSED gate: True when every value is clean; False (with a message naming the first bad
+    ' value and the character it carries) the moment one carries a control character. `label` is the
+    ' singular noun for the route ("site", "app", "URL pattern", "default site", "default app") so
+    ' one message shape serves every funnel. Pure - unit-tested without arming anything.
+    '
+    ' Each value is judged as it would be STORED, i.e. Trim()ed, because Trim is exactly what
+    ' PackList/PackApps (and every Try* builder) apply before writing. A stray trailing newline off a
+    ' shell paste therefore still arms - it never reaches the file - while an INTERIOR control
+    ' character, the one that actually splits the stored line, is refused.
+    Friend Function TryRejectControlChars(ByVal label As String, ByVal values As IEnumerable(Of String), ByRef errorMsg As String) As Boolean
+        errorMsg = ""
+        If values Is Nothing Then Return True
+        For Each raw As String In values
+            If raw Is Nothing Then Continue For
+            Dim v As String = raw.Trim()
+            For Each c As Char In v
+                If IsControlChar(c) Then
+                    errorMsg = "The " & label & " '" & RenderValueForMessage(v) & "' contains a control character (" &
+                               RenderControlChar(c) & "), which MonkMode will not store. Remove it and run the command again."
+                    Return False
+                End If
+            Next
+        Next
         Return True
     End Function
 
@@ -1026,6 +1146,7 @@ Module Blocker
         WriteRace = 2           ' the confirm-loop never saw its own write land - exit 2
         Frozen = 3              ' MAC-invalid config we may not re-stamp (B7) - exit 2
         ScheduleArmed = 4       ' FX3 (F3): a schedule is armed - SD-c1 mutual exclusion, exit 3
+        BadInput = 5            ' FX4 (F30): a value carries a control character - refuse, exit 1
     End Enum
 
     Friend Class ArmResult
@@ -1036,6 +1157,8 @@ Module Blocker
         Public FreshRewrite As Boolean = False
         ' P34: one human line per slot in use, for the cap refusal message.
         Public SlotSummaries As New List(Of String)
+        ' FX4 (F30): the BadInput refusal's own sentence (which value, which character).
+        Public Message As String = ""
         Public ReadOnly Property Ok As Boolean
             Get
                 Return Outcome = ArmOutcome.Armed
@@ -1117,6 +1240,9 @@ Module Blocker
                 errorMsg = "--urls pattern '" & p.Substring(0, 40) & "...' is longer than " & MaxUrlPatternChars & " characters."
                 Return False
             End If
+            ' FX4 (F30): the same refusal the |/; check above gives, for the characters that would
+            ' brick the ini rather than confuse the separator. Checked per pattern, before packing.
+            If Not TryRejectControlChars("URL pattern", New String() {p}, errorMsg) Then Return False
             If seen.Add(p) Then parts.Add(p)
         Next
         If parts.Count > MaxUrlPatterns Then
@@ -1388,6 +1514,20 @@ Module Blocker
                                     ByVal coolOffSeconds As Long,
                                     ByVal allSessionKill As Boolean) As ArmResult
         Dim result As New ArmResult
+
+        ' 0. FX4 (F30) - THE WRITER CHOKEPOINT for control characters. DoBlock refuses first with
+        '    the same message, but EVERY arm - CLI flags, --preset/--app-preset expansion, --file
+        '    lines, inherited setup defaults, a deferred --start slot, the C3b shim - reaches the
+        '    ini through THIS function and these three arguments, so one check here is the
+        '    structural guarantee that no bricking value can ever be written. It runs BEFORE the
+        '    ini is even loaded: refusing is completely side-effect free, and refusing an arm can
+        '    never lift anything (the FX3 command-refuses-then-writer-refuses pattern).
+        If Not TryRejectControlChars("site", domains, result.Message) OrElse
+           Not TryRejectControlChars("app", apps, result.Message) OrElse
+           Not TryRejectControlChars("URL pattern", New String() {If(urlPatterns, "")}, result.Message) Then
+            result.Outcome = ArmOutcome.BadInput
+            Return result
+        End If
 
         ' 1. Load whatever is there (a missing/unreadable file reads as an empty config,
         '    which is MAC-INVALID - it never counts as "usable").
@@ -2020,6 +2160,9 @@ Module Blocker
                 errorMsg = "The site '" & raw & "' contains an unsupported character."
                 Return False
             End If
+            ' FX4 (F30): the Spec is ONE MAC-covered ini value, so a control character inside it
+            ' bricks the config exactly as it does inside a slot's Sites. Refused before the stamp.
+            If Not TryRejectControlChars("site", New String() {d}, errorMsg) Then Return False
             siteTokens.Add(d)
         Next
         If siteTokens.Count = 0 Then
@@ -2036,6 +2179,8 @@ Module Blocker
                 errorMsg = "The app '" & raw & "' contains an unsupported character."
                 Return False
             End If
+            ' FX4 (F30): same refusal as the site half above - one bricking character in the Spec.
+            If Not TryRejectControlChars("app", New String() {a}, errorMsg) Then Return False
             appTokens.Add(a)
         Next
         spec = ScheduleSpecGrammarVersion & ";" & String.Join(",", compactWindows) &
