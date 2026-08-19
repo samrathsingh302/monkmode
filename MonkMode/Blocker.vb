@@ -91,6 +91,12 @@ Module Blocker
     ' whereas an unknown tag parses to zero windows. The CLI only ever emits this tag.
     Public Const ScheduleSpecGrammarVersion As String = "v2"
     Public Const Marker As String = "#### MonkMode Entries ####"
+    ' F35 (v1.1 FX7): the CLOSING marker line. Every hosts write emits it directly below the
+    ' entry lines so the block has a known END and the strip stops there instead of running to
+    ' EOF - without it a user line hand-added below our block was destroyed by the next arm,
+    ' self-heal, retire or expiry. Same ownership rule as the start marker: it only counts when
+    ' it OWNS ITS WHOLE LINE. Identical literal to monkmode.Service1.HostsEndMarker (parity-pinned).
+    Public Const EndMarker As String = "#### MonkMode End ####"
     Public Const ServiceExeName As String = "MonkMode_srv.exe"
     Public Const NotifierExeName As String = "mm_notify.exe"
     Public Const RunValueName As String = "MonkMode_notify"
@@ -621,12 +627,25 @@ Module Blocker
     ' Line-for-line identical to monkmode.Service1.MarkerLineStart and pinned
     ' by the CLI<->service parity tests.
     Friend Function MarkerLineStart(ByVal text As String) As Integer
+        Return MarkerLineStartFrom(text, Marker, 0)
+    End Function
+
+    ' F35 (v1.1 FX7): the index of the first line-anchored END marker at or below
+    ' searchFrom, -1 when there is none. Searching FROM the start marker is
+    ' deliberate: an end marker sitting ABOVE our block is a user line, never a
+    ' close of ours. Identical to monkmode.Service1.EndMarkerLineStart.
+    Friend Function EndMarkerLineStart(ByVal text As String, ByVal searchFrom As Integer) As Integer
+        Return MarkerLineStartFrom(text, EndMarker, searchFrom)
+    End Function
+
+    ' The shared anchored search both markers use (F31's rule, generalised by F35).
+    Private Function MarkerLineStartFrom(ByVal text As String, ByVal marker As String, ByVal searchFrom As Integer) As Integer
         If text Is Nothing Then Return -1
-        Dim searchFrom As Integer = 0
-        Do While searchFrom <= text.Length - Marker.Length
-            Dim idx As Integer = text.IndexOf(Marker, searchFrom, StringComparison.Ordinal)
+        If searchFrom < 0 Then searchFrom = 0
+        Do While searchFrom <= text.Length - marker.Length
+            Dim idx As Integer = text.IndexOf(marker, searchFrom, StringComparison.Ordinal)
             If idx < 0 Then Return -1
-            If IsWholeLine(text, idx, Marker.Length) Then Return idx
+            If IsWholeLine(text, idx, marker.Length) Then Return idx
             ' Mid-line hit: user content. Keep looking BELOW it - a real,
             ' line-anchored block further down must still be stripped.
             searchFrom = idx + 1
@@ -661,7 +680,77 @@ Module Blocker
     ' MonkMode (CLI) and monkmode (service) are separate assemblies that cannot
     ' reference one another - the same reason ServiceSecurity / ConfigIntegrity /
     ' DohPolicy are duplicated and parity-pinned.
+    ' F35 (v1.1 FX7): "the block" is marker line -> END marker line INCLUSIVE, and
+    ' everything below the end marker is the user's, preserved byte-for-byte.
+    ' LEGACY RULE (a block written before FX7 carries no end marker): it runs to EOF,
+    ' exactly as it always did - see monkmode.Service1.StripMonkModeBlock for the full
+    ' argument. Both copies must answer identically; the parity tests pin it.
     Friend Function StripMonkModeBlock(ByVal text As String) As String
+        Dim startpos As Integer = MarkerLineStart(text)
+        If startpos < 0 Then Return text
+        Dim below As String = HostsBelowBlock(text)
+        ' No end marker, or nothing below it: byte-identical to the pre-F35 strip.
+        If below.Length = 0 Then Return HostsAboveBlock(text)
+        ' Keep the terminator that separated the user's content from our marker
+        ' line: it now joins the two halves of their file back together.
+        Return Microsoft.VisualBasic.Left(text, startpos) & below
+    End Function
+
+    ' F35 (v1.1 FX7): the user's own content BELOW our block - everything after the
+    ' END marker line and the single line terminator that closes it, byte-for-byte.
+    ' "" when there is no block or the block carries no end marker (legacy: it owns
+    ' everything to EOF). Identical to monkmode.Service1.HostsBelowBlock.
+    Friend Function HostsBelowBlock(ByVal text As String) As String
+        If text Is Nothing Then Return ""
+        Dim startpos As Integer = MarkerLineStart(text)
+        If startpos < 0 Then Return ""
+        Dim endpos As Integer = EndMarkerLineStart(text, startpos)
+        If endpos < 0 Then Return ""
+        Dim after As Integer = endpos + EndMarker.Length
+        ' Drop exactly ONE line terminator - the one closing our end-marker line.
+        ' A blank line the user left below our block is theirs and survives.
+        If after < text.Length Then
+            If String.CompareOrdinal(text, after, vbCrLf, 0, 2) = 0 Then
+                after += 2
+            ElseIf text.Chars(after) = CChar(vbLf) OrElse text.Chars(after) = CChar(vbCr) Then
+                after += 1
+            End If
+        End If
+        If after >= text.Length Then Return ""
+        Return text.Substring(after)
+    End Function
+
+    ' F35 (v1.1 FX7): the block text a WRITER is about to put into hosts, guaranteed to
+    ' carry a closing end-marker line. Idempotent, so repeated writes never stack
+    ' markers. Identical to monkmode.Service1.EnsureBlockEndMarker.
+    Friend Function EnsureBlockEndMarker(ByVal block As String) As String
+        If String.IsNullOrEmpty(block) Then Return block
+        ' Search from the block's OWN start marker, never from index 0: an anchored end
+        ' marker ABOVE the start marker (a hand-tampered snapshot) is not a close of this
+        ' block, and treating it as one would emit a block with no End below its marker -
+        ' which the strip then reads by the LEGACY rule and takes the re-seated user tail
+        ' with it. A block with no start marker at all searches from 0, unchanged.
+        If EndMarkerLineStart(block, Math.Max(0, MarkerLineStart(block))) >= 0 Then Return block
+        Dim s As String = block
+        If Not (s.EndsWith(vbCrLf, StringComparison.Ordinal) OrElse s.EndsWith(vbLf, StringComparison.Ordinal) _
+                OrElse s.EndsWith(vbCr, StringComparison.Ordinal)) Then s &= vbCrLf
+        Return s & EndMarker & vbCrLf
+    End Function
+
+    ' F35 (v1.1 FX7): re-attach the user's below-the-block content to a rewritten hosts
+    ' text, keeping it BELOW our block - hoisting it above our entries would let their
+    ' line win the resolver's first-match over ours, i.e. narrow the block.
+    ' Identical to monkmode.Service1.AppendUserTail.
+    Friend Function AppendUserTail(ByVal textEndingWithOurBlock As String, ByVal below As String) As String
+        If String.IsNullOrEmpty(below) Then Return textEndingWithOurBlock
+        Dim s As String = textEndingWithOurBlock
+        If s.Length > 0 AndAlso Not (s.EndsWith(vbCrLf, StringComparison.Ordinal) OrElse s.EndsWith(vbLf, StringComparison.Ordinal) _
+                                     OrElse s.EndsWith(vbCr, StringComparison.Ordinal)) Then s &= vbCrLf
+        Return s & below
+    End Function
+
+    ' The user's own content ABOVE our block (the pre-F35 whole-strip result).
+    Friend Function HostsAboveBlock(ByVal text As String) As String
         ' F31: line-anchored match, so a marker MENTIONED inside a user line is
         ' never mistaken for the start of our block.
         Dim startpos As Integer = MarkerLineStart(text)
@@ -682,15 +771,17 @@ Module Blocker
     End Function
 
     ' The tail-normalising strip used by the RE-BLOCK path (WriteHostsBlock):
-    ' remove our marker block via the byte-for-byte StripMonkModeBlock, then trim
-    ' any trailing CR/LF/space/tab, because the caller immediately re-appends
-    ' vbCrLf + a fresh block - normalising the tail stops a blank line
-    ' accumulating before the marker across repeated blocks. Deliberately NOT
-    ' byte-for-byte (that is StripMonkModeBlock's job, used by the lift path):
-    ' StripOurBlock(x) == StripMonkModeBlock(x) with the trailing whitespace
-    ' trimmed, pinned by the strip-parity tests.
+    ' the user's content ABOVE our block, with any trailing CR/LF/space/tab
+    ' trimmed, because the caller immediately re-appends vbCrLf + a fresh block -
+    ' normalising the tail stops a blank line accumulating before the marker
+    ' across repeated blocks. Deliberately NOT byte-for-byte (that is
+    ' StripMonkModeBlock's job, used by the lift path).
+    ' F35: it is HostsAboveBlock that is trimmed, not the whole strip - the user's
+    ' content BELOW our end marker must keep its own line endings and is re-attached
+    ' below the new block by WriteHostsFileAt. With nothing below the end marker the
+    ' two are the same string, so every pre-F35 result is unchanged.
     Friend Function StripOurBlock(ByVal text As String) As String
-        Return StripMonkModeBlock(text).TrimEnd(CChar(vbCr), CChar(vbLf), " "c, CChar(vbTab))
+        Return HostsAboveBlock(text).TrimEnd(CChar(vbCr), CChar(vbLf), " "c, CChar(vbTab))
     End Function
 
     ' The exact MonkMode-owned text appended to hosts: the marker line plus the
@@ -731,7 +822,13 @@ Module Blocker
         Dim existing As String = ""
         If File.Exists(path) Then existing = File.ReadAllText(path)
         Dim baseText As String = StripOurBlock(existing)
-        AtomicHosts.WriteAtomic(path, baseText & vbCrLf & block)
+        ' F35: the user's content above AND below the old block survives, with the new
+        ' block re-seated between them and end-markered so the next strip stops there.
+        ' Below stays below: hoisting it above our entries would let the user's own line
+        ' for a blocked host win the resolver's first match - a rewrite that narrows the
+        ' block. The SNAPSHOT keeps the plain (marker + entries) form; the end marker is
+        ' added here, at the hosts boundary, exactly as the service's writers do.
+        AtomicHosts.WriteAtomic(path, AppendUserTail(baseText & vbCrLf & EnsureBlockEndMarker(block), HostsBelowBlock(existing)))
     End Sub
 
     ' v1.1 S2 (PURE): the arm-time snapshot UNION. With several slots armed, the single
@@ -746,7 +843,10 @@ Module Blocker
         For Each source As String In New String() {If(existingBlock, ""), If(newEntries, "")}
             For Each raw As String In source.Split(New String() {vbCrLf, vbLf}, StringSplitOptions.None)
                 Dim line As String = raw.Trim()
-                If line = "" OrElse line = Marker Then Continue For
+                ' F35: both marker lines are structure, never entries - the block builders
+                ' re-emit the start marker here and the end marker is added at the hosts
+                ' boundary, so neither can be folded in as a bogus hosts entry.
+                If line = "" OrElse line = Marker OrElse line = EndMarker Then Continue For
                 If seen.Add(line) Then sb.Append(line).Append(vbCrLf)
             Next
         Next

@@ -93,10 +93,12 @@ public class ArmHostsConfigTruthTests
         => MonkMode.Blocker.UnionHostsBlock("", MonkMode.Blocker.BuildHostsEntries(domains));
 
     // What the arm assembles into hosts: the user's own content with its tail normalised,
-    // then CRLF, then our marker block. Every fixture seeds one user line, both because it
-    // is the realistic shape and because it is the no-data-loss fence under test.
+    // then CRLF, then our marker block, then (F35) the END marker line that closes it.
+    // Every fixture seeds one user line, both because it is the realistic shape and because
+    // it is the no-data-loss fence under test.
     private const string UserLine = "127.0.0.1 mine.example";
-    private static string ExpectedHosts(params string[] domains) => UserLine + "\r\n" + Expected(domains);
+    private static string ExpectedHosts(params string[] domains)
+        => UserLine + "\r\n" + Expected(domains) + MonkMode.Blocker.EndMarker + "\r\n";
 
     [Fact]
     public void SecondArm_WithTheSnapshotFileMissing_StillCoversTheFirstSlotsSites()
@@ -380,7 +382,9 @@ public class ArmHostsWriteGuardTests
             Assert.True(MonkMode.Blocker.TryWriteArmHostsBlockAt(MonkMode.Blocker.IniPath(), snapshot, hosts,
                                                                  new[] { "a.com" }, false, ref warning));
             Assert.Equal("", warning);
-            Assert.Equal(UserLine + "\r\n" + Expected("a.com"), File.ReadAllText(hosts));
+            // F35: hosts carries the end marker below the entries; the snapshot does not.
+            Assert.Equal(UserLine + "\r\n" + Expected("a.com") + MonkMode.Blocker.EndMarker + "\r\n",
+                         File.ReadAllText(hosts));
         }
         finally { Wipe(); Drop(dir); }
     }

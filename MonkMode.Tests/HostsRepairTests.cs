@@ -30,6 +30,11 @@
 //     hands back exactly the user's pre-repair content;
 //   - no/empty snapshot means no repair (null) - never invent hosts content.
 //
+// F35 (v1.1 FX7): what a writer puts into hosts is the snapshot block PLUS the
+// end-marker line, so the block has a known end and user content below it
+// survives. The snapshot on disk is unchanged (marker + entry lines); every
+// expectation below therefore compares against Written(Block), not Block.
+//
 // Everything here is in-memory strings - the real hosts file is never touched.
 
 namespace MonkMode.Tests;
@@ -37,27 +42,65 @@ namespace MonkMode.Tests;
 public class ServiceRepairHostsBlockTests
 {
     private const string Marker = "#### MonkMode Entries ####";
+    private const string EndMarker = "#### MonkMode End ####";
     private const string Block = Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 www.reddit.com\r\n";
+
+    // The hosts-side form of a snapshot block: what every writer emits (F35).
+    private const string Written = Block + EndMarker + "\r\n";
 
     [Fact]
     public void IntactBlock_WithUserContentAbove_ReturnsNull()
     {
-        var hosts = "# my hosts\r\n127.0.0.1 my-dev-box\r\n" + Block;
+        var hosts = "# my hosts\r\n127.0.0.1 my-dev-box\r\n" + Written;
         Assert.Null(monkmode.Service1.RepairHostsBlock(hosts, Block));
     }
 
     [Fact]
     public void IntactBlock_WholeFileIsOurs_ReturnsNull()
     {
-        Assert.Null(monkmode.Service1.RepairHostsBlock(Block, Block));
+        Assert.Null(monkmode.Service1.RepairHostsBlock(Written, Block));
+    }
+
+    [Fact]
+    public void LegacyBlockWithNoEndMarker_ConvergesInOneRewrite()
+    {
+        // F35 legacy rule: a pre-FX7 block is intact by the OLD test (hosts
+        // contains the snapshot verbatim) but carries no end marker, so the
+        // repair rewrites it once - and from then on it is stable (null).
+        var legacy = "# my hosts\r\n127.0.0.1 my-dev-box\r\n" + Block;
+        var converged = monkmode.Service1.RepairHostsBlock(legacy, Block);
+        Assert.Equal("# my hosts\r\n127.0.0.1 my-dev-box\r\n" + Written, converged);
+        Assert.Null(monkmode.Service1.RepairHostsBlock(converged, Block));
+    }
+
+    [Fact]
+    public void EndMarkerDeleted_IsTamperingInsideTheBlock_AndIsRepaired()
+    {
+        // Deleting the end marker is an edit INSIDE our block: the self-heal
+        // must put it back, exactly as it does for a deleted entry line.
+        var hosts = "127.0.0.1 my-dev-box\r\n" + Block;
+        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Written,
+            monkmode.Service1.RepairHostsBlock(hosts, Block));
+    }
+
+    [Fact]
+    public void UserLineBelowTheEndMarker_IsPreservedInPlaceByARepair()
+    {
+        // THE F35 REPRO on the self-heal path: the user's own line sits below
+        // our end marker; a repair (here: an entry line deleted) must keep it,
+        // and keep it BELOW our block so it can never out-rank our entries.
+        var tampered = "# my hosts\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n" +
+                       EndMarker + "\r\n10.0.0.5 nas.home\r\n";
+        Assert.Equal("# my hosts\r\n" + Written + "10.0.0.5 nas.home\r\n",
+            monkmode.Service1.RepairHostsBlock(tampered, Block));
     }
 
     [Fact]
     public void ExtraLinesBelowIntactBlock_ReturnsNull()
     {
-        // Content below an intact block doesn't weaken enforcement and is
-        // MonkMode's to remove at expiry anyway, so no repair churn.
-        var hosts = "127.0.0.1 my-dev-box\r\n" + Block + "127.0.0.1 added-later\r\n";
+        // Content below an intact block doesn't weaken enforcement, so no
+        // repair churn - and since F35 it is the USER's content, kept for good.
+        var hosts = "127.0.0.1 my-dev-box\r\n" + Written + "127.0.0.1 added-later\r\n";
         Assert.Null(monkmode.Service1.RepairHostsBlock(hosts, Block));
     }
 
@@ -66,7 +109,7 @@ public class ServiceRepairHostsBlockTests
     {
         // The classic tamper: clear read-only, delete the whole MonkMode block.
         var userContent = "# my hosts\r\n127.0.0.1 my-dev-box";
-        Assert.Equal(userContent + "\r\n" + Block,
+        Assert.Equal(userContent + "\r\n" + Written,
             monkmode.Service1.RepairHostsBlock(userContent, Block));
     }
 
@@ -74,8 +117,8 @@ public class ServiceRepairHostsBlockTests
     public void EntriesPartiallyRemovedBelowMarker_RepairedToExpected()
     {
         // Marker kept, but one of our entry lines deleted.
-        var hosts = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n";
-        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Block,
+        var hosts = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n" + EndMarker + "\r\n";
+        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Written,
             monkmode.Service1.RepairHostsBlock(hosts, Block));
     }
 
@@ -83,15 +126,15 @@ public class ServiceRepairHostsBlockTests
     public void EntriesEditedBelowMarker_RepairedToExpected()
     {
         // Marker kept, entries rewritten to something harmless-looking.
-        var hosts = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n# nothing to see here\r\n";
-        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Block,
+        var hosts = "127.0.0.1 my-dev-box\r\n" + Marker + "\r\n# nothing to see here\r\n" + EndMarker + "\r\n";
+        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Written,
             monkmode.Service1.RepairHostsBlock(hosts, Block));
     }
 
     [Fact]
     public void HostsBlankedEntirely_RepairedEqualsExpectedBlock()
     {
-        Assert.Equal(Block, monkmode.Service1.RepairHostsBlock("", Block));
+        Assert.Equal(Written, monkmode.Service1.RepairHostsBlock("", Block));
     }
 
     [Fact]
@@ -99,7 +142,7 @@ public class ServiceRepairHostsBlockTests
     {
         // Mirrors a deleted hosts file: the timer reads "nothing" and the
         // repair recreates the file as just our block.
-        Assert.Equal(Block, monkmode.Service1.RepairHostsBlock(null!, Block));
+        Assert.Equal(Written, monkmode.Service1.RepairHostsBlock(null!, Block));
     }
 
     [Fact]
@@ -110,7 +153,7 @@ public class ServiceRepairHostsBlockTests
         // pre-repair file - the repair must never erode user content.
         var userContent = "# mine\n127.0.0.1 my-dev-box\n";
         var repaired = monkmode.Service1.RepairHostsBlock(userContent, Block);
-        Assert.Equal(userContent + "\r\n" + Block, repaired);
+        Assert.Equal(userContent + "\r\n" + Written, repaired);
         Assert.Equal(userContent, monkmode.Service1.StripMonkModeBlock(repaired));
     }
 
@@ -119,7 +162,7 @@ public class ServiceRepairHostsBlockTests
     {
         var userContent = "# mine\r\n127.0.0.1 my-dev-box\r\n";
         var repaired = monkmode.Service1.RepairHostsBlock(userContent, Block);
-        Assert.Equal(userContent + "\r\n" + Block, repaired);
+        Assert.Equal(userContent + "\r\n" + Written, repaired);
         Assert.Equal(userContent, monkmode.Service1.StripMonkModeBlock(repaired));
     }
 
@@ -130,7 +173,7 @@ public class ServiceRepairHostsBlockTests
         // the (tampered) marker block is treated as ours; the separator is
         // re-normalised to CRLF on repair.
         var hosts = "127.0.0.1 my-dev-box\n" + Marker + "\n127.0.0.1 reddit.com\n";
-        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Block,
+        Assert.Equal("127.0.0.1 my-dev-box\r\n" + Written,
             monkmode.Service1.RepairHostsBlock(hosts, Block));
     }
 
@@ -167,7 +210,8 @@ public class CliSnapshotParityTests
         // layout - and an intact layout must repair to null (no churn).
         var baseText = "# my hosts\r\n127.0.0.1 my-dev-box";
         var block = MonkMode.Blocker.BuildMonkModeBlock(new[] { "reddit.com" });
-        var written = baseText + "\r\n" + block;
+        // F35: hosts carries the block plus its end marker; the snapshot does not.
+        var written = baseText + "\r\n" + block + MonkMode.Blocker.EndMarker + "\r\n";
         Assert.Null(monkmode.Service1.RepairHostsBlock(written, block));
         Assert.Equal(written, monkmode.Service1.RepairHostsBlock(baseText, block));
     }

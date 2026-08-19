@@ -234,6 +234,20 @@ public class CliServiceStripParityTests
     [InlineData("#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n")]                                // whole file is ours
     [InlineData("#### MONKMODE ENTRIES ####\r\n127.0.0.1 box\r\n#### MonkMode Entries ####\r\n")]  // case-variant above the real marker
     [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 a\r\n#### MonkMode Entries ####\r\n")] // doubled marker
+    // F35 (FX7): the end-marker shapes. Both copies must answer identically on every one of
+    // them - the strip is the lift path, so a divergence means `unblock` and a natural expiry
+    // leave the user's hosts in different states.
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n#### MonkMode End ####\r\n")]                       // end marker, block last
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n#### MonkMode End ####\r\n10.0.0.5 nas\r\n")]      // THE F35 shape
+    [InlineData("#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n#### MonkMode End ####\r\n10.0.0.5 nas\r\n")]                        // block at the top
+    [InlineData("127.0.0.1 box\n#### MonkMode Entries ####\n0.0.0.0 x.com\n#### MonkMode End ####\n10.0.0.5 nas\n")]                 // LF endings
+    [InlineData("127.0.0.1 box\r#### MonkMode Entries ####\r0.0.0.0 x.com\r#### MonkMode End ####\r10.0.0.5 nas\r")]                 // bare CR
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n#### MonkMode End ####\r\n\r\n10.0.0.5 nas\r\n")]  // user blank line below
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x.com\r\n  #### MonkMode End ####\r\n10.0.0.5 nas\r\n")]    // indented end marker: not ours
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n# the #### MonkMode End #### line\r\n0.0.0.0 x\r\n")]                // mid-line mention only
+    [InlineData("#### MonkMode End ####\r\n127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x\r\n#### MonkMode End ####\r\n")] // stray end marker above
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n#### MonkMode End ####\r\n10.0.0.5 nas\r\n")]                        // empty block
+    [InlineData("127.0.0.1 box\r\n#### MonkMode Entries ####\r\n0.0.0.0 x\r\n#### MonkMode End ####")]                               // end marker, no trailing EOL
     public void CliLiftStrip_MatchesServiceExpiryStrip_ByteForByte(string hosts)
     {
         Assert.Equal(
@@ -482,7 +496,8 @@ public class MarkerLineAnchoringTests
         var repaired = monkmode.Service1.RepairHostsBlock(MentionRepro, expectedBlock);
         Assert.NotNull(repaired);
         Assert.StartsWith(MentionRepro, repaired);
-        Assert.EndsWith(expectedBlock, repaired);
+        // F35: hosts gets the block plus its end-marker line.
+        Assert.EndsWith(expectedBlock + "#### MonkMode End ####\r\n", repaired);
         Assert.Contains("10.0.0.5 nas.home", repaired);
         Assert.Contains("192.168.1.9 printer.home", repaired);
     }

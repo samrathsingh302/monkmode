@@ -88,9 +88,11 @@ Four cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
 | `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service (it no longer rewrites the end time), and shows tray toasts at block start, when a cooling-off begins, and when the block ends. |
 | `MM_guard/` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Watchdog guardian. Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
-A block is hosts-file DNS sinkholing (`127.0.0.1` entries below a
-`#### MonkMode Entries ####` marker) plus process-kill rules, enforced by the
-service on a 10-second loop.
+A block is hosts-file DNS sinkholing (`127.0.0.1` entries between the
+`#### MonkMode Entries ####` and `#### MonkMode End ####` marker lines) plus
+process-kill rules, enforced by the service on a 10-second loop. Only that
+region is ever touched — your own hosts content, above or below it, is
+preserved byte-for-byte.
 
 ## Tamper resistance (what's actually enforced)
 

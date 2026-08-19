@@ -169,10 +169,18 @@ C:\Windows\System32\drivers\etc\hosts
 
 Look for the marker line `#### MonkMode Entries ####` [E12]. If it is present,
 sites are being sinkholed; if it is absent, no MonkMode site block is in the
-hosts file (the block has lifted, or none was armed). **Only ever touch the
-marker block** if you edit by hand — the user's own hosts content sits outside
-it and must be preserved byte-for-byte (the same no-data-loss rule the code
-follows). While a block is unexpired and the service is alive, the service
+hosts file (the block has lifted, or none was armed). Since v1.1 the block is
+**closed** by `#### MonkMode End ####` on its own line, so MonkMode's region is
+exactly those two marker lines and everything between them; anything below the
+end marker is your own content and MonkMode leaves it alone (F35). **Only ever
+touch the marker block** if you edit by hand — the user's own hosts content sits
+outside it and must be preserved byte-for-byte (the same no-data-loss rule the
+code follows). A block written by a pre-v1.1 build has no end marker; it is
+treated as running to the end of the file until the next write closes it. If an
+end-marker line is ever injected *inside* the block, the entry lines below it are
+demoted to your own content: they survive the lift as stray `127.0.0.1` lines and
+need deleting by hand. That is tamper-only (MonkMode writes exactly one end
+marker, at the bottom) and it over-blocks rather than under-blocks. While a block is unexpired and the service is alive, the service
 re-asserts read-only and restores this block from its snapshot within ~10 s of
 any edit (B2 self-heal) [E5], so a hand edit will not stick until the service is
 gone.

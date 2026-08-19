@@ -391,22 +391,26 @@ public class SlotActivationAndTriggerNameTests
     }
 
     [Fact]
-    public void ExactHostsRewrite_ShrinksTheBlock_WhereRepairHostsBlockWouldNoOp()
+    public void ExactHostsRewrite_ShrinksTheBlock_ToTheExactTarget()
     {
-        // The reason retire does not reuse RepairHostsBlock: that returns Nothing whenever
-        // hosts already CONTAINS the expected text, which is right for a self-heal but wrong
-        // for a SHRINK. Retiring the LAST slot in position order leaves the survivors as a
-        // literal prefix of what is in hosts, so the repair would no-op and the retired
-        // block's sites would stay blocked until teardown.
+        // Why retire does not reuse RepairHostsBlock: that returns Nothing whenever hosts
+        // CONTAINS the expected text, which is right for a self-heal but was wrong for a
+        // SHRINK - retiring the LAST slot in position order leaves the survivors as a literal
+        // prefix of what is in hosts. ExactHostsRewrite computes the exact desired file and
+        // returns Nothing only when hosts already IS it.
+        // F35 (v1.1 FX7) narrowed the gap: the expected text now ends with the end marker, so
+        // the prefix-shrink no longer "contains" and the self-heal catches it as well. The
+        // semantics still differ (contains vs is), so the retire keeps the exact writer.
         const string marker = "#### MonkMode Entries ####";
-        var wide = "127.0.0.1 mine.example\r\n" + marker + "\r\n0.0.0.0 a.com\r\n0.0.0.0 b.com\r\n";
+        const string end = "#### MonkMode End ####";
+        var wide = "127.0.0.1 mine.example\r\n" + marker + "\r\n0.0.0.0 a.com\r\n0.0.0.0 b.com\r\n" + end + "\r\n";
         var narrow = marker + "\r\n0.0.0.0 a.com\r\n";
-        Assert.Null(monkmode.Service1.RepairHostsBlock(wide, narrow));            // would leave b.com blocked
         var rewritten = monkmode.Service1.ExactHostsRewrite(wide, narrow);
         Assert.NotNull(rewritten);
         Assert.Contains("a.com", rewritten);
         Assert.DoesNotContain("b.com", rewritten);
         Assert.StartsWith("127.0.0.1 mine.example", rewritten);                   // the user's own line survives
+        Assert.EndsWith(end + "\r\n", rewritten);                                 // F35: closed by the end marker
         // Already exactly right => no churn.
         Assert.Null(monkmode.Service1.ExactHostsRewrite(rewritten, narrow));
         // Never invent content.
@@ -553,6 +557,50 @@ public class SlotRetireLiveTests
             Assert.Contains("b.com", hosts);
             // The paramount fence: only ever the marker block. The user's own line survives.
             Assert.StartsWith("127.0.0.1 mine.example", hosts);
+        }
+        finally { Wipe(); Drop(dir); }
+    }
+
+    // F35 (v1.1 FX7) - THE REPRO, on the live retire path.
+    //
+    // A hand-added user line BELOW MonkMode's block used to be destroyed by every hosts
+    // rewrite: the writers assembled "user content + CRLF + block" from a strip that ran
+    // marker -> EOF, so anything under the block was silently swallowed. S3b made that fire at
+    // EVERY slot retire, so on a multi-slot machine the loss recurred. MonkMode keeps no hosts
+    // backup, so the line was gone for good.
+    [Fact]
+    public void RetireSlot_UserLineBelowTheBlock_SurvivesTheRewrite_AndStaysBelow()
+    {
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            Assert.True(Arm("b.com").Ok);
+            var snapshotPath = Path.Combine(dir, "monkmode_hosts.block");
+            var hostsPath = Path.Combine(dir, "hosts");
+            const string userBelow = "10.0.0.5 nas.home\r\n192.168.1.9 printer.home\r\n";
+            File.WriteAllText(snapshotPath, Marker + "\r\n0.0.0.0 a.com\r\n0.0.0.0 b.com\r\n");
+            File.WriteAllText(hostsPath, "127.0.0.1 mine.example\r\n" + Marker +
+                                         "\r\n0.0.0.0 a.com\r\n0.0.0.0 b.com\r\n" +
+                                         monkmode.Service1.HostsEndMarker + "\r\n" + userBelow);
+
+            Assert.True(Svc().RetireSlotAt(MonkMode.Blocker.IniPath(), snapshotPath, hostsPath, "1"));
+
+            var hosts = File.ReadAllText(hostsPath);
+            // The retire still did its job: a.com out, b.com still blocked.
+            Assert.DoesNotContain("a.com", hosts);
+            Assert.Contains("b.com", hosts);
+            // ...and BOTH halves of the user's own file survived, byte-for-byte.
+            Assert.StartsWith("127.0.0.1 mine.example", hosts);
+            Assert.EndsWith(monkmode.Service1.HostsEndMarker + "\r\n" + userBelow, hosts);
+            // Position is load-bearing: the user's lines stay BELOW our entries, or one of
+            // their own lines for a blocked host would out-rank ours at the resolver.
+            Assert.True(hosts.IndexOf("127.0.0.1 b.com", StringComparison.Ordinal)
+                        < hosts.IndexOf("10.0.0.5 nas.home", StringComparison.Ordinal));
+            // A second retire (the recurrence S3b introduced) still keeps them.
+            Assert.True(Svc().RetireSlotAt(MonkMode.Blocker.IniPath(), snapshotPath, hostsPath, "2"));
+            Assert.Contains("10.0.0.5 nas.home", File.ReadAllText(hostsPath));
         }
         finally { Wipe(); Drop(dir); }
     }
@@ -737,16 +785,18 @@ public class SlotRetireLiveTests
     }
 
     [Fact]
-    public void RetireSlot_CrashedRetireOfTheLastSlotInOrder_DoesNotSelfHeal_AndThatIsCarried()
+    public void RetireSlot_CrashedRetireOfTheLastSlotInOrder_NowSelfHealsViaTheEndMarker()
     {
-        // The honest limit of the crash story, pinned so the comment cannot drift back to
-        // claiming unconditional 10s convergence. Retiring the LAST slot in position order
-        // leaves the survivors as a contiguous PREFIX of the wide block, so RepairHostsBlock -
-        // which no-ops whenever hosts CONTAINS the expected text - never fires, and the
-        // retired slot's sites stay blocked until the next retire or the teardown. A rare
-        // double fault (a crash inside the retire AND that geometry) and a pure OVER-block,
-        // so it is carried rather than paid for with an exact-target computation on the 10s
-        // hot path. The NON-crash path is exact - that is what ExactHostsRewrite is for.
+        // Retiring the LAST slot in position order leaves the survivors as a contiguous PREFIX
+        // of the wide block. Before F35 that meant hosts still CONTAINED the expected text, so
+        // RepairHostsBlock no-opped and a crashed retire left the retired slot's sites blocked
+        // until the next retire or the teardown - a carried over-block.
+        // F35 (v1.1 FX7) closes it as a side effect: the expected text now ENDS with the end
+        // marker, so a wider hosts no longer contains it and the ordinary 10s self-heal shrinks
+        // to truth - in the legacy (no end marker) geometry too, since a legacy block cannot
+        // contain the end-markered expectation either. Shrink is a NARROWING, and it is safe
+        // here for the same reason the non-crash retire is: it comes from the snapshot, which
+        // this crash left at config truth, never from an error path.
         Wipe();
         var dir = TempDir();
         try
@@ -761,19 +811,27 @@ public class SlotRetireLiveTests
             // per domain, so a made-up two-line block would test a geometry that never occurs.
             var wide = Marker + "\r\n" + monkmode.Service1.BuildHostsEntries(new List<string> { "a.com", "b.com" });
             File.WriteAllText(snapshotPath, wide);
-            File.WriteAllText(hostsPath, wide);
+            File.WriteAllText(hostsPath, wide + monkmode.Service1.HostsEndMarker + "\r\n");   // as a writer leaves it
 
             monkmode.AtomicHosts.RenameHookForTests = (_, _) => throw new IOException("simulated crash");
             try { Svc().RetireSlotAt(MonkMode.Blocker.IniPath(), snapshotPath, hostsPath, "2"); }
             finally { monkmode.AtomicHosts.RenameHookForTests = null; }
 
             Assert.Equal(1, SlotCount(Reload()));
-            // The snapshot IS truth; the self-heal simply declines to shrink hosts to it.
+            // The snapshot IS truth (the crash hit the hosts write, not the snapshot one).
             Assert.DoesNotContain("b.com", File.ReadAllText(snapshotPath));
-            Assert.Null(monkmode.Service1.RepairHostsBlock(File.ReadAllText(hostsPath), File.ReadAllText(snapshotPath)));
-            Assert.Contains("b.com", File.ReadAllText(hostsPath));      // over-block, carried
-            // ...and the exact rewrite the non-crash path uses WOULD have shrunk it.
-            Assert.NotNull(monkmode.Service1.ExactHostsRewrite(File.ReadAllText(hostsPath), File.ReadAllText(snapshotPath)));
+            Assert.Contains("b.com", File.ReadAllText(hostsPath));      // hosts is still wide...
+            // ...and the next 10s self-heal now shrinks it to truth, b.com gone.
+            var healed = monkmode.Service1.RepairHostsBlock(File.ReadAllText(hostsPath), File.ReadAllText(snapshotPath));
+            Assert.NotNull(healed);
+            Assert.DoesNotContain("b.com", healed);
+            Assert.Contains("127.0.0.1 a.com", healed);
+            // A legacy hosts (pre-F35, no end marker) converges too: the expected text now
+            // ends with the marker it lacks, so the same self-heal rewrites it once.
+            var legacyHealed = monkmode.Service1.RepairHostsBlock(wide, File.ReadAllText(snapshotPath));
+            Assert.NotNull(legacyHealed);
+            Assert.EndsWith(monkmode.Service1.HostsEndMarker + "\r\n", legacyHealed);
+            Assert.DoesNotContain("b.com", legacyHealed);
         }
         finally { Wipe(); Drop(dir); }
     }

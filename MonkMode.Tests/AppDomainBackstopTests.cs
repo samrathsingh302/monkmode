@@ -55,7 +55,12 @@ namespace MonkMode.Tests;
 public class AppDomainBackstopServiceTests
 {
     private const string Marker = "#### MonkMode Entries ####";
+    private const string EndMarker = "#### MonkMode End ####";
     private const string Block = Marker + "\r\n127.0.0.1 reddit.com\r\n127.0.0.1 www.reddit.com\r\n";
+
+    // F35 (v1.1 FX7): the hosts-side form of the snapshot block - what every writer
+    // emits. The snapshot file itself stays the plain marker + entry lines.
+    private const string Written = Block + EndMarker + "\r\n";
 
     private static string TempPath(string tag) =>
         Path.Combine(AppContext.BaseDirectory, $"backstop_{tag}_{Guid.NewGuid():N}.tmp");
@@ -91,7 +96,7 @@ public class AppDomainBackstopServiceTests
 
             monkmode.Service1.ReassertHostsFailClosed(hosts, snap);
 
-            Assert.Equal(Block, File.ReadAllText(hosts));
+            Assert.Equal(Written, File.ReadAllText(hosts));
             Assert.True(IsReadOnly(hosts));
         }
         finally { Cleanup(hosts); Cleanup(snap); }
@@ -113,7 +118,7 @@ public class AppDomainBackstopServiceTests
 
             monkmode.Service1.ReassertHostsFailClosed(hosts, snap);
 
-            Assert.Equal(user + "\r\n" + Block, File.ReadAllText(hosts));
+            Assert.Equal(user + "\r\n" + Written, File.ReadAllText(hosts));
             Assert.True(IsReadOnly(hosts));
         }
         finally { Cleanup(hosts); Cleanup(snap); }
@@ -135,7 +140,7 @@ public class AppDomainBackstopServiceTests
             monkmode.Service1.ReassertHostsFailClosed(hosts, snap);
 
             Assert.True(File.Exists(hosts));
-            Assert.Equal(Block, File.ReadAllText(hosts));
+            Assert.Equal(Written, File.ReadAllText(hosts));
             Assert.True(IsReadOnly(hosts));
         }
         finally { Cleanup(hosts); Cleanup(snap); }
@@ -151,7 +156,7 @@ public class AppDomainBackstopServiceTests
         var snap = TempPath("snap");
         try
         {
-            var full = "# my hosts\r\n127.0.0.1 my-dev-box\r\n" + Block;
+            var full = "# my hosts\r\n127.0.0.1 my-dev-box\r\n" + Written;
             File.WriteAllText(hosts, full);            // writable (Normal attrs)
             File.WriteAllText(snap, Block);
             Assert.False(IsReadOnly(hosts));
@@ -225,7 +230,7 @@ public class AppDomainBackstopServiceTests
             monkmode.Service1.ReassertHostsFailClosed(hosts, snap);
             var afterSecond = File.ReadAllText(hosts);
 
-            Assert.Equal(user + "\r\n" + Block, afterFirst);
+            Assert.Equal(user + "\r\n" + Written, afterFirst);
             Assert.Equal(afterFirst, afterSecond);
             Assert.True(IsReadOnly(hosts));
         }

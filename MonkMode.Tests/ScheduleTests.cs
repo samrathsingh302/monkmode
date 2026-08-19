@@ -1238,7 +1238,8 @@ public class EffectiveHostsBlockTests
         var block = monkmode.Service1.EffectiveHostsBlock("", Sites("reddit.com"), scheduleActive: true);
         var userContent = "# my hosts\r\n127.0.0.1 my-dev-box";
         var repaired = monkmode.Service1.RepairHostsBlock(userContent, block);
-        Assert.Equal(userContent + "\r\n" + block, repaired);
+        // F35: the writer closes the block with the end-marker line.
+        Assert.Equal(userContent + "\r\n" + block + monkmode.Service1.HostsEndMarker + "\r\n", repaired);
         Assert.Equal(userContent, monkmode.Service1.StripMonkModeBlock(repaired!));
         // No churn: an intact synthesised block repairs to null next tick.
         Assert.Null(monkmode.Service1.RepairHostsBlock(repaired, block));
@@ -1278,7 +1279,8 @@ public class EffectiveHostsBlockTests
         var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("x.com"), scheduleActive: true);
         var userContent = "# my hosts\r\n127.0.0.1 my-dev-box";
         var written = monkmode.Service1.RepairHostsBlock(userContent, union);
-        Assert.Equal(userContent + "\r\n" + union, written);
+        // F35: the writer closes the block with the end-marker line.
+        Assert.Equal(userContent + "\r\n" + union + monkmode.Service1.HostsEndMarker + "\r\n", written);
         Assert.Null(monkmode.Service1.RepairHostsBlock(written, union));          // deterministic target -> no churn
         Assert.Equal(userContent, monkmode.Service1.StripMonkModeBlock(written!)); // clean strip, user content intact
     }
@@ -1301,7 +1303,8 @@ public class EffectiveHostsBlockTests
         // equal to the snapshot), so a written block re-repairs to null (no per-tick churn).
         var union = monkmode.Service1.EffectiveHostsBlock(ManualSnapshot, Sites("reddit.com"), scheduleActive: true);
         Assert.Equal(ManualSnapshot, union);
-        var written = "# mine\r\n127.0.0.1 box\r\n" + ManualSnapshot;
+        // F35: "written" is the hosts-side form - the block plus its end marker.
+        var written = "# mine\r\n127.0.0.1 box\r\n" + ManualSnapshot + monkmode.Service1.HostsEndMarker + "\r\n";
         Assert.Null(monkmode.Service1.RepairHostsBlock(written, union));
     }
 
@@ -1764,7 +1767,8 @@ public class ScheduleSnapshotTamperFreezeTests
 
             monkmode.Service1.ReassertHostsFailClosed(hosts, snap);
 
-            Assert.Equal(snapshotBlock, File.ReadAllText(hosts));   // schedule block re-asserted
+            // F35: hosts gets the block plus its end marker (the snapshot keeps the plain form).
+            Assert.Equal(snapshotBlock + monkmode.Service1.HostsEndMarker + "\r\n", File.ReadAllText(hosts));
             Assert.True(IsReadOnly(hosts));                          // ...and left fail-closed
         }
         finally { Cleanup(snap); Cleanup(hosts); }
@@ -1785,7 +1789,7 @@ public class ScheduleSnapshotTamperFreezeTests
 
             var user = "# my hosts\r\n127.0.0.1 my-dev-box";
             var written = monkmode.Service1.RepairHostsBlock(user, block);
-            Assert.Equal(user + "\r\n" + block, written);
+            Assert.Equal(user + "\r\n" + block + monkmode.Service1.HostsEndMarker + "\r\n", written);
             Assert.Equal(user, monkmode.Service1.StripMonkModeBlock(written!));
         }
         finally { Cleanup(snap); }
