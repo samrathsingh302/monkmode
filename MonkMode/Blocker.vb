@@ -1025,6 +1025,7 @@ Module Blocker
         CapReached = 1          ' P34: all MaxSlots slots in use - refuse, exit 3
         WriteRace = 2           ' the confirm-loop never saw its own write land - exit 2
         Frozen = 3              ' MAC-invalid config we may not re-stamp (B7) - exit 2
+        ScheduleArmed = 4       ' FX3 (F3): a schedule is armed - SD-c1 mutual exclusion, exit 3
     End Enum
 
     Friend Class ArmResult
@@ -1183,6 +1184,14 @@ Module Blocker
             Dim untilText As String = If(ini.GetKeyValue(sec, "Until"), "")
             If spec <> "" OrElse (startAt <> "" AndAlso untilText = "") Then n += 1
         Next
+        ' FX3 (F3): the GLOBAL [Schedule] Spec holds the guardian too - it is the schedule
+        ' that `monkmode schedule` writes, and ScheduleGuardArmedCount counts it as 1 when
+        ' the schedule writer maintains this field. Counting it here as well means SLOT
+        ' arithmetic can never silently zero a schedule's between-windows hold if the two
+        ' shapes ever coexist (the CLI now refuses to create that state, but a crash
+        ' between writes could still reach it). Same non-empty over-approximation the
+        ' guardian uses - it can only ever ADD a hold, never drop one.
+        If Not String.IsNullOrWhiteSpace(ini.GetKeyValue("Schedule", "Spec")) Then n += 1
         Return n
     End Function
 
@@ -1402,6 +1411,25 @@ Module Blocker
         Dim hasSlotsSection As Boolean = loaded AndAlso ini.GetKeyValue("Slots", "SlotCount") <> ""
         Dim slotCount As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
         Dim fresh As Boolean = ShouldFreshRewrite(serviceInstalled, macValid, hasSlotsSection, slotCount)
+
+        ' 1b. FX3 (F3) - THE WRITER BACKSTOP FOR THE OTHER HALF OF SD-c1, mirroring
+        '     WriteScheduleConfig's `If AnySlotArmed() Then Return`. A GLOBAL [Schedule]
+        '     Spec is not a slot, so nothing below would preserve it: the fresh-rewrite
+        '     path (service absent + no [Slots] section - exactly a schedule-only config,
+        '     which never writes one) builds a BRAND-NEW ini and stamps a fresh valid MAC
+        '     over it, silently deleting the schedule; the append path keeps the Spec only
+        '     until this slot retires, where the last-slot residual clear used to blank it
+        '     mid-window. DoBlock refuses first, but the refusal lives in the command and
+        '     this writer is Friend + test-driven, so the writer refuses too.
+        '     Gated on macValid because that is what makes the Spec TRUSTWORTHY (the same
+        '     gate ScheduleIsArmed uses): an unverifiable Spec with the service ABSENT is
+        '     P18's recovery hatch, and refusing there would wedge the user out of arming
+        '     at all. With the service INSTALLED an invalid MAC is refused anyway (step 2).
+        '     Refusing is side-effect free - nothing is armed, nothing is torn down.
+        If macValid AndAlso Not String.IsNullOrWhiteSpace(ini.GetKeyValue("Schedule", "Spec")) Then
+            result.Outcome = ArmOutcome.ScheduleArmed
+            Return result
+        End If
 
         ' 2. With the service PRESENT (or a usable config), an invalid MAC means FROZEN:
         '    re-stamping over an unverified config is the B7 fail-open bug, so refuse.

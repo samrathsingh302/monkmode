@@ -210,6 +210,60 @@ public class ClassifyTickTests
     }
 }
 
+// ---- 2b. FX3 (F3): may the [Schedule] residual be cleared? ----
+
+public class ScheduleResidualSpentTests
+{
+    private const string Hw = "2026-08-12 12:00:00";
+    private const string Spec = "v2;12345:0900-1700;sites=x.com;apps=";
+    private const string OpenWindow = "2026-08-12 18:00:00";
+    private const string ClosedWindow = "2026-08-12 06:00:00";
+
+    private static bool Spent(bool macValid = true, string spec = "", string activeUntil = "", string hw = Hw)
+        => monkmode.Service1.ScheduleResidualIsSpent(macValid, spec, activeUntil, hw);
+
+    [Fact]
+    public void NothingScheduled_IsSpent_SoTheClearStillHappens()
+    {
+        // The ONLY state the last-slot retire and the whole-machine teardown ever meet in
+        // practice, and the one the pre-FX3 unconditional clear was written for.
+        Assert.True(Spent());
+        Assert.True(Spent(activeUntil: ClosedWindow));          // a window that already closed
+        Assert.True(Spent(spec: "v2;not-a-window;sites=x.com")); // residue that parses to 0 windows
+    }
+
+    [Fact]
+    public void AnArmedScheduleOrAnOpenWindow_IsNotSpent()
+    {
+        // F3: retiring a SLOT must never take a live schedule down with it - blanking Spec
+        // between windows kills every future window, and blanking ActiveUntil mid-window
+        // collapses enforcementHeld and tears the machine down inside the window.
+        Assert.False(Spent(spec: Spec));
+        Assert.False(Spent(activeUntil: OpenWindow));
+        Assert.False(Spent(spec: Spec, activeUntil: OpenWindow));
+    }
+
+    [Fact]
+    public void AnUnreadableDeadlineOrHighWater_ReadsAsAnOpenWindow_SoNothingIsCleared()
+    {
+        // Fail-closed by inheritance from ScheduleActive: "we could not read it" can never
+        // mean "it is over". A decrypt failure hands the CIPHERTEXT through, which lands here.
+        Assert.False(Spent(activeUntil: "kJ8s+garbage=="));
+        Assert.False(Spent(activeUntil: OpenWindow, hw: "not-a-date"));
+        Assert.False(Spent(activeUntil: OpenWindow, hw: ""));
+    }
+
+    [Fact]
+    public void AnInvalidMac_CannotMakeAScheduleArmed_ButAnOpenWindowStillHolds()
+    {
+        // ScheduleArmed is macValid-gated (a tampered Spec is not a schedule), but an open
+        // window is judged on the deadline alone - so a frozen config is never the thing that
+        // gets its window cleared either.
+        Assert.True(Spent(macValid: false, spec: Spec));
+        Assert.False(Spent(macValid: false, spec: Spec, activeUntil: OpenWindow));
+    }
+}
+
 // ---- 3. P29 activation + the trigger channel: pure parts ----
 
 public class SlotActivationAndTriggerNameTests
@@ -1032,6 +1086,13 @@ public class SlotRetireLiveTests
         // nothing armed. [Time] Until/CoolOffUntil sit outside the canonical; the [Schedule]
         // pair is INSIDE it since v11 (FX1), so the re-stamp that follows the clear covers
         // those two as well as the slot/SlotCount changes.
+        //
+        // FX3 (F3): the [Schedule] half of that clear is now CONDITIONAL on the schedule being
+        // SPENT (ScheduleResidualIsSpent). This config has no schedule at all, so it is spent
+        // and the pair is still blanked - which is every config that reaches a teardown, since
+        // ClassifyTick only Lifts with scheduleArmed AND scheduleActive both False. What
+        // changed is the RETIRE path, where a live schedule now survives its last slot
+        // (RetiringTheLastSlot_LeavesAnArmedScheduleStanding).
         Wipe();
         try
         {
@@ -1383,6 +1444,185 @@ public class SlotRetireLiveTests
             Assert.Equal(2, SlotCount(Reload()));
         }
         finally { Wipe(); }
+    }
+
+    // ---- FX3 (F3): the DoBlock bypass - the OTHER half of SD-c1 ----
+
+    // The compact Spec the real CLI builder emits, so ParseSchedule reads >= 1 window from it
+    // (ScheduleArmed is the parse, not a non-empty check).
+    private static string Spec(string windows = "Mon-Fri 09:00-17:00", string site = "x.com")
+    {
+        string spec = "", err = "";
+        Assert.True(MonkMode.Blocker.TryBuildScheduleSpec(windows, new[] { site },
+                                                          Array.Empty<string>(), ref spec, ref err), err);
+        return spec;
+    }
+
+    // Re-stamp [Integrity] Mac over the current canonical with the config's OWN stored key -
+    // the fixture's copy of the writers' private RestampMacWithExistingKey. It exists ONLY to
+    // build the slot+schedule MIXED state, which no writer will create any more (that is the
+    // fix): the CLI refuses to arm beside a schedule, and the schedule writer refuses to
+    // scaffold over slots. A crash between two writes could still leave a config in it, which
+    // is exactly what the retire tests below have to be able to construct.
+    private static void RestampByHand(monkmode.IniFile ini)
+    {
+        var key = MonkMode.ConfigIntegrity.UnprotectKey(ini.GetKeyValue("Integrity", "Key"));
+        Assert.NotNull(key);
+        ini.SetKeyValue("Integrity", "Mac",
+            MonkMode.ConfigIntegrity.ComputeConfigMac(MonkMode.Tests.TestSvc.New().CanonicalFromIni(ini), key));
+    }
+
+    // Arm one slot, then graft a GLOBAL schedule onto the same config (optionally with an OPEN
+    // window) and re-stamp, so the result is MAC-valid - the mixed state a crash could leave.
+    private static void ArmSlotBesideAScheduleByHand(string spec, DateTime? windowOpenUntil = null)
+    {
+        Assert.True(Arm("a.com").Ok);
+        var ini = Reload();
+        ini.SetKeyValue("Schedule", "Spec", spec);
+        if (windowOpenUntil.HasValue)
+        {
+            ini.SetKeyValue("Schedule", "ActiveUntil",
+                new MonkMode.Simple3Des("mm_textbox").EncryptData(windowOpenUntil.Value.ToString(new CultureInfo("en-CA"))));
+        }
+        RestampByHand(ini);
+        ini.Save(MonkMode.Blocker.IniPath());
+        Assert.True(MonkMode.Blocker.ScheduleIsArmed());        // MAC-valid AND carrying a Spec
+    }
+
+    [Fact]
+    public void ArmSlot_RefusesBesideAnArmedSchedule_AndWritesNothing()
+    {
+        // THE F3 P1, at the writer. S2 removed `block`'s schedule refusal reasoning "v1.1
+        // blocks coexist" - true slot-vs-slot, false slot-vs-SCHEDULE, because a schedule is
+        // NOT a slot (global [Schedule] Spec, no [SlotN] section). With the service ABSENT
+        // ShouldFreshRewrite is True for a schedule-only config (MAC-valid, but no [Slots]
+        // section at all), so the arm scaffolded a brand-new ini and the Spec was simply gone.
+        Wipe();
+        try
+        {
+            MonkMode.Blocker.WriteScheduleConfig(Spec());
+            var before = File.ReadAllBytes(MonkMode.Blocker.IniPath());
+
+            // (a) service ABSENT - the fresh-scaffold branch, the destructive one.
+            var absent = MonkMode.Blocker.ArmSlot(new[] { "a.com" }, Array.Empty<string>(), "", null, Ends, false);
+            Assert.False(absent.Ok);
+            Assert.Equal(MonkMode.Blocker.ArmOutcome.ScheduleArmed, absent.Outcome);
+
+            // (b) service INSTALLED - the append branch, where the Spec used to survive only
+            // until this slot retired. Same refusal: the two shapes never coexist.
+            var installed = MonkMode.Blocker.ArmSlot(new[] { "a.com" }, Array.Empty<string>(), "", null, Ends, true);
+            Assert.False(installed.Ok);
+            Assert.Equal(MonkMode.Blocker.ArmOutcome.ScheduleArmed, installed.Outcome);
+
+            // Refusing is side-effect free, and the schedule is untouched.
+            Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));
+            Assert.True(MonkMode.Blocker.ScheduleIsArmed());
+            Assert.Equal(Spec(), Reload().GetKeyValue("Schedule", "Spec"));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ArmSlot_StillArmsWhenNoScheduleIsArmed_AndAfterOneIsCleared()
+    {
+        // The refusal must not be a latch: `schedule --clear` blanks the Spec, and a manual
+        // block has to be armable again immediately afterwards.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);                       // no schedule anywhere: unchanged
+            Wipe();
+
+            MonkMode.Blocker.WriteScheduleConfig(Spec());
+            MonkMode.Blocker.WriteScheduleConfig("");           // schedule --clear
+            Assert.False(MonkMode.Blocker.ScheduleIsArmed());
+            var armed = MonkMode.Blocker.ArmSlot(new[] { "a.com" }, Array.Empty<string>(), "", null, Ends, true);
+            Assert.True(armed.Ok);
+            Assert.Equal(1, SlotCount(Reload()));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void RetiringTheLastSlot_LeavesAnArmedScheduleStanding()
+    {
+        // BRANCH (b) OF THE SAME BUG, and the reason the retire path needed its own guard.
+        // With the service installed the arm appended a slot and the Spec survived - until
+        // that slot retired, when the last-slot NeutraliseV9Residual blanked [Schedule]
+        // Spec AND ActiveUntil. With a window OPEN that flipped ScheduleActive to False,
+        // enforcementHeld collapsed and the next tick tore the machine down MID-WINDOW.
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            var openUntil = DateTime.Now.AddHours(3);
+            ArmSlotBesideAScheduleByHand(Spec(), windowOpenUntil: openUntil);
+
+            Assert.True(Svc().RetireSlotAt(MonkMode.Blocker.IniPath(),
+                                           Path.Combine(dir, "monkmode_hosts.block"),
+                                           Path.Combine(dir, "hosts"), "1"));
+
+            var after = Reload();
+            Assert.Equal(0, SlotCount(after));                                  // the slot is gone
+            Assert.Equal(Spec(), after.GetKeyValue("Schedule", "Spec"));        // the schedule is NOT
+            var enc = new MonkMode.Simple3Des("mm_textbox");
+            var activeUntil = enc.DecryptData(after.GetKeyValue("Schedule", "ActiveUntil"));
+            Assert.Equal(openUntil.ToString(new CultureInfo("en-CA")), activeUntil);
+
+            // ...and the config is still MAC-valid (the [Schedule] pair is canonical since
+            // v11), so the service reads it rather than freezing on it - and reads it as a
+            // schedule-only block whose window is still open, i.e. HELD.
+            Assert.True(MonkMode.Blocker.ScheduleIsArmed());
+            var hw = DateTime.Now.ToString(new CultureInfo("en-CA"));
+            Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
+            Assert.True(monkmode.Service1.ScheduleArmed(true, after.GetKeyValue("Schedule", "Spec")));
+            var residual = monkmode.Service1.ClassifyHeartbeat(
+                true, monkmode.Service1.BlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 5),
+                false, false, monkmode.Service1.ScheduleActive(activeUntil, hw), true);
+            Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp, residual);
+            Assert.Equal(monkmode.Service1.TickAction.Restamp,
+                monkmode.Service1.ClassifyTick(true, SlotCount(after), residual));
+
+            // The guardian hold survives too: ArmedCount is recomputed from the slots that
+            // remain PLUS the schedule, so slot arithmetic can never zero a schedule's hold.
+            var armedCount = after.GetKeyValue("Guard", "ArmedCount");
+            Assert.Equal("1", armedCount);
+            Assert.True(mm_guard.Guardian.GuardArmedCountHolds(armedCount));
+        }
+        finally { Wipe(); Drop(dir); }
+    }
+
+    [Fact]
+    public void RetiringTheLastSlot_StillNeutralisesASPENTScheduleResidual()
+    {
+        // The guard is conditional, not a blanket "never clear": a Spec that no longer parses
+        // to a window (and no open window) is spent residue, and leaving it would hold the
+        // machine up for a schedule that does not exist. The [Time] Until sentinel is written
+        // either way - it is what stops a retired `--start +30d` slot wedging the teardown.
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            ArmSlotBesideAScheduleByHand("v2;not-a-window;sites=x.com");    // parses to 0 windows
+            Assert.False(monkmode.Service1.ScheduleArmed(true, "v2;not-a-window;sites=x.com"));
+
+            Assert.True(Svc().RetireSlotAt(MonkMode.Blocker.IniPath(),
+                                           Path.Combine(dir, "monkmode_hosts.block"),
+                                           Path.Combine(dir, "hosts"), "1"));
+
+            var after = Reload();
+            Assert.Equal("", after.GetKeyValue("Schedule", "Spec"));
+            Assert.Equal("", after.GetKeyValue("Schedule", "ActiveUntil"));
+            Assert.Equal("0", after.GetKeyValue("Guard", "ArmedCount"));
+            Assert.Equal(MonkMode.Blocker.ScheduleOnlyExpiredUntil,
+                         new MonkMode.Simple3Des("mm_textbox").DecryptData(after.GetKeyValue("Time", "Until")));
+            // Cleared UNDER a re-stamp, so the torn-down config is verifiable, not frozen.
+            var check = new MonkMode.IniFile(); check.Load(MonkMode.Blocker.IniPath());
+            var key = MonkMode.ConfigIntegrity.UnprotectKey(check.GetKeyValue("Integrity", "Key"));
+            Assert.True(MonkMode.ConfigIntegrity.ConfigMacIsValid(
+                MonkMode.Blocker.CanonicalFromIni(check), check.GetKeyValue("Integrity", "Mac"), key));
+        }
+        finally { Wipe(); Drop(dir); }
     }
 
     [Fact]

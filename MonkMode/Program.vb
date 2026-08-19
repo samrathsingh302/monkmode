@@ -357,6 +357,30 @@ Module Program
         ' arm refusals left are the cap (P34) and a frozen config, both raised by ArmSlot
         ' BEFORE it touches anything. `add` and `schedule` keep their own refusals until
         ' schedules become slots (S3b).
+        '
+        ' FX3 (F3): ...EXCEPT the SCHEDULE half of SD-c1, restored here. S2's reasoning
+        ' ("v1.1 blocks coexist") is true SLOT-vs-SLOT and FALSE slot-vs-SCHEDULE: a
+        ' schedule is not a slot. It lives in the GLOBAL [Schedule] Spec/ActiveUntil with
+        ' no [SlotN] section of its own, so arming a block beside one destroyed it two
+        ' ways - with the service absent ShouldFreshRewrite scaffolds a BRAND-NEW config
+        ' over it (the Spec is gone at arm time), and with the service present the Spec
+        ' survives only until that slot retires, when the last-slot NeutraliseV9Residual
+        ' blanked the pair and tore an OPEN scheduled window down mid-window. `schedule`
+        ' has refused beside armed slots since S3b; this is the same refusal the other way
+        ' round, raised BEFORE any side effect (nothing armed, nothing written).
+        '
+        ' Fail-safe by construction: ScheduleIsArmed is macValid-gated, so a tampered or
+        ' unreadable config reads NOT armed here and falls through to ArmSlot's own frozen-
+        ' config refusal instead (with the service installed that is unconditional). The
+        ' one path that still scaffolds over an unverifiable [Schedule] Spec is service-
+        ' ABSENT + MAC-INVALID, i.e. P18's deliberate recovery hatch: nothing is enforcing,
+        ' the stored Spec cannot be trusted anyway, and refusing there would leave the user
+        ' unable to arm anything ever again. ArmSlot backstops this refusal independently.
+        If Blocker.ScheduleIsArmed() Then
+            Console.Error.WriteLine("A schedule is armed, and a schedule and a manual block can't run together.")
+            Console.Error.WriteLine("Clear it first with 'monkmode schedule --clear' (any open window still runs to its end), then start the block.")
+            Return 3
+        End If
 
         ' C4: `--commit` arms a COMMITTED block (self-serve cooling-off disabled = the
         ' partner code + expiry are the only exits). The flag is MAC-covered from birth.
@@ -385,6 +409,13 @@ Module Program
                 Console.Error.WriteLine(line)
             Next
             Return Blocker.ExitCapReached
+        ElseIf arm.Outcome = Blocker.ArmOutcome.ScheduleArmed Then
+            ' FX3 (F3): the writer's own SD-c1 refusal. Normally unreachable (the check above
+            ' already refused), so reaching it means the schedule was armed in the window
+            ' between the two reads - same refusal, same wording, nothing written.
+            Console.Error.WriteLine("A schedule is armed, and a schedule and a manual block can't run together.")
+            Console.Error.WriteLine("Clear it first with 'monkmode schedule --clear' (any open window still runs to its end), then start the block.")
+            Return 3
         ElseIf arm.Outcome = Blocker.ArmOutcome.Frozen Then
             ' B7: the stored config failed its integrity check. Re-stamping it would
             ' re-bless a tamper, so MonkMode refuses to change anything at all.

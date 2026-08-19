@@ -1184,7 +1184,6 @@ Public Class Service1
 
             Dim remaining As Integer = count - 1
             iniFile.SetKeyValue("Slots", "SlotCount", remaining.ToString(CultureInfo.InvariantCulture))
-            iniFile.SetKeyValue("Guard", "ArmedCount", CountGuardedSlots(iniFile, remaining).ToString(CultureInfo.InvariantCulture))
             ' THE WEDGE THIS AVOIDS: the v9 [Time] Until mirror is the EXTEND-ONLY guard
             ' horizon, i.e. the latest moment any slot COULD have held - so a slot armed
             ' `--start +30d --for 1h` and then retired early by a partner code would leave the
@@ -1193,7 +1192,17 @@ Public Class Service1
             ' would sit with hosts blocked and nothing armed for a month. The moment the last
             ' slot goes, every block has genuinely exited and the mirror has no authority left
             ' to represent, so it is neutralised here exactly as TeardownAll neutralises it.
-            If remaining = 0 Then NeutraliseV9Residual(iniFile)
+            ' FX3 (F3): macValid:=True is not an assumption - this retire returned False above
+            ' unless the config verified, and nothing since has changed the bytes' provenance.
+            ' The residual clear is now conditional: a GENUINELY ARMED schedule (or an open
+            ' window) keeps its [Schedule] pair, so the last slot leaving can never take a
+            ' schedule down with it. ClassifyTick then reads zero slots + a Restamp residual
+            ' (the c2 between-windows hold) and keeps the machine up, exactly as it does for a
+            ' schedule-only config - which is precisely the shape left behind here.
+            If remaining = 0 Then NeutraliseV9Residual(iniFile, True)
+            ' The guard hold is recomputed from the slots that remain PLUS the surviving global
+            ' schedule (FX3), so a schedule that outlives every slot still holds the guardian.
+            iniFile.SetKeyValue("Guard", "ArmedCount", CountGuardedSlots(iniFile, remaining).ToString(CultureInfo.InvariantCulture))
             ' The v9 list mirror is a PROJECTION of the slot set (the CLI maintains it at every
             ' arm), and retire is the inverse of arm: without this, a finished 1-hour block's
             ' apps would keep being killed for the whole life of an unrelated 30-day one - the
@@ -1272,6 +1281,11 @@ Public Class Service1
             Dim untilText As String = If(ini.GetKeyValue(sec, "Until"), "")
             If spec <> "" OrElse (startAt <> "" AndAlso untilText = "") Then n += 1
         Next
+        ' FX3 (F3): the GLOBAL [Schedule] Spec counts too - the CLI's GuardedSlotCount gained
+        ' the identical term, so retiring a slot can never zero out the guardian hold that a
+        ' surviving schedule owns. Same non-empty over-approximation the guardian itself uses:
+        ' it can only ever ADD a hold, never drop one.
+        If Not String.IsNullOrWhiteSpace(ini.GetKeyValue("Schedule", "Spec")) Then n += 1
         Return n
     End Function
 
@@ -1402,9 +1416,17 @@ Public Class Service1
             ' NextSlotId is NOT reset (P17: ids never restart, even across a teardown).
             iniFile.AddSection("Guard")
             iniFile.SetKeyValue("Guard", "HoldUntil", "")
-            iniFile.SetKeyValue("Guard", "ArmedCount", "0")
             ' The v9 residual, neutralised so an interrupted teardown always converges.
-            NeutraliseV9Residual(iniFile)
+            ' FX3 (F3): the [Schedule] half of that clear is now conditional on the schedule
+            ' being SPENT. Unchanged in practice on this path - TeardownAll is only ever
+            ' reached through ClassifyTick's Lift arm, which requires scheduleArmed=False AND
+            ' scheduleActive=False, i.e. exactly "spent" - so the pair is still cleared and
+            ' the teardown still converges. What it removes is the possibility of this sub
+            ' being the thing that ends a live schedule if it is ever called from anywhere
+            ' else. ArmedCount is therefore derived from what SURVIVED rather than hardcoded
+            ' to 0, so the two can never disagree about whether a schedule still holds.
+            NeutraliseV9Residual(iniFile, macValid)
+            iniFile.SetKeyValue("Guard", "ArmedCount", CountGuardedSlots(iniFile, 0).ToString(CultureInfo.InvariantCulture))
             iniFile.SetKeyValue("Process", "List", "null")
             iniFile.SetKeyValue("User", "CustomSites", "null")
             ' B7: only ever re-stamp bytes just verified. Unreachable with an invalid MAC
@@ -1418,6 +1440,20 @@ Public Class Service1
         End Try
     End Function
 
+    ' FX3 (F3) - PURE: may the [Schedule] pair be cleared, i.e. is the schedule SPENT? Only
+    ' when it is neither ARMED (a Spec that still parses to >=1 window, under a valid MAC -
+    ' tomorrow's windows are still owed) nor ACTIVE (a window open right now, which SD1 says
+    ' outranks every exit). Anything else - a live schedule, an open window, an unreadable
+    ' ActiveUntil - is NOT spent and its two fields are left exactly as they are. The two
+    ' halves are judged as ONE unit because they are one schedule: clearing either alone
+    ' would be a partial teardown of something still holding. Fail-closed by inheritance:
+    ' ScheduleActive treats a non-empty-but-unparseable deadline as OPEN, so "we could not
+    ' read it" can never mean "it is over".
+    Friend Shared Function ScheduleResidualIsSpent(ByVal macValid As Boolean, ByVal specText As String,
+                                                   ByVal activeUntilText As String, ByVal highWaterText As String) As Boolean
+        Return (Not ScheduleArmed(macValid, specText)) AndAlso (Not ScheduleActive(activeUntilText, highWaterText))
+    End Function
+
     ' Clear every v9 mirror field that can HOLD (the residual's four inputs). [Time] Until
     ' and [Time] CoolOffUntil sit OUTSIDE the canonical; the [Schedule] pair is INSIDE it as
     ' of v11 (FX1), so this DOES move the MAC and the caller's re-stamp - which runs AFTER
@@ -1425,11 +1461,38 @@ Public Class Service1
     ' config verifiable rather than frozen. Called at exactly the two moments the mirror stops
     ' representing anything: the last slot retiring, and the whole-machine teardown. Never
     ' called while a slot survives, because until then the mirror's job is to over-block.
-    Private Sub NeutraliseV9Residual(ByVal ini As IniFile)
+    Private Sub NeutraliseV9Residual(ByVal ini As IniFile, ByVal macValid As Boolean)
         ini.SetKeyValue("Time", "Until", encryptionW.EncryptData(ScheduleOnlyExpiredUntil))
         ini.SetKeyValue("Time", "CoolOffUntil", "")
-        ini.SetKeyValue("Schedule", "Spec", "")
-        ini.SetKeyValue("Schedule", "ActiveUntil", "")
+        ' FX3 (F3): the [Schedule] pair is cleared ONLY when the schedule is spent. It used to
+        ' be blanked unconditionally, which was right for the whole-machine teardown (reached
+        ' only with the schedule already down) but WRONG for the last slot retiring: a
+        ' `monkmode block` armed beside a schedule (S2 dropped that refusal - restored in
+        ' FX3) took its Spec down with it when it ended, and if a scheduled window was open
+        ' at that moment ScheduleActive went False, enforcementHeld collapsed and the next
+        ' tick tore the machine down MID-WINDOW. The CLI now refuses to create that state at
+        ' all; this is the belt to that braces, for a config that reached it by crash timing.
+        Dim spec As String = If(ini.GetKeyValue("Schedule", "Spec"), "")
+        Dim activeUntil As String = ""
+        Dim highWater As String = ""
+        ' Both stored encrypted. A decrypt failure keeps the CIPHERTEXT as the value: non-empty
+        ' and unparseable, which ScheduleActive reads as an OPEN window => not spent => keep.
+        Try
+            Dim rawActive As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+            activeUntil = If(rawActive = "", "", encryptionW.DecryptData(rawActive))
+        Catch ex As Exception
+            activeUntil = If(ini.GetKeyValue("Schedule", "ActiveUntil"), "")
+        End Try
+        Try
+            Dim rawHw As String = ini.GetKeyValue("Time", "HighWater")
+            highWater = If(rawHw = "", "", encryptionW.DecryptData(rawHw))
+        Catch ex As Exception
+            highWater = ""
+        End Try
+        If ScheduleResidualIsSpent(macValid, spec, activeUntil, highWater) Then
+            ini.SetKeyValue("Schedule", "Spec", "")
+            ini.SetKeyValue("Schedule", "ActiveUntil", "")
+        End If
     End Sub
 
     Private Sub TeardownAll()
