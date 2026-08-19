@@ -1473,7 +1473,7 @@ Module Blocker
                        committed:=committed, coolOffSeconds:=coolOffSeconds, allSessionKill:=allSessionKill).PartnerCode
     End Function
 
-    ' B7/B4: builds the v10 two-level canonical the MAC is computed over, from a
+    ' B7/B4: builds the v11 two-level canonical the MAC is computed over, from a
     ' loaded ini - the global header, then one 16-line block per slot for
     ' pos = 1 To the CLAMPED [Slots] SlotCount. Every party (this writer, plus the
     ' service/guardian/notifier readers) must derive a byte-identical string or the
@@ -1492,6 +1492,17 @@ Module Blocker
         Dim highWaterPlain As String = If(highWaterEnc = "", "", crypt.DecryptData(highWaterEnc))
         Dim nowPlain As String = If(nowEnc = "", "", crypt.DecryptData(nowEnc))
         Dim guardHoldPlain As String = If(guardHoldEnc = "", "", crypt.DecryptData(guardHoldEnc))
+
+        ' FX1 (v11): the GLOBAL [Schedule] pair - the entire enforcement state of a
+        ' SCHEDULE-ONLY (v9-shaped, slot-less) config, which `monkmode schedule` still
+        ' writes and the service still enforces from. Spec is plaintext-as-stored (a
+        ' window rule is not a secret; the MAC is its protection); the service-written
+        ' ActiveUntil is an ENCRYPTED datetime, decrypted like the globals above.
+        ' Deliberately distinct local names from the PER-SLOT pair read inside the loop
+        ' below - they are different fields and must never be confused.
+        Dim globalScheduleSpec As String = ini.GetKeyValue("Schedule", "Spec")
+        Dim globalScheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+        Dim globalScheduleActivePlain As String = If(globalScheduleActiveEnc = "", "", crypt.DecryptData(globalScheduleActiveEnc))
 
         ' The CLAMPED count is BOTH the header value and the loop bound, so a forged
         ' SlotCount can only ever build a canonical nothing can match -> freeze.
@@ -1532,6 +1543,8 @@ Module Blocker
                                              slotCount,
                                              guardHoldPlain,
                                              ini.GetKeyValue("Guard", "ArmedCount"),
+                                             globalScheduleSpec,
+                                             globalScheduleActivePlain,
                                              slots.ToString())
     End Function
 

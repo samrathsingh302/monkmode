@@ -20,9 +20,10 @@
 //
 // WHAT THIS PINS (the things a future edit could break silently, each with the
 // failure it prevents):
-//   - the exact v10 wire format, as a byte literal for a two-slot config: the
-//     header (HighWater/Now/NextSlotId/SlotCount/GuardHoldUntil/GuardArmedCount)
-//     then 16 "SlotN.Field=" lines per slot, ascending, every line vbLf-terminated
+//   - the exact v11 wire format, as a byte literal for a two-slot config: the
+//     header (HighWater/Now/NextSlotId/SlotCount/GuardHoldUntil/GuardArmedCount and,
+//     since v11/FX1, the GLOBAL ScheduleSpec/ScheduleActiveUntil - the schedule-only
+//     config's enforcement state) then 16 "SlotN.Field=" lines per slot, ascending, every line vbLf-terminated
 //     INCLUDING the last. A drift in order, naming or separators would silently
 //     break cross-party MAC agreement and freeze every block.
 //   - ParseSlotCount's fail-closed clamp: blank/garbage/negative => 0 slots, above
@@ -49,9 +50,9 @@ namespace MonkMode.Tests;
 public class SlotCanonicalTests
 {
     [Fact]
-    public void V10_ByteLiteral_TwoSlots()
+    public void V11_ByteLiteral_TwoSlots()
     {
-        // The pinned v10 skeleton: a two-slot config - Slot1 ACTIVE (Until set, a
+        // The pinned v11 skeleton: a two-slot config - Slot1 ACTIVE (Until set, a
         // configured cool-off, a partner verifier), Slot2 PENDING (StartAt +
         // DurationSeconds, no Until, url patterns, all-session kill). Slot STATE is
         // derived from these fields, never stored, so this literal is also the pin
@@ -63,18 +64,24 @@ public class SlotCanonicalTests
             2, "6", "2026-08-10 7:00:00 a.m.", "7200", "", "instagram.com;", "", "instagram.com/reels|", "yes",
             "", "", "", "", "QSALT", "QHASH", "", "no");
 
+        // FX1 (v11): the header carries the GLOBAL [Schedule] pair too - here a
+        // schedule-only rule armed BESIDE the two slots, so the literal pins that the
+        // global fields and the per-slot ones are distinct lines that cannot be confused.
         var canonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            "v10", "2026-08-09 3:00:00 p.m.", "2026-08-09 3:00:10 p.m.", "7", 2,
-            "2026-08-09 11:59:00 p.m.", "1", slot1 + slot2);
+            "v11", "2026-08-09 3:00:00 p.m.", "2026-08-09 3:00:10 p.m.", "7", 2,
+            "2026-08-09 11:59:00 p.m.", "1",
+            "v1;12345:0900-1700;sites=news.com;apps=", "2026-08-09 5:00:00 p.m.", slot1 + slot2);
 
         Assert.Equal(
-            "v10\n" +
+            "v11\n" +
             "HighWater=2026-08-09 3:00:00 p.m.\n" +
             "Now=2026-08-09 3:00:10 p.m.\n" +
             "NextSlotId=7\n" +
             "SlotCount=2\n" +
             "GuardHoldUntil=2026-08-09 11:59:00 p.m.\n" +
             "GuardArmedCount=1\n" +
+            "ScheduleSpec=v1;12345:0900-1700;sites=news.com;apps=\n" +
+            "ScheduleActiveUntil=2026-08-09 5:00:00 p.m.\n" +
             "Slot1.Id=5\n" +
             "Slot1.StartAt=\n" +
             "Slot1.DurationSeconds=\n" +
@@ -127,7 +134,7 @@ public class SlotCanonicalTests
         Assert.Equal(MonkMode.ConfigIntegrity.MaxSlots, monkmode.ConfigIntegrity.MaxSlots);
         Assert.Equal(MonkMode.ConfigIntegrity.MaxSlots, mm_guard.ConfigIntegrity.MaxSlots);
         Assert.Equal(MonkMode.ConfigIntegrity.MaxSlots, mm_notify.ConfigIntegrity.MaxSlots);
-        Assert.Equal("v10", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
+        Assert.Equal("v11", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
     }
 
     [Theory]
@@ -338,13 +345,17 @@ internal static class OneSlot
     public const string GuardArmedCount = "1";
     public const string Id = "1";
 
+    // FX1 (v11): the two GLOBAL [Schedule] header fields are optional trailing arguments,
+    // defaulting to "" - a SLOT-shaped config (what every caller of this shim models)
+    // carries no global schedule. Tests that need the schedule-only shape pass them.
     public static string Canonical(
         string until, string apps, string sites, string now, string highWater, string coolOffUntil,
         string partnerSalt, string partnerHash, string partnerUnlockedAt, string committed,
-        string scheduleSpec, string scheduleActiveUntil, string coolOffDuration, string allSession) =>
+        string scheduleSpec, string scheduleActiveUntil, string coolOffDuration, string allSession,
+        string globalScheduleSpec = "", string globalScheduleActiveUntil = "") =>
         MonkMode.ConfigIntegrity.BuildCanonical(
             MonkMode.ConfigIntegrity.CurrentSchemaVersion, highWater, now, NextSlotId, 1,
-            GuardHoldUntil, GuardArmedCount,
+            GuardHoldUntil, GuardArmedCount, globalScheduleSpec, globalScheduleActiveUntil,
             MonkMode.ConfigIntegrity.BuildSlotCanonical(
                 1, Id, "", "", until, sites, apps, "", allSession,
                 scheduleSpec, scheduleActiveUntil, coolOffUntil, coolOffDuration,

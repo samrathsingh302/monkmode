@@ -1029,8 +1029,9 @@ public class SlotRetireLiveTests
         // P39 step (1). It also NEUTRALISES the v9 residual: leaving a future [Time] Until or
         // an armed [Schedule] Spec behind would make the next tick's residual HOLD, and a
         // half-finished teardown could then never complete - hosts blocked forever with
-        // nothing armed. All those keys sit outside the v10 canonical, so writing them cannot
-        // move the MAC; the re-stamp is for the slot/SlotCount changes.
+        // nothing armed. [Time] Until/CoolOffUntil sit outside the canonical; the [Schedule]
+        // pair is INSIDE it since v11 (FX1), so the re-stamp that follows the clear covers
+        // those two as well as the slot/SlotCount changes.
         Wipe();
         try
         {

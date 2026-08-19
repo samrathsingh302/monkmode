@@ -77,11 +77,19 @@ Friend Module ConfigIntegrity
     ' v9 (D2c: added the [Process] AllSession all-session-app-kill flag) ->
     ' v10 (v1.1 S1: the MULTI-BLOCK clean break - a two-level canonical, a global
     ' header plus one 16-line block per armed slot; every v9 single-block field
-    ' moved into its slot; the "null" no-apps sentinel retired for "").
+    ' moved into its slot; the "null" no-apps sentinel retired for "") ->
+    ' v11 (v1.1 FX1: the GLOBAL [Schedule] Spec/ActiveUntil brought back INSIDE the
+    ' canonical - the F1 fail-OPEN. v10 moved schedules PER-SLOT, but `monkmode
+    ' schedule` still writes a v9-shaped, SLOT-LESS config whose enforcing values are
+    ' the global [Schedule] Spec/ActiveUntil the service reads every tick. With them
+    ' outside the canonical, blanking Spec in a text editor left macValid TRUE, the
+    ' residual heartbeat saw no armed schedule beside a past-sentinel Until -> Lift ->
+    ' TeardownAll: a live schedule block torn down MID-WINDOW. Under v9 the identical
+    ' edit failed the MAC and FROZE the block; v11 restores that).
     ' The four copies MUST share this value or the parties would stamp/verify
     ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v10"
+    Friend Const CurrentSchemaVersion As String = "v11"
 
     ' The hard ceiling on concurrent blocks (v1.1). Slots live in the ini as the
     ' fixed sections [Slot1]..[Slot8], keyed by POSITION (ids live in the slot's Id
@@ -102,7 +110,8 @@ Friend Module ConfigIntegrity
     '
     ' v10 (the multi-block clean break) made it TWO-LEVEL:
     '   - BuildCanonical emits the header (HighWater, Now, NextSlotId, SlotCount,
-    '     GuardHoldUntil, GuardArmedCount) and then the caller-built slotBlock;
+    '     GuardHoldUntil, GuardArmedCount, and since v11 the GLOBAL ScheduleSpec/
+    '     ScheduleActiveUntil) and then the caller-built slotBlock;
     '   - BuildSlotCanonical emits the 16 "SlotN.Field=" lines for ONE slot, and
     '     each wrapper concatenates pos = 1 To ParseSlotCount(...) of them,
     '     ascending. There is still exactly ONE MAC over the WHOLE file: a per-slot
@@ -178,7 +187,10 @@ Friend Module ConfigIntegrity
     ' -> macValid=False -> the whole block FREEZES (B7, automatic once they are in the
     ' canonical), and the SERVICE is the sole writer of ScheduleActiveUntil (the
     ' window->duration conversion, HighWater-anchored) exactly as it is of CoolOffUntil.
-    ' v10: PER-SLOT - a schedule is one slot's rule, not the machine's.
+    ' v10: PER-SLOT - a schedule is one slot's rule, not the machine's. v11 (FX1): the
+    ' GLOBAL pair is covered AS WELL, because the shipping `monkmode schedule` writer
+    ' still produces the slot-less v9 shape and the service still enforces from it - both
+    ' places a schedule can live are now MAC-covered, and neither is a lift path.
     '
     ' C6b (configurable cooling-off duration): the canonical also includes CoolOffDuration
     ' - the CLI-configured cooling-off wait in SECONDS (plaintext-as-stored like Committed/
@@ -208,12 +220,28 @@ Friend Module ConfigIntegrity
     ' empty string for "no apps". Removing that special case removes the last place the
     ' four wrappers could disagree about WHEN to decrypt, and an empty app list can only
     ' ever under-KILL, which is exactly what "no apps" means.
+    ' FX1 (v11): the GLOBAL [Schedule] Spec/ActiveUntil are header fields too. They are
+    ' NOT the per-slot ScheduleSpec/ScheduleActiveUntil above (those describe ONE slot's
+    ' rule and are prefixed "SlotN." on the wire, so the two can never be confused): they
+    ' are the whole enforcement state of the v9-shaped SCHEDULE-ONLY config that
+    ' `monkmode schedule` still writes - a file with no [Slots] section at all, where the
+    ' unauthenticated Spec IS the armed block. The service reads both every tick
+    ' (ScheduleActive / ScheduleArmed / ParseSchedule), so leaving them outside the MAC
+    ' made a text-editor blank of Spec a one-edit TEARDOWN of a live window (fail-open,
+    ' the one direction the design forbids). Covered here, that edit fails the MAC ->
+    ' macValid False -> Hold -> the block FREEZES, exactly like every other covered field.
+    ' Spec is plaintext-as-stored (a window rule is not a secret; the MAC is its
+    ' protection, like Sites/[Partner]); ActiveUntil is a DECRYPTED en-CA datetime like
+    ' HighWater/[Guard] HoldUntil. Both "" when absent.
+    '
     ' The GLOBAL header, then the caller-built slotBlock (already the concatenation of
     ' BuildSlotCanonical(pos) for pos = 1 To slotCount, ascending). slotCount is typed
     ' Integer precisely so a RAW ini string can never reach this line: the wrappers must
     ' hand over the ParseSlotCount-CLAMPED value, which is also their loop bound, so the
-    ' printed count and the emitted blocks can never disagree.
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal highWater As String, ByVal now As String, ByVal nextSlotId As String, ByVal slotCount As Integer, ByVal guardHoldUntil As String, ByVal guardArmedCount As String, ByVal slotBlock As String) As String
+    ' printed count and the emitted blocks can never disagree. slotBlock stays LAST (it is
+    ' the tail, not a line), so v11's two new fields append at the end of the header and
+    ' parameter order still IS line order.
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal highWater As String, ByVal now As String, ByVal nextSlotId As String, ByVal slotCount As Integer, ByVal guardHoldUntil As String, ByVal guardArmedCount As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal slotBlock As String) As String
         Return schemaVersion & vbLf &
                "HighWater=" & highWater & vbLf &
                "Now=" & now & vbLf &
@@ -221,6 +249,8 @@ Friend Module ConfigIntegrity
                "SlotCount=" & slotCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & vbLf &
                "GuardHoldUntil=" & guardHoldUntil & vbLf &
                "GuardArmedCount=" & guardArmedCount & vbLf &
+               "ScheduleSpec=" & scheduleSpec & vbLf &
+               "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf &
                slotBlock
     End Function
 

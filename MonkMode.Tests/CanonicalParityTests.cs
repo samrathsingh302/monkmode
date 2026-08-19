@@ -209,6 +209,11 @@ public class CanonicalParityTests
             "SlotCount=1\n" +
             "GuardHoldUntil=" + OneSlot.GuardHoldUntil + "\n" +
             "GuardArmedCount=" + OneSlot.GuardArmedCount + "\n" +
+            // FX1 (v11): the GLOBAL [Schedule] pair - empty on this SLOT-shaped ini
+            // (WriteSlot1 writes no global [Schedule] section). The populated case is
+            // GlobalSchedule_AllFourWrappers_AgreeAndDecryptOnlyTheDeadline below.
+            "ScheduleSpec=\n" +
+            "ScheduleActiveUntil=\n" +
             "Slot1.Id=" + OneSlot.Id + "\n" +
             "Slot1.StartAt=\n" +
             "Slot1.DurationSeconds=\n" +
@@ -226,6 +231,80 @@ public class CanonicalParityTests
             "Slot1.PartnerUnlockedAt=" + PartnerUnlockedAtPlain + "\n" +
             "Slot1.Committed=" + CommittedPlain + "\n",
             CliCanonical());
+    }
+
+    [Fact]
+    public void GlobalSchedule_AllFourWrappers_AgreeAndDecryptOnlyTheDeadline()
+    {
+        // FX1 (v11): the wrapper-level pin for the two GLOBAL [Schedule] fields - the ones
+        // a SCHEDULE-ONLY (slot-less) config enforces from. The split must be: Spec passes
+        // through VERBATIM (plaintext-as-stored, like Sites/[Partner]) and ActiveUntil is
+        // DECRYPTED (an encrypted datetime, like HighWater). If one wrapper got that split
+        // wrong - or forgot the fields entirely - it would build a different canonical from
+        // the writer, every MAC check would fail and every block would freeze silently.
+        // A slot-less ini, exactly like `monkmode schedule` writes.
+        static void FillScheduleOnly(Action<string, string, string> set)
+        {
+            set("Time", "HighWater", HighWaterEnc);
+            set("CurrentTime", "Now", NowEnc);
+            set("Guard", "ArmedCount", "1");
+            set("Schedule", "Spec", ScheduleSpecPlain);
+            set("Schedule", "ActiveUntil", ScheduleActiveUntilEnc);
+        }
+
+        var cliIni = new MonkMode.IniFile();
+        FillScheduleOnly((s, k, v) => cliIni.SetKeyValue(s, k, v));
+        var srvIni = new monkmode.IniFile();
+        FillScheduleOnly((s, k, v) => srvIni.SetKeyValue(s, k, v));
+        var guardIni = new mm_guard.IniFile();
+        FillScheduleOnly((s, k, v) => guardIni.SetKeyValue(s, k, v));
+        var notifyIni = new mm_notify.IniFile();
+        FillScheduleOnly((s, k, v) => notifyIni.SetKeyValue(s, k, v));
+
+        var cli = MonkMode.Blocker.CanonicalFromIni(cliIni);
+        Assert.Equal(
+            Ver + "\n" +
+            "HighWater=" + HighWaterPlain + "\n" +
+            "Now=" + NowPlain + "\n" +
+            "NextSlotId=\n" +
+            "SlotCount=0\n" +
+            "GuardHoldUntil=\n" +
+            "GuardArmedCount=1\n" +
+            "ScheduleSpec=" + ScheduleSpecPlain + "\n" +
+            "ScheduleActiveUntil=" + ScheduleActiveUntilPlain + "\n",
+            cli);
+        Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
+        Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
+        Assert.Equal(cli, new mm_notify.Form1().CanonicalFromIni(notifyIni));
+
+        // ...and the MAC over that canonical rejects the F1 edit (Spec blanked in a text
+        // editor, everything else untouched) - the freeze that replaces the teardown.
+        var stamped = MonkMode.ConfigIntegrity.ComputeConfigMac(cli, Key);
+        var tamperedIni = new MonkMode.IniFile();
+        FillScheduleOnly((s, k, v) => tamperedIni.SetKeyValue(s, k, v));
+        tamperedIni.SetKeyValue("Schedule", "Spec", "");
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(
+            MonkMode.Blocker.CanonicalFromIni(tamperedIni), stamped, Key));
+    }
+
+    [Fact]
+    public void NegativeContract_NotDecryptingTheGlobalScheduleDeadline_DoesNotMatch()
+    {
+        // The mirror of the slot-Until contract, for the GLOBAL [Schedule] ActiveUntil: a
+        // wrapper that left the ciphertext in the canonical (or that decrypted the Spec,
+        // which is stored plaintext) diverges from every other party. Pin both directions.
+        var correct = MonkMode.ConfigIntegrity.BuildCanonical(Ver, HighWaterPlain, NowPlain, "", 0, "", "1",
+            ScheduleSpecPlain, ScheduleActiveUntilPlain, "");
+        var buggyDeadline = MonkMode.ConfigIntegrity.BuildCanonical(Ver, HighWaterPlain, NowPlain, "", 0, "", "1",
+            ScheduleSpecPlain, ScheduleActiveUntilEnc, "");
+        var buggySpec = MonkMode.ConfigIntegrity.BuildCanonical(Ver, HighWaterPlain, NowPlain, "", 0, "", "1",
+            new MonkMode.Simple3Des(Passphrase).EncryptData(ScheduleSpecPlain), ScheduleActiveUntilPlain, "");
+
+        Assert.NotEqual(correct, buggyDeadline);
+        Assert.NotEqual(correct, buggySpec);
+        var macOverCorrect = MonkMode.ConfigIntegrity.ComputeConfigMac(correct, Key);
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(buggyDeadline, macOverCorrect, Key));
+        Assert.False(MonkMode.ConfigIntegrity.ConfigMacIsValid(buggySpec, macOverCorrect, Key));
     }
 
     [Fact]

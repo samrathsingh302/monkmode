@@ -1381,8 +1381,10 @@ Public Class Service1
     ' Nothing here can under-block, and nothing can wedge, because every intermediate state
     ' re-enters TeardownAll.
     '
-    ' (1) also clears the v9 residual's holding fields. They are all outside the v10 canonical,
-    ' so writing them cannot move the MAC - but leaving a future [Time] Until or an armed
+    ' (1) also clears the v9 residual's holding fields. Since v11 (FX1) two of them - the
+    ' [Schedule] pair - ARE canonical fields, so the re-stamp below is load-bearing for them
+    ' as well as for the slot/SlotCount changes; the point of clearing them is unchanged.
+    ' Leaving a future [Time] Until or an armed
     ' [Schedule] Spec behind would make the next tick's residual HOLD and a half-finished
     ' teardown could then never complete (hosts blocked forever with nothing armed). This is
     ' also what S4 needs: the guardian's raw floor must see zero slot keys AND no v9 hold, or
@@ -1416,9 +1418,11 @@ Public Class Service1
         End Try
     End Function
 
-    ' Clear every v9 mirror field that can HOLD (the residual's four inputs). All of them sit
-    ' OUTSIDE the v10 canonical, so this cannot move the MAC - the caller's re-stamp is for
-    ' the slot/SlotCount changes. Called at exactly the two moments the mirror stops
+    ' Clear every v9 mirror field that can HOLD (the residual's four inputs). [Time] Until
+    ' and [Time] CoolOffUntil sit OUTSIDE the canonical; the [Schedule] pair is INSIDE it as
+    ' of v11 (FX1), so this DOES move the MAC and the caller's re-stamp - which runs AFTER
+    ' this, and only when the config was already MAC-valid - is what keeps the torn-down
+    ' config verifiable rather than frozen. Called at exactly the two moments the mirror stops
     ' representing anything: the last slot retiring, and the whole-machine teardown. Never
     ' called while a slot survives, because until then the mirror's job is to over-block.
     Private Sub NeutraliseV9Residual(ByVal ini As IniFile)
@@ -2061,10 +2065,14 @@ Public Class Service1
             ' AndAlso ParseSchedule(Spec) yields >=1 window); the guardian uses its cheaper
             ' Spec-non-empty over-approximation (Guardian.ScheduleArmed, no 4th parser copy).
             Dim scheduleArmedNow As Boolean = ScheduleArmed(macValid, iniScheduleSpec)
-            ' v1.1 S3b: this is now the V9 RESIDUAL, not the machine's exit decision. Every
-            ' input to it - [Time] Until, [Time] CoolOffUntil, [Partner] UnlockedAt,
-            ' [Schedule] ActiveUntil/Spec - sits OUTSIDE the v10 canonical and is therefore
-            ' raw-editable under a valid MAC. ClassifyTick consumes its Lift as a NECESSARY
+            ' v1.1 S3b: this is now the V9 RESIDUAL, not the machine's exit decision. Its
+            ' [Time] Until, [Time] CoolOffUntil and [Partner] UnlockedAt inputs sit OUTSIDE
+            ' the canonical and are therefore raw-editable under a valid MAC; its
+            ' [Schedule] Spec/ActiveUntil inputs are INSIDE it as of v11 (FX1), because a
+            ' schedule-only config has no slots and those two keys ARE the armed block - so
+            ' blanking the Spec now fails the MAC and FREEZES (Hold), where before v11 it
+            ' kept macValid True and tore a live window down mid-block (the F1 fail-open).
+            ' ClassifyTick consumes its Lift as a NECESSARY
             ' condition for teardown and never as a sufficient one, so back-dating [Time]
             ' Until can no longer tear anything down: with slots armed it is ignored outright,
             ' and with none armed it only withdraws a hold the empty slot set had already
@@ -4106,7 +4114,7 @@ Public Class Service1
         End Try
     End Sub
 
-    ' B7/B4: builds the v10 two-level canonical the MAC is computed over, from a
+    ' B7/B4: builds the v11 two-level canonical the MAC is computed over, from a
     ' loaded ini - the global header, then one 16-line block per slot for
     ' pos = 1 To the CLAMPED [Slots] SlotCount. Every party (this writer, plus the
     ' service/guardian/notifier readers) must derive a byte-identical string or the
@@ -4125,6 +4133,17 @@ Public Class Service1
         Dim highWaterPlain As String = If(highWaterEnc = "", "", crypt.DecryptData(highWaterEnc))
         Dim nowPlain As String = If(nowEnc = "", "", crypt.DecryptData(nowEnc))
         Dim guardHoldPlain As String = If(guardHoldEnc = "", "", crypt.DecryptData(guardHoldEnc))
+
+        ' FX1 (v11): the GLOBAL [Schedule] pair - the entire enforcement state of a
+        ' SCHEDULE-ONLY (v9-shaped, slot-less) config, which `monkmode schedule` still
+        ' writes and the service still enforces from. Spec is plaintext-as-stored (a
+        ' window rule is not a secret; the MAC is its protection); the service-written
+        ' ActiveUntil is an ENCRYPTED datetime, decrypted like the globals above.
+        ' Deliberately distinct local names from the PER-SLOT pair read inside the loop
+        ' below - they are different fields and must never be confused.
+        Dim globalScheduleSpec As String = ini.GetKeyValue("Schedule", "Spec")
+        Dim globalScheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+        Dim globalScheduleActivePlain As String = If(globalScheduleActiveEnc = "", "", crypt.DecryptData(globalScheduleActiveEnc))
 
         ' The CLAMPED count is BOTH the header value and the loop bound, so a forged
         ' SlotCount can only ever build a canonical nothing can match -> freeze.
@@ -4165,6 +4184,8 @@ Public Class Service1
                                              slotCount,
                                              guardHoldPlain,
                                              ini.GetKeyValue("Guard", "ArmedCount"),
+                                             globalScheduleSpec,
+                                             globalScheduleActivePlain,
                                              slots.ToString())
     End Function
 

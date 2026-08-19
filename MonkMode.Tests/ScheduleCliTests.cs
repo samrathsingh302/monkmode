@@ -334,6 +334,84 @@ public class ScheduleWriteConfigTests
     }
 
     [Fact]
+    public void RawEditOfTheSpec_FailsTheMac_SoALiveScheduleFreezesInsteadOfTearingDown()
+    {
+        // FX1 / the F1 P0, end to end through the REAL CLI writer and the REAL MAC (DPAPI
+        // key included). A schedule-only config has NO [Slots] section, so under v10 the
+        // canonical covered nothing but an empty header: blanking [Schedule] Spec in a text
+        // editor left macValid TRUE, the residual heartbeat saw no armed schedule beside the
+        // past sentinel => Lift => TeardownAll, and a live window was torn down MID-BLOCK.
+        // v11 covers the global [Schedule] pair, so the same edit is tamper-EVIDENT.
+        var iniPath = MonkMode.Blocker.IniPath();
+        var backupPath = MonkMode.Blocker.IniBackupPath();
+        Wipe(iniPath, backupPath);
+        try
+        {
+            MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Fri 09:00-17:00", new[] { "reddit.com" }));
+            Assert.True(CliMacValid(iniPath));                    // armed and honest
+
+            // The attack, exactly as a text editor performs it: change ONE value, save,
+            // leave the stored [Integrity] Mac alone.
+            var tamper = new MonkMode.IniFile(); tamper.Load(iniPath);
+            tamper.SetKeyValue("Schedule", "Spec", "");
+            tamper.Save(iniPath);
+
+            Assert.False(CliMacValid(iniPath));                   // the stamp no longer verifies
+            Assert.False(MonkMode.Blocker.ScheduleIsArmed());     // (macValid-gated, so it reads not-armed)
+
+            // What the service does with it: macValid False => Hold on the heartbeat and
+            // Hold on the tick - the block FREEZES. Under v10 this same edit produced
+            // Lift + TeardownAll, which is the fail-open FX1 closes.
+            var hw = DateTime.Now.ToString(EnCa);
+            var frozen = monkmode.Service1.ClassifyHeartbeat(macValid: false,
+                blockExpired: monkmode.Service1.BlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 5),
+                coolOffElapsed: false, codeUnlocked: false, scheduleActive: false,
+                scheduleArmed: monkmode.Service1.ScheduleArmed(false, ""));
+            Assert.Equal(monkmode.Service1.HeartbeatAction.Hold, frozen);
+            Assert.Equal(monkmode.Service1.TickAction.Hold, monkmode.Service1.ClassifyTick(false, 0, frozen));
+            Assert.False(monkmode.Service1.EffectiveBlockHasExpired(
+                MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 5, macValid: false));
+
+            // The tampered value is also NOT what a raw edit of an UNCOVERED key used to
+            // look like: re-writing the honest Spec back restores a valid MAC, so the
+            // freeze is evidence of tampering, not permanent damage from the edit itself.
+            var restore = new MonkMode.IniFile(); restore.Load(iniPath);
+            restore.SetKeyValue("Schedule", "Spec", BuildSpec("Mon-Fri 09:00-17:00", new[] { "reddit.com" }));
+            restore.Save(iniPath);
+            Assert.True(CliMacValid(iniPath));
+        }
+        finally { Wipe(iniPath, backupPath); }
+    }
+
+    [Fact]
+    public void RawEditOfTheOpenWindowDeadline_FailsTheMac()
+    {
+        // The sibling key: [Schedule] ActiveUntil, the service-written open-window deadline.
+        // A fresh arm carries none (absent = "" = no window open), and the MAC covers that
+        // emptiness - so INJECTING a deadline by raw edit is tamper-evident in exactly the
+        // same way blanking a real one would be. Either direction fails the stamp; neither
+        // can move the window under a valid MAC.
+        var iniPath = MonkMode.Blocker.IniPath();
+        var backupPath = MonkMode.Blocker.IniBackupPath();
+        Wipe(iniPath, backupPath);
+        try
+        {
+            MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Fri 09:00-17:00", new[] { "reddit.com" }));
+            var armed = new MonkMode.IniFile(); armed.Load(iniPath);
+            Assert.Equal("", armed.GetKeyValue("Schedule", "ActiveUntil"));   // no window open
+            Assert.True(CliMacValid(iniPath));
+
+            // The forge: a hand-written deadline, encrypted exactly as the service stores it.
+            var tamper = new MonkMode.IniFile(); tamper.Load(iniPath);
+            tamper.SetKeyValue("Schedule", "ActiveUntil",
+                new MonkMode.Simple3Des("mm_textbox").EncryptData(new DateTime(1970, 1, 1).ToString(EnCa)));
+            tamper.Save(iniPath);
+            Assert.False(CliMacValid(iniPath));
+        }
+        finally { Wipe(iniPath, backupPath); }
+    }
+
+    [Fact]
     public void ManualBlock_IsNeverScheduleArmed_SoBlockAndAddGuardsStayInert()
     {
         var iniPath = MonkMode.Blocker.IniPath();
