@@ -720,7 +720,13 @@ Module Blocker
     ' half-write hosts and lose the user's own entries; read-only is cleared first
     ' so the rename can replace the target.
     Private Sub WriteHostsFile(ByVal block As String)
-        Dim path As String = HostsPath()
+        WriteHostsFileAt(HostsPath(), block)
+    End Sub
+
+    ' The same write with the hosts path made explicit (the service's ...At pattern), so
+    ' the arm-time union tests drive the REAL writer against a test-owned file and never
+    ' the live hosts file.
+    Private Sub WriteHostsFileAt(ByVal path As String, ByVal block As String)
         ClearReadOnly(path)
         Dim existing As String = ""
         If File.Exists(path) Then existing = File.ReadAllText(path)
@@ -747,18 +753,54 @@ Module Blocker
         Return Marker & vbCrLf & sb.ToString()
     End Function
 
-    ' The live half of the union: read the existing snapshot, add this arm's entries,
-    ' write the SNAPSHOT first and hosts second (the service's B2 self-heal repairs hosts
-    ' FROM the snapshot, so a crash between the two leaves the repair source already
-    ' widened - it can only over-restore, never drop another slot's sites).
+    ' FX5 (F5): the arm-time union's SECOND, MAC-BACKED source - the entry lines CONFIG
+    ' TRUTH demands, i.e. the union of every armed slot's Sites in the config ArmSlot has
+    ' just saved and confirmed. The snapshot FILE alone was not enough: it is an
+    ' unauthenticated cache anyone can delete, lock or truncate, and the arm read it inside
+    ' a swallowing Try - so a lost snapshot silently narrowed the union to the NEW slot's
+    ' entries and the rewrite unblocked every earlier slot's sites (permanently, with the
+    ' service stopped, which is this machine's normal between-blocks state). Reading the
+    ' same truth the service's own UnionSlotSites reads is what closes it.
+    ' Deliberately OVER-approximating: every slot position contributes, pending or active,
+    ' exactly like the v9 [User] CustomSites mirror this file already maintains - the result
+    ' is only ever unioned in, so it can add entries and never remove one.
+    ' MAC-gated and fail-SOFT: an absent, unreadable or unverifiable config contributes "",
+    ' which leaves the snapshot-plus-new-entries union exactly as it was - never narrower.
+    Friend Function ConfigTruthHostsEntriesAt(ByVal iniPath As String) As String
+        Try
+            If Not File.Exists(iniPath) Then Return ""
+            Dim ini As New IniFile
+            ini.Load(iniPath)
+            If Not ConfigMacIsValidForIni(ini) Then Return ""
+            Dim packed As String = UnionSlotList(ini, ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount")), "Sites")
+            Dim sites As New List(Of String)
+            For Each tok As String In packed.Split(";"c)
+                Dim s As String = tok.Trim()
+                If s <> "" Then sites.Add(s)
+            Next
+            If sites.Count = 0 Then Return ""
+            Return BuildHostsEntries(sites)
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ' The live half of the union: read the existing snapshot, add CONFIG TRUTH and this
+    ' arm's entries, write the SNAPSHOT first and hosts second (the service's B2 self-heal
+    ' repairs hosts FROM the snapshot, so a crash between the two leaves the repair source
+    ' already widened - it can only over-restore, never drop another slot's sites).
     ' `freshArm` = ArmSlot took the fresh-rewrite path, i.e. the previous config was
-    ' discarded, so its snapshot is stale and is NOT merged in.
-    Public Sub WriteArmHostsBlock(ByVal domains As IEnumerable(Of String), ByVal freshArm As Boolean)
+    ' discarded, so its snapshot is stale and is NOT merged in (config truth is then this
+    ' arm's own slot and nothing else, so adding it changes nothing).
+    ' MAY THROW (the hosts write is the one step that can fail hard) - `monkmode block`
+    ' goes through TryWriteArmHostsBlock, which is where that is handled.
+    Friend Sub WriteArmHostsBlockAt(ByVal iniPath As String, ByVal snapshotPath As String, ByVal hostsPath As String,
+                                    ByVal domains As IEnumerable(Of String), ByVal freshArm As Boolean)
         Dim newEntries As String = BuildHostsEntries(domains)
         Dim existingBlock As String = ""
         If Not freshArm Then
             Try
-                If File.Exists(SnapshotPath()) Then existingBlock = File.ReadAllText(SnapshotPath())
+                If File.Exists(snapshotPath) Then existingBlock = File.ReadAllText(snapshotPath)
             Catch
             End Try
         End If
@@ -767,18 +809,59 @@ Module Blocker
             ' can't resurrect a previous block's sites, and leave hosts untouched (the
             ' pre-v1.1 behaviour for an apps-only arm).
             Try
-                File.Delete(SnapshotPath())
+                File.Delete(snapshotPath)
             Catch
             End Try
             Return
         End If
-        Dim block As String = UnionHostsBlock(existingBlock, newEntries)
+        ' Snapshot, then config truth, then this arm's entries - three sources unioned, so
+        ' a failure of ANY of them can only lose entries the other two still supply.
+        Dim block As String = UnionHostsBlock(UnionHostsBlock(existingBlock, ConfigTruthHostsEntriesAt(iniPath)), newEntries)
         Try
-            File.WriteAllText(SnapshotPath(), block)
+            File.WriteAllText(snapshotPath, block)
         Catch
         End Try
-        WriteHostsFile(block)
+        WriteHostsFileAt(hostsPath, block)
     End Sub
+
+    ' FX5 (F6): the ONE entry point `monkmode block` uses for its post-arm hosts write, and
+    ' the ORDERING is why it exists. ArmSlot has already COMMITTED the slot (and refreshed
+    ' the C1b backup) by the time this runs, so a throw here aborted DoBlock at Main's catch
+    ' - "Error: ...", exit 2 - BEFORE the one-time partner-code print. A `block --for 30d
+    ' --commit` armed while hosts was momentarily locked (AV, a colliding reader) therefore
+    ' lost its ONLY early exit for thirty days: the code is minted once, stored only as a
+    ' salted one-way hash, and no path re-mints or re-displays it.
+    ' The answer is NOT to write hosts first (v1.0's order): the union above reads the slot
+    ' the arm has just committed, and a hosts write before the arm would block sites for a
+    ' block that then failed to arm. The answer is to make the failure NON-FATAL, so both
+    ' invariants hold at every crash point:
+    '   * no committed block whose partner code was never displayed - nothing between the
+    '     arm and the print can throw any more;
+    '   * no armed slot whose sites are absent from hosts with nothing to put them back -
+    '     the SNAPSHOT is written before hosts inside WriteArmHostsBlockAt, so a failed
+    '     hosts write leaves the B2 repair source already covering every armed slot, and
+    '     DoBlock still reaches the service install that repairs hosts from it.
+    ' Returns True when the write landed; False with the warning for the caller to print.
+    Public Function TryWriteArmHostsBlock(ByVal domains As IEnumerable(Of String), ByVal freshArm As Boolean, ByRef warning As String) As Boolean
+        Return TryWriteArmHostsBlockAt(IniPath(), SnapshotPath(), HostsPath(), domains, freshArm, warning)
+    End Function
+
+    ' The testable core with every path made explicit (the service's ...At pattern), so the
+    ' guard is driven against test-owned files and never the live hosts file.
+    Friend Function TryWriteArmHostsBlockAt(ByVal iniPath As String, ByVal snapshotPath As String, ByVal hostsPath As String,
+                                            ByVal domains As IEnumerable(Of String), ByVal freshArm As Boolean,
+                                            ByRef warning As String) As Boolean
+        warning = ""
+        Try
+            WriteArmHostsBlockAt(iniPath, snapshotPath, hostsPath, domains, freshArm)
+            Return True
+        Catch ex As Exception
+            warning = "Warning: the block IS armed, but MonkMode could not update the hosts file (" & ex.Message & ")." &
+                      " The MonkMode service restores the entries from its own copy within about 10 seconds of starting." &
+                      " The block is running either way - it still has to be waited out or exited normally."
+            Return False
+        End Try
+    End Function
 
     ' ---- D1a: site presets (named category -> domains, INPUT sugar only) ----
     '
@@ -1635,8 +1718,16 @@ Module Blocker
             ' of them is this arm's to reset. This slot's own code lands in its section.
         End If
 
+        ' FX5 (fold-in): .Trim() the URL patterns, because that is what the control-character
+        ' backstop above JUDGED (TryRejectControlChars trims each value, matching PackList/
+        ' PackApps, which trim at store). Storing the RAW value broke that symmetry: a caller
+        ' passing "*/watch*" & vbLf passed the check and then wrote a value carrying an LF,
+        ' which IniFile.Save writes as one line and Load reads back as two - macValid False
+        ' forever, the exact F30 brick. Unreachable through today's CLI (TryBuildUrlPatterns
+        ' trims), so this makes the writer's own guarantee structural rather than dependent
+        ' on every caller.
         WriteSlotSection(ini, position, id, startAt, endsAtOrNothing, durationSeconds,
-                         PackList(domains), PackApps(apps), If(urlPatterns, ""),
+                         PackList(domains), PackApps(apps), If(urlPatterns, "").Trim(),
                          allSessionKill, coolOffSeconds, saltB64, hashB64, committed)
         RefreshHeaderAndV9Mirror(ini, position, id + 1)
 

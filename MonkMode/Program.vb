@@ -456,9 +456,21 @@ Module Program
             Return Blocker.ExitArmFailed
         End If
 
-        ' The hosts block is the UNION over every armed slot, so arming a second block can
-        ' never unblock the first one's sites. A fresh rewrite discards the stale snapshot.
-        Blocker.WriteArmHostsBlock(domains, arm.FreshRewrite)
+        ' The hosts block is the UNION over the snapshot, CONFIG TRUTH and this arm's own
+        ' entries (FX5/F5), so arming a second block can never unblock the first one's
+        ' sites - not even with the snapshot file deleted. A fresh rewrite discards the
+        ' stale snapshot.
+        '
+        ' FX5 (F6): from here to the partner-code print the slot is COMMITTED - ArmSlot has
+        ' saved it, stamped it and refreshed the C1b backup - so NOTHING below may throw
+        ' past the print. A code is minted once and stored only as a salted hash, so an
+        ' exception here used to cost a committed block its only early exit. Every remaining
+        ' step is therefore guarded and best-effort; each one that fails says so and the
+        ' block continues, because the block IS armed and saying otherwise would be a lie.
+        Dim hostsWarning As String = ""
+        If Not Blocker.TryWriteArmHostsBlock(domains, arm.FreshRewrite, hostsWarning) Then
+            Console.Error.WriteLine(hostsWarning)
+        End If
         Dim partnerCode As String = arm.PartnerCode
         ' B5a: snapshot the user's current browser DoH policy BEFORE the service
         ' starts and forces it off, so teardown restores the pre-block state (no
@@ -478,7 +490,18 @@ Module Program
                 Console.Error.WriteLine("Warning: could not snapshot current browser DoH settings; MonkMode will leave 'Secure DNS off' in place at expiry rather than restore/remove it.")
             End If
         End If
-        ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
+        ' FX5 (F6): guarded for the same reason as the hosts write above - the SCM can throw
+        ' (a wedged service, a denied SCM handle), and an unguarded throw here reached Main's
+        ' catch and swallowed the partner-code print of an ALREADY-COMMITTED block. A failed
+        ' install lifts nothing: the slot is armed and the hosts entries are written, and the
+        ' service is registered AUTO_START, so it comes up at the next boot even if it cannot
+        ' be started now. Say what is paused rather than dropping the block on the floor.
+        Try
+            ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
+        Catch ex As Exception
+            Console.Error.WriteLine("Warning: the block IS armed, but the MonkMode service could not be installed or started (" & ex.Message & ").")
+            Console.Error.WriteLine("App-kill, self-repair and the countdown are paused until it starts; the blocked sites stay in your hosts file meanwhile.")
+        End Try
         ' D4d rider: a FRESH manual arm clears an orphaned notifier first, so this block's
         ' spawn wins D4c's single-instance claim instead of standing down behind a leftover
         ' pointed at the previous block. M0 rider (F6): when something is ALREADY armed the

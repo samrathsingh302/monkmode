@@ -1157,6 +1157,16 @@ Public Class Service1
                             hostDirS, slotId)
     End Function
 
+    ' TEST SEAM (FX5/F2) - the SetAttrHookForTests / AtomicHosts.RenameHookForTests pattern.
+    ' When set, RetireSlotAt calls this with the config path at the ONE instant that matters:
+    ' after its own Save, immediately before the re-read that computes hosts truth. That is
+    ' the window a raw forged write has to land in, and it cannot be staged from outside a
+    ' single-threaded test any other way. <ThreadStatic> so it is confined to the test thread
+    ' that sets it; PRODUCTION never assigns it, so the field stays Nothing and the retire is
+    ' behaviourally unchanged. Friend, so only the in-repo test assembly can see it.
+    <ThreadStatic>
+    Friend Shared RetireReloadHookForTests As Action(Of String)
+
     ' The testable core with every path made explicit (the PersistSlotFieldAt pattern), so the
     ' retire matrix and the crash-point ordering tests drive the REAL code against test-owned
     ' files and never the deployed config or the live hosts file. Returns True iff the config
@@ -1224,7 +1234,24 @@ Public Class Service1
             ' CLI arm would NOT be in, so recomputing from the file is what makes an arm landing
             ' during a retire safe - the arm's slot is on disk and is therefore in this union.
             Dim after As New IniFile
+            ' RetireReloadHookForTests is Nothing in production - this is a plain re-read;
+            ' the hook only lets a test stage a forged write into this exact window.
+            If RetireReloadHookForTests IsNot Nothing Then RetireReloadHookForTests(iniPath)
             after.Load(iniPath)
+            ' FX5 (F2): TOCTOU RE-VALIDATION of the re-read, the PersistSlotFieldAt discipline
+            ' (:996) this path was missing. These are FRESH bytes off disk, not the ones
+            ' verified at the top of the function, so `macValid:=True` below was an assumption,
+            ' not a fact: a forged config landing between the Save above and this Load was
+            ' folded into truthSites as if it verified, and a slot-Sites-blanked forgery
+            ' therefore NARROWED the truth. That matters here more than anywhere else, because
+            ' step (2) rewrites the SNAPSHOT - the MAC-INDEPENDENT repair source every B2
+            ' self-heal reads - so the narrowing would survive the freeze and keep a
+            ' still-armed slot's sites unblocked for the whole life of the frozen block.
+            ' An unverifiable re-read therefore reconciles NOTHING: the config retire above
+            ' genuinely landed (True), and the snapshot and hosts simply stay WIDE - exactly
+            ' the documented "crash between (1) and (2)" state, which over-blocks and
+            ' converges on the next tick that sees a valid config.
+            If Not ConfigMacIsValidForIni(after) Then Return True
             Dim highWater As String = ""
             Try
                 Dim hwEnc As String = after.GetKeyValue("Time", "HighWater")
