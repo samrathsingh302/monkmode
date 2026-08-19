@@ -3869,6 +3869,59 @@ Public Class Service1
         End Select
     End Function
 
+    ' F31 (v1.1 FX2): the index of the first marker occurrence that OWNS ITS
+    ' WHOLE LINE - it starts at position 0 or immediately after a line
+    ' terminator (LF, which also covers CRLF, or a bare CR), AND is followed
+    ' immediately by a line terminator or end-of-file. -1 when there is no such
+    ' occurrence.
+    '
+    ' Why anchoring is load-bearing: the strip cuts the file at this index and
+    ' discards everything below it. Matching the marker ANYWHERE in the text
+    ' meant a user's own hosts line that merely MENTIONED the marker (e.g.
+    ' "# the #### MonkMode Entries #### block is MonkMode's") was truncated
+    ' mid-line and every user line below it silently deleted - a breach of the
+    ' paramount no-data-loss fence, with no hosts backup to recover from.
+    '
+    ' Whole-line, column 0, deliberately: MonkMode itself ALWAYS writes the
+    ' marker as a line of its own with no indent and nothing after it
+    ' (BuildMonkModeBlock / UnionHostsBlock / the schedule synthesiser all emit
+    ' Marker & vbCrLf & entries), so an indented, glued or commented-on marker
+    ' can never be ours - it is user content and is preserved verbatim. The
+    ' bias is deliberate: failing to recognise our own block leaves stale
+    ' entries in hosts (over-block, acceptable); mistaking the user's text for
+    ' ours destroys their data (never acceptable).
+    ' Line-for-line identical to MonkMode.Blocker.MarkerLineStart and pinned by
+    ' the CLI<->service parity tests.
+    Friend Shared Function MarkerLineStart(ByVal text As String) As Integer
+        If text Is Nothing Then Return -1
+        Dim searchFrom As Integer = 0
+        Do While searchFrom <= text.Length - HostsMarker.Length
+            Dim idx As Integer = text.IndexOf(HostsMarker, searchFrom, StringComparison.Ordinal)
+            If idx < 0 Then Return -1
+            If IsWholeLine(text, idx, HostsMarker.Length) Then Return idx
+            ' Mid-line hit: user content. Keep looking BELOW it - a real,
+            ' line-anchored block further down must still be stripped.
+            searchFrom = idx + 1
+        Loop
+        Return -1
+    End Function
+
+    ' True when text[start, start+length) is bounded by line terminators or the
+    ' ends of the text - i.e. it is a complete line. Helper for MarkerLineStart;
+    ' identical to MonkMode.Blocker.IsWholeLine.
+    Private Shared Function IsWholeLine(ByVal text As String, ByVal start As Integer, ByVal length As Integer) As Boolean
+        If start > 0 Then
+            Dim prev As Char = text.Chars(start - 1)
+            If prev <> CChar(vbLf) AndAlso prev <> CChar(vbCr) Then Return False
+        End If
+        Dim after As Integer = start + length
+        If after < text.Length Then
+            Dim nxt As Char = text.Chars(after)
+            If nxt <> CChar(vbLf) AndAlso nxt <> CChar(vbCr) Then Return False
+        End If
+        Return True
+    End Function
+
     ' Returns the hosts-file text with the MonkMode marker block (the marker
     ' line and everything below it) removed, leaving the user's own content
     ' untouched. Shared and file-system-free so it can be unit tested.
@@ -3881,7 +3934,9 @@ Public Class Service1
         ' the CLI use. The old case-insensitive InStr(..., CompareMethod.Text)
         ' could lock onto a hand-edited case-variant marker line ABOVE the real
         ' one and delete the user's own hosts lines between the two.
-        startpos = fileReader.IndexOf("#### MonkMode Entries ####", StringComparison.Ordinal)
+        ' F31: and line-anchored, so a marker MENTIONED inside a user line is
+        ' never mistaken for the start of our block.
+        startpos = MarkerLineStart(fileReader)
         If startpos < 0 Then
             Return fileReader
         End If

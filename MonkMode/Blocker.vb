@@ -597,18 +597,74 @@ Module Blocker
         End If
     End Sub
 
+    ' F31 (v1.1 FX2): the index of the first marker occurrence that OWNS ITS
+    ' WHOLE LINE - it starts at position 0 or immediately after a line
+    ' terminator (LF, which also covers CRLF, or a bare CR), AND is followed
+    ' immediately by a line terminator or end-of-file. -1 when there is no such
+    ' occurrence.
+    '
+    ' Why anchoring is load-bearing: the strip cuts the file at this index and
+    ' discards everything below it. Matching the marker ANYWHERE in the text
+    ' meant a user's own hosts line that merely MENTIONED the marker (e.g.
+    ' "# the #### MonkMode Entries #### block is MonkMode's") was truncated
+    ' mid-line and every user line below it silently deleted - a breach of the
+    ' paramount no-data-loss fence, with no hosts backup to recover from.
+    '
+    ' Whole-line, column 0, deliberately: MonkMode itself ALWAYS writes the
+    ' marker as a line of its own with no indent and nothing after it
+    ' (BuildMonkModeBlock / UnionHostsBlock / the service's schedule
+    ' synthesiser all emit Marker & vbCrLf & entries), so an indented, glued or
+    ' commented-on marker can never be ours - it is user content and is
+    ' preserved verbatim. The bias is deliberate: failing to recognise our own
+    ' block leaves stale entries in hosts (over-block, acceptable); mistaking
+    ' the user's text for ours destroys their data (never acceptable).
+    ' Line-for-line identical to monkmode.Service1.MarkerLineStart and pinned
+    ' by the CLI<->service parity tests.
+    Friend Function MarkerLineStart(ByVal text As String) As Integer
+        If text Is Nothing Then Return -1
+        Dim searchFrom As Integer = 0
+        Do While searchFrom <= text.Length - Marker.Length
+            Dim idx As Integer = text.IndexOf(Marker, searchFrom, StringComparison.Ordinal)
+            If idx < 0 Then Return -1
+            If IsWholeLine(text, idx, Marker.Length) Then Return idx
+            ' Mid-line hit: user content. Keep looking BELOW it - a real,
+            ' line-anchored block further down must still be stripped.
+            searchFrom = idx + 1
+        Loop
+        Return -1
+    End Function
+
+    ' True when text[start, start+length) is bounded by line terminators or the
+    ' ends of the text - i.e. it is a complete line. Helper for MarkerLineStart;
+    ' identical to monkmode.Service1.IsWholeLine.
+    Private Function IsWholeLine(ByVal text As String, ByVal start As Integer, ByVal length As Integer) As Boolean
+        If start > 0 Then
+            Dim prev As Char = text.Chars(start - 1)
+            If prev <> CChar(vbLf) AndAlso prev <> CChar(vbCr) Then Return False
+        End If
+        Dim after As Integer = start + length
+        If after < text.Length Then
+            Dim nxt As Char = text.Chars(after)
+            If nxt <> CChar(vbLf) AndAlso nxt <> CChar(vbCr) Then Return False
+        End If
+        Return True
+    End Function
+
     ' The service's stopMe() marker-block strip, ported into the CLI so the
     ' `unblock` LIFT path (RestoreHostsFromStrip) removes our block EXACTLY as the
-    ' service does at a genuine expiry: cut at the first ordinal marker, then drop
-    ' only the single line terminator the writer placed before it, so the user's
-    ' own content - including any trailing blank line - is preserved byte-for-byte.
+    ' service does at a genuine expiry: cut at the first LINE-ANCHORED ordinal
+    ' marker, then drop only the single line terminator the writer placed before
+    ' it, so the user's own content - including any trailing blank line - is
+    ' preserved byte-for-byte.
     ' Kept behaviourally identical to monkmode.Service1.StripMonkModeBlock and
     ' pinned by the CLI<->service parity tests; a CLI-side copy is needed because
     ' MonkMode (CLI) and monkmode (service) are separate assemblies that cannot
     ' reference one another - the same reason ServiceSecurity / ConfigIntegrity /
     ' DohPolicy are duplicated and parity-pinned.
     Friend Function StripMonkModeBlock(ByVal text As String) As String
-        Dim startpos As Integer = text.IndexOf(Marker, StringComparison.Ordinal)
+        ' F31: line-anchored match, so a marker MENTIONED inside a user line is
+        ' never mistaken for the start of our block.
+        Dim startpos As Integer = MarkerLineStart(text)
         If startpos < 0 Then
             Return text
         End If

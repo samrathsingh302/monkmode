@@ -69,12 +69,16 @@ public class ServiceStripMonkModeBlockTests
     }
 
     [Fact]
-    public void MarkerWithNoNewlineBefore_DoesNotEatUserCharacters()
+    public void MarkerGluedToUserLine_IsUserContent_NothingIsRemoved()
     {
-        // Pathological but possible after a hand edit: marker glued straight
-        // onto user content. The old code returned "127.0.0.1 my-dev-b".
+        // F31 (FX2): a marker that does NOT start its own line is not ours -
+        // MonkMode only ever writes the marker at column 0 - so the text is
+        // user content and survives verbatim. This test previously pinned the
+        // cut-at-the-text behaviour ("127.0.0.1 my-dev-box"), which is exactly
+        // the data-loss defect F31 closes: everything below the glued marker
+        // was discarded too.
         var hosts = "127.0.0.1 my-dev-box" + Marker + "\r\n127.0.0.1 x.com\r\n";
-        Assert.Equal("127.0.0.1 my-dev-box", monkmode.Service1.StripMonkModeBlock(hosts));
+        Assert.Equal(hosts, monkmode.Service1.StripMonkModeBlock(hosts));
     }
 
     [Fact]
@@ -254,32 +258,52 @@ public class CliServiceStripParityTests
         Assert.Equal(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
     }
 
-    // A CRLF followed by a Unicode-ignorable char (U+00AD soft hyphen) right
-    // before the marker is the one input class where a culture-sensitive
-    // EndsWith would diverge from the ordinal original: it would match "\r\n",
-    // drop two chars BY INDEX (the LF + the ignorable) and leave a dangling CR.
-    // Both StripMonkModeBlock copies use ordinal EndsWith, so the ignorable is
-    // preserved and the strip matches the legacy ordinal impl. Built with (char)
-    // code points so the source stays pure-ASCII (no invisible bytes on disk).
+    // A Unicode-ignorable char (U+00AD soft hyphen, U+200B ZWSP) sitting
+    // between the line terminator and the marker. Pre-F31 this was the one
+    // input class where a culture-sensitive EndsWith would have diverged from
+    // the ordinal original (matching "\r\n" through the ignorable, dropping two
+    // chars BY INDEX and leaving a dangling CR); both copies use ordinal
+    // EndsWith, so no dangling CR was ever produced.
+    // Since F31 the input never reaches that code at all: the marker is not at
+    // column 0, so it is not our block, and the ENTIRE text is preserved -
+    // strictly safer still. This is a deliberate divergence from
+    // LegacyStripOurBlock (the pre-F31 oracle), which is precisely the defect
+    // FX2 closes, so the legacy comparison is asserted NOT to hold here.
+    // Built with (char) code points so the source stays pure-ASCII.
     [Fact]
-    public void SoftHyphenBeforeMarker_OrdinalStrip_KeepsItAndMatchesLegacy()
+    public void SoftHyphenBeforeMarker_MarkerIsNotLineAnchored_TextPreservedWhole()
     {
         string soft = ((char)0x00AD).ToString();
         string hosts = "127.0.0.1 box\r\n" + soft + Marker + "\r\n";
-        Assert.Equal(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
-        Assert.Equal("127.0.0.1 box\r\n" + soft, MonkMode.Blocker.StripMonkModeBlock(hosts)); // ignorable kept, no dangling CR
-        Assert.Equal(                                                                          // CLI<->service parity holds here too
+        Assert.Equal(hosts, MonkMode.Blocker.StripMonkModeBlock(hosts));
+        Assert.NotEqual(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts)); // F31 divergence, by design
+        Assert.Equal(                                                                        // CLI<->service parity holds here too
             monkmode.Service1.StripMonkModeBlock(hosts),
             MonkMode.Blocker.StripMonkModeBlock(hosts));
     }
 
     [Fact]
-    public void ZeroWidthSpaceBeforeMarker_OrdinalStrip_KeepsItAndMatchesLegacy()
+    public void ZeroWidthSpaceBeforeMarker_MarkerIsNotLineAnchored_TextPreservedWhole()
     {
         string zwsp = ((char)0x200B).ToString();
         string hosts = "127.0.0.1 box\r\n" + zwsp + Marker + "\r\n";
-        Assert.Equal(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
-        Assert.Equal("127.0.0.1 box\r\n" + zwsp, MonkMode.Blocker.StripMonkModeBlock(hosts));
+        Assert.Equal(hosts, MonkMode.Blocker.StripMonkModeBlock(hosts));
+        Assert.NotEqual(LegacyStripOurBlock(hosts), MonkMode.Blocker.StripOurBlock(hosts));
+        Assert.Equal(
+            monkmode.Service1.StripMonkModeBlock(hosts),
+            MonkMode.Blocker.StripMonkModeBlock(hosts));
+    }
+
+    // The ordinal-EndsWith guard itself, still reachable via a line-anchored
+    // marker: an ignorable char at the END of the user's own last line, with a
+    // proper CRLF before the marker. The single terminator goes; the ignorable
+    // stays, byte-exact.
+    [Fact]
+    public void IgnorableAtEndOfUserLine_AnchoredMarker_TerminatorOnlyIsDropped()
+    {
+        string soft = ((char)0x00AD).ToString();
+        string hosts = "127.0.0.1 box" + soft + "\r\n" + Marker + "\r\n0.0.0.0 x.com\r\n";
+        Assert.Equal("127.0.0.1 box" + soft, MonkMode.Blocker.StripMonkModeBlock(hosts));
         Assert.Equal(
             monkmode.Service1.StripMonkModeBlock(hosts),
             MonkMode.Blocker.StripMonkModeBlock(hosts));
@@ -305,5 +329,161 @@ public class CliServiceStripParityTests
         Assert.Equal(
             monkmode.Service1.StripMonkModeBlock(hosts),
             MonkMode.Blocker.StripMonkModeBlock(hosts));
+    }
+}
+
+// F31 (v1.1 FX2, P1 - irreversible user data loss).
+//
+// Both strips used to locate the marker with a bare ordinal IndexOf and cut the
+// file at that CHARACTER INDEX. A user's own hosts line that merely MENTIONED
+// the marker was therefore truncated mid-line and every user line below it was
+// discarded - on the FIRST tick of the FIRST block, since the per-tick B2
+// self-heal routes through the same strip. MonkMode keeps no hosts backup.
+//
+// The fix: the marker only counts when it OWNS ITS WHOLE LINE - column 0 (start
+// of text, or right after CR/LF) and immediately followed by CR/LF or EOF. That
+// is exactly the shape MonkMode itself writes (Marker & vbCrLf & entries), so
+// behaviour for a correctly-placed block is unchanged; anything else is user
+// content and survives verbatim.
+//
+// Decision recorded: an indented / glued / annotated marker is USER CONTENT, not
+// ours. Consequence if MonkMode's own block were ever mangled into that shape:
+// its entries linger in hosts (over-block - acceptable). The opposite bias would
+// delete the user's data (never acceptable).
+public class MarkerLineAnchoringTests
+{
+    private const string Marker = "#### MonkMode Entries ####";
+
+    private static string ServiceStrip(string t) => monkmode.Service1.StripMonkModeBlock(t);
+    private static string CliStrip(string t) => MonkMode.Blocker.StripMonkModeBlock(t);
+
+    // The exact repro from the bug-hunt report.
+    private const string MentionRepro =
+        "# my hosts\r\n" +
+        "# the #### MonkMode Entries #### block is MonkMode's\r\n" +
+        "10.0.0.5 nas.home\r\n" +
+        "192.168.1.9 printer.home\r\n";
+
+    [Fact]
+    public void Repro_UserLineMentioningMarker_NothingIsRemoved_Service()
+    {
+        // Pre-fix this returned "# my hosts\r\n# the " - nas.home and
+        // printer.home gone for good, a dangling fragment committed to hosts.
+        Assert.Equal(MentionRepro, ServiceStrip(MentionRepro));
+    }
+
+    [Fact]
+    public void Repro_UserLineMentioningMarker_NothingIsRemoved_Cli()
+    {
+        Assert.Equal(MentionRepro, CliStrip(MentionRepro));
+        // The re-block strip only normalises the tail, so the user's lines
+        // survive an arm too.
+        Assert.Equal(MentionRepro.TrimEnd('\r', '\n'), MonkMode.Blocker.StripOurBlock(MentionRepro));
+    }
+
+    [Fact]
+    public void Repro_ArmThenLift_RoundTrip_UserLinesSurvive()
+    {
+        // What WriteHostsFile assembles on arm: StripOurBlock(existing) + CRLF
+        // + our block. Lifting it (service expiry or CLI unblock) must give the
+        // user's file back, mention line and all.
+        var baseText = MonkMode.Blocker.StripOurBlock(MentionRepro);
+        var written = baseText + "\r\n" + Marker + "\r\n" +
+                      MonkMode.Blocker.BuildHostsEntries(new[] { "reddit.com" });
+        Assert.Equal(baseText, ServiceStrip(written));
+        Assert.Equal(baseText, CliStrip(written));
+        Assert.Contains("10.0.0.5 nas.home", ServiceStrip(written));
+        Assert.Contains("192.168.1.9 printer.home", ServiceStrip(written));
+    }
+
+    [Fact]
+    public void MidLineMentionAboveRealBlock_RealBlockIsStillStripped()
+    {
+        // The mention must not shield a genuine block below it from removal -
+        // that would be a lift failure, not a data-loss failure.
+        var hosts = "# see the #### MonkMode Entries #### marker below\r\n" +
+                    "10.0.0.5 nas.home\r\n" + Marker + "\r\n127.0.0.1 reddit.com\r\n";
+        var expected = "# see the #### MonkMode Entries #### marker below\r\n10.0.0.5 nas.home";
+        Assert.Equal(expected, ServiceStrip(hosts));
+        Assert.Equal(expected, CliStrip(hosts));
+    }
+
+    [Fact]
+    public void MarkerAtPositionZeroButNotAloneOnItsLine_IsUserContent()
+    {
+        // Column 0 is not enough: trailing text on the line means it is not our
+        // marker line. Pre-fix this deleted every line below.
+        var hosts = Marker + " is where MonkMode writes\r\n10.0.0.5 nas.home\r\n";
+        Assert.Equal(hosts, ServiceStrip(hosts));
+        Assert.Equal(hosts, CliStrip(hosts));
+    }
+
+    [Fact]
+    public void IndentedMarker_IsUserContent_DocumentedChoice()
+    {
+        // MonkMode never indents the marker, so an indented one is not ours.
+        var hosts = "10.0.0.5 nas.home\r\n   " + Marker + "\r\n127.0.0.1 x.com\r\n";
+        Assert.Equal(hosts, ServiceStrip(hosts));
+        Assert.Equal(hosts, CliStrip(hosts));
+    }
+
+    // ---- correct placement: unchanged, byte-for-byte ----
+
+    [Theory]
+    [InlineData("# mine\r\n127.0.0.1 box\r\n" + Marker + "\r\n0.0.0.0 x.com\r\n", "# mine\r\n127.0.0.1 box")] // CRLF
+    [InlineData("# mine\n127.0.0.1 box\n" + Marker + "\n0.0.0.0 x.com\n", "# mine\n127.0.0.1 box")]           // LF
+    [InlineData("# mine\r127.0.0.1 box\r" + Marker + "\r0.0.0.0 x.com\r", "# mine\r127.0.0.1 box")]           // bare CR
+    [InlineData(Marker + "\r\n0.0.0.0 x.com\r\n", "")]                                                        // marker at position 0
+    [InlineData("127.0.0.1 box\r\n" + Marker, "127.0.0.1 box")]                                               // marker is the last line, no EOL
+    [InlineData("127.0.0.1 box\r\n" + Marker + "\r\n", "127.0.0.1 box")]                                      // marker last line, empty block
+    [InlineData("127.0.0.1 box\r\n" + Marker + "\r\n0.0.0.0 a\r\n" + Marker + "\r\n", "127.0.0.1 box")]        // first anchored marker wins
+    [InlineData("# mine\r\n127.0.0.1 box\r\n", "# mine\r\n127.0.0.1 box\r\n")]                                // no marker at all
+    [InlineData("", "")]
+    public void CorrectlyPlacedBlock_StripsExactlyAsBefore(string hosts, string expected)
+    {
+        Assert.Equal(expected, ServiceStrip(hosts));
+        Assert.Equal(expected, CliStrip(hosts));
+    }
+
+    // ---- the anchoring primitive itself, both copies ----
+
+    [Theory]
+    [InlineData("", -1)]
+    [InlineData("#### MonkMode", -1)]                                     // shorter than the marker
+    [InlineData(Marker, 0)]                                               // whole file is the marker line
+    [InlineData("\n" + Marker + "\n", 1)]
+    [InlineData("\r\n" + Marker + "\r\n", 2)]
+    [InlineData("\r" + Marker + "\r", 1)]
+    [InlineData("abc" + Marker + "\r\n", -1)]                             // glued to the left
+    [InlineData("\r\n" + Marker + " trailing\r\n", -1)]                   // trailing text on the line
+    [InlineData("  " + Marker + "\r\n", -1)]                              // indented
+    [InlineData("x " + Marker + " y\r\n" + Marker + "\r\n", 32)]          // mention first (2+26+2+2), real marker after
+    public void MarkerLineStart_AgreesOnIndex_AndOnBothSides(string text, int expected)
+    {
+        Assert.Equal(expected, monkmode.Service1.MarkerLineStart(text));
+        Assert.Equal(expected, MonkMode.Blocker.MarkerLineStart(text));
+    }
+
+    [Fact]
+    public void MarkerLineStart_NullText_IsMinusOne_BothCopies()
+    {
+        Assert.Equal(-1, monkmode.Service1.MarkerLineStart(null!));
+        Assert.Equal(-1, MonkMode.Blocker.MarkerLineStart(null!));
+    }
+
+    // ---- the self-heal path: over-block, never data loss ----
+
+    [Fact]
+    public void RepairHostsBlock_WithMentionOnly_KeepsUserContent_AndAppendsOurBlock()
+    {
+        // B2 self-heal on a hosts file that only MENTIONS the marker: the
+        // user's lines are kept whole and our block is appended below them.
+        var expectedBlock = Marker + "\r\n127.0.0.1 reddit.com\r\n";
+        var repaired = monkmode.Service1.RepairHostsBlock(MentionRepro, expectedBlock);
+        Assert.NotNull(repaired);
+        Assert.StartsWith(MentionRepro, repaired);
+        Assert.EndsWith(expectedBlock, repaired);
+        Assert.Contains("10.0.0.5 nas.home", repaired);
+        Assert.Contains("192.168.1.9 printer.home", repaired);
     }
 }
