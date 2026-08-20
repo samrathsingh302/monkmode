@@ -500,7 +500,7 @@ Module Program
             ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
         Catch ex As Exception
             Console.Error.WriteLine("Warning: the block IS armed, but the MonkMode service could not be installed or started (" & ex.Message & ").")
-            Console.Error.WriteLine("App-kill, self-repair and the countdown are paused until it starts; the blocked sites stay in your hosts file meanwhile.")
+            Console.Error.WriteLine("App-kill, self-repair and the countdown are paused until it starts; the blocked sites stay in your hosts file meanwhile - unless the hosts write above also failed, in which case they are not blocked until it does.")
         End Try
         ' D4d rider: a FRESH manual arm clears an orphaned notifier first, so this block's
         ' spawn wins D4c's single-instance claim instead of standing down behind a leftover

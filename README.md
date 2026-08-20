@@ -16,11 +16,13 @@ monkmode setup --partner "Alex (alex@example.com)"   # required once, first run
 monkmode block --sites reddit.com,youtube.com --for 2h30m
 monkmode block --preset social,video --apps chrome.exe --until "2026-06-11 18:00"
 monkmode block --file blocklist.txt --for 8h --commit
+monkmode block --urls "*/shorts*" --for 4h          # pages, not whole sites
+monkmode block --sites x.com --start +90m --for 2h  # begins in 90 minutes
 monkmode schedule --sites x.com --windows "Mon-Fri 09:00-17:00"
-monkmode status
+monkmode status                     # one row per running block, with its id
 monkmode stats
-monkmode add --sites x.com          # an active block can only ever grow
-monkmode unblock                    # start the cooling-off exit (delayed)
+monkmode add --sites x.com --id 2   # an active block can only ever grow
+monkmode unblock --id 2             # start the cooling-off exit (delayed)
 monkmode unblock --code <CODE>      # partner code: lifts within ~10s
 monkmode help
 ```
@@ -28,16 +30,44 @@ monkmode help
 `--for` accepts `45` (minutes), `90m`, `2h`, `1d12h`. Once a block starts it
 cannot be shortened or replaced until it expires; `add` can only add more sites.
 
+**Up to eight blocks run side by side.** `monkmode block` starts a *new* one
+beside the ones already running rather than refusing, each with its own timer,
+lists, cooling-off and partner code; `monkmode status` gives every block an
+**id**, and `--id N` names one for `add`, `unblock` or a cancel. A block retires
+on its own timer without touching the others — only the last one leaving tears
+the machine down. `--start` delays a block (up to 30 days; `--for` then measures
+from the start, and the service computes the end time when it actually begins).
+`--urls` attaches URL patterns for *pages* rather than whole sites — the notifier
+watches the foreground Chrome/Edge/Brave address bar and nudges a matching page
+back to the site's home. That nudge is best-effort; the hosts block is what
+actually stops a site.
+
 You block **sites** (hosts-level, machine-wide) and **apps** (killed on sight),
 named explicitly, from a `--file` list, or via a named **preset** category —
 `social`, `video`, `news`, `shopping`, `adult` for sites; `games`, `chat` for
 apps. `monkmode setup` can record **account defaults** (a default blocklist,
 app list and cooling-off duration) that a bare `monkmode block` inherits. You
 can arm recurring **schedules** (wall-clock windows enforced at the same
-strength as a manual block), review history with `monkmode stats`, and widen
-app-kill to every logged-in session with `--all-session-kill`. `monkmode
-status` shows the live block, time left and the current exit path; the notifier
-raises tray toasts at block start, when a cooling-off begins, and at expiry.
+strength as a manual block, including overnight windows such as
+`Mon-Fri 22:30-04:00`), review history with `monkmode stats`, and widen
+app-kill to every logged-in session with `--all-session-kill`. A schedule and a
+manual block deliberately refuse to run together, in either direction — clear
+the schedule first. `monkmode status` shows every running block, time left and
+the current exit path; the notifier keeps a tray icon and raises toasts at block
+start, when a cooling-off begins, and at expiry.
+
+Two smaller comforts: while a block is running the notifier serves a small
+"locked in — Xh left" page on `127.0.0.1:80`, so a plain-HTTP visit to a blocked
+site explains itself instead of showing a browser error (HTTPS keeps the browser
+error — MonkMode holds no certificate for a site it is blocking); and the
+`presets\` folder ships one-word PowerShell wrappers plus a plain-English
+grammar, `mm-lock social games for 3h committed`, that composes the CLI flags for
+you and refuses on any word it does not know.
+
+Any site, app or URL value carrying a **control character** (anything below
+`0x20`, tab included, plus `0x7F`) is refused up front with the offending value
+named, and nothing is armed: such a character would split the stored config line
+when it was read back and freeze this and every other running block permanently.
 
 ## Exits — how a block ends (and what that honestly protects against)
 
@@ -74,7 +104,7 @@ out is kept and documented rather than hidden. And an offline / WinRE /
 determined-admin-with-time attack (B10) always wins eventually. MonkMode aims to
 defeat casual-to-determined bypasses; it does **not** claim to be unbreakable,
 and there is deliberately no BitLocker / BIOS-lock / non-admin-account layer in
-this codebase. See the full bypass table (B1–B11) and the honest ceiling in
+this codebase. See the full bypass table (B1–B14) and the honest ceiling in
 `ARCHITECTURE.md`.
 
 ## How it works
@@ -85,7 +115,7 @@ Four cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
 |---|---|---|---|
 | `MonkMode/` | `monkmode.exe` | User (elevated) | CLI. Parses commands, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
 | `MonkMode_srv/` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcement core. Locks the hosts file, restores it if tampered with, kills blocked processes, keeps the guardian alive, lifts the block only when the timer genuinely expires. `CanStop=False`. |
-| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service (it no longer rewrites the end time), and shows tray toasts at block start, when a cooling-off begins, and when the block ends. |
+| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service (it no longer rewrites the end time), shows the tray icon and toasts at block start, when a cooling-off begins, and when the block ends, watches the browser address bar for `--urls` patterns, and serves the loopback block page. Nudge and comfort layers only — it holds no enforcement authority. |
 | `MM_guard/` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Watchdog guardian. Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
 A block is hosts-file DNS sinkholing (`127.0.0.1` entries between the
@@ -132,9 +162,9 @@ preserved byte-for-byte.
 - **Fail-closed on crash.** An unhandled exception in any long-running enforcement
   process re-asserts its enforcement (re-locks hosts, restores the block) before
   the process dies, so a crash can never leave the block open.
-- **Honest threat model.** `ARCHITECTURE.md` (kept in the project vault at
-  `vault/dev/repos/monk-mode/specs/`) catalogues the full bypass surface
-  (B1–B11), ranked by effort. While the user keeps admin
+- **Honest threat model.** `ARCHITECTURE.md` (kept in the project's working docs at
+  `OneDrive/dev/repos/monk-mode/specs/`) catalogues the full bypass surface
+  (B1–B14), ranked by effort. While the user keeps admin
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to
   document the rest honestly rather than claim "unbreakable". The remaining
@@ -172,14 +202,18 @@ point, not a product:
   handle on the hosts file that stopped the DNS client re-reading it (any
   `ipconfig /flushdns` un-blocked everything), and a notifier that exited
   instantly due to a WinForms entry-point subtlety.
-- **Tested where it counts:** an xunit suite (**938 tests**) covers the dangerous
+- **Tested where it counts:** an xunit suite (**2198 tests**) covers the dangerous
   string logic (hosts-file marker stripping and repair, culture-safe datetime
   round-trips under de-DE/fr-FR/en-US/en-GB locales, crypto round-trips and
   cross-project ciphertext equivalence, the config-integrity MAC and its
   four-project canonical parity, the monotonic clock gates, and the browser-DoH
   policy decisions), plus the accountability core added since (the cooling-off
   and partner-code lifecycle and their fail-closed gates, schedule parsing and
-  window→duration conversion, preset expansion, and the separate stats file).
+  window→duration conversion, preset expansion, and the separate stats file),
+  and the v1.1 surface on top of that (the two-level slot canonical and its
+  four-project parity, the retire/teardown state machine, overnight window
+  evaluation minute by minute across both DST nights, the pure URL layer under a
+  200k-input fuzz, arm-input refusal, and the hosts marker/end-marker anchoring).
   The tests are deliberately written in **C#**: VB's
   case-insensitive namespaces merge the `MonkMode` and `monkmode` namespaces
   and make the duplicated types ambiguous. Pure unit tests — nothing touches

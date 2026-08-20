@@ -1262,12 +1262,23 @@ public class PresetScriptTextTests
     }
 
     [Fact]
-    public void TheStaleMutuallyExclusiveClaimIsGone()
+    public void TheScheduleCommentDoesNotClaimTheExclusionIsGone()
     {
-        // v1.0 refused a manual block while the schedule was armed; v1.1 runs up to eight blocks
-        // side by side, so the old comment now describes behaviour that no longer exists.
+        // INVERTED by S8 (F16). S7c wrote, and this test pinned, "NO LONGER mutually exclusive...
+        // the schedule occupies one of them" - which was false when written and is doubly false
+        // now: a schedule is NOT a slot (it is the global [Schedule] pair), and FX3 (F3) restored
+        // the refusal in BOTH directions (DoBlock refuses beside an armed schedule; DoSchedule
+        // refuses beside an armed slot). The comment sits directly above mm-video-schedule, so
+        // the old wording instructed the user straight into the refusal.
+        //
+        // What v1.1 DID change is block-vs-block: a second wrapper run arms a SECOND slot rather
+        // than bouncing off v1.0's refusal, which is what the duplicate-arm guard exists for -
+        // pinned separately below, so this pin cannot swing back by accident.
         var lines = Text.Split('\n').Where(l => l.Contains("mutually exclusive", StringComparison.OrdinalIgnoreCase)).ToList();
-        Assert.All(lines, l => Assert.Contains("NO LONGER", l, StringComparison.Ordinal));
+        Assert.NotEmpty(lines);
+        Assert.All(lines, l => Assert.DoesNotContain("NO LONGER", l, StringComparison.Ordinal));
+        Assert.Contains("STILL mutually exclusive", Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("the schedule occupies one", Text, StringComparison.Ordinal);
     }
 
     [Fact]

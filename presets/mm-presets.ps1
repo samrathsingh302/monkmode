@@ -72,10 +72,16 @@ function mm-insta  { param([string]$For) MM-Arm 'social.txt' 'insta'  $For @('--
 function mm-reddit { param([string]$For) MM-Arm 'reddit.txt' 'reddit' $For @() }
 
 # --- Always-on schedule for the video set ---
-# v1.1: NO LONGER mutually exclusive with manual blocks. Up to 8 blocks (the schedule occupies one
-# of them) run side by side, so arming a manual block on top of the schedule is legal and both
-# hold - it is not the refusal it was in v1.0. That is also why the bundle commands below warn
-# about a duplicate instead of bouncing off one.
+# A schedule and a manual block are STILL mutually exclusive in v1.1, in BOTH directions: the
+# schedule is global state ([Schedule] Spec/ActiveUntil), not one of the 8 block slots, so
+# `mm-video-schedule` refuses (exit 3, nothing written) while any block is armed, and every block
+# wrapper below refuses while this schedule is armed. Clear it first with `mm-schedule-off` - an
+# open window still runs to its end - then arm the block. (v1.1 briefly lost the block-side half
+# of that refusal, which destroyed the schedule two different ways; FX3 restored it, and
+# schedule-as-a-slot was deferred out of v1.1.)
+# What DID change is block-vs-block: a second `mm-video` now arms a SECOND slot instead of
+# bouncing off v1.0's "block already active" refusal, which is why the bundle commands below warn
+# about a duplicate rather than relying on a refusal that no longer comes.
 function mm-video-schedule {
     if (-not (MM-IsAdmin)) { Write-Host 'Needs an ELEVATED terminal.' -ForegroundColor Yellow; return }
     & monkmode schedule --sites (MM-Sites 'video.txt') --windows 'Mon-Sun 00:00-23:59'

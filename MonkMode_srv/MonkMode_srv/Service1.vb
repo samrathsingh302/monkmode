@@ -2194,9 +2194,11 @@ Public Class Service1
         ' block (scheduleActiveNow=False) makes EffectiveKillList return iniProcessList verbatim,
         ' so the loop below kills exactly what it does today (BYTE-IDENTICAL). SCOPE: this is only
         ' the SERVICE session-0 kill loop; the notifier's user-session loop (MM_notify\Form1.vb
-        ' appKillTimer_Tick, SessionId<>0) still keys off iniProcessList alone, so blocking a
-        ' schedule's USER-session apps (browsers/games) needs the same union THERE - a follow-up
-        ' slice (b3-iii, see handoff), exactly as the manual block's app-kill is split today.
+        ' appKillTimer_Tick, SessionId<>0) runs the same union on its own side - S4 replaced its
+        ' old "iniProcessList alone" reading with a per-beat union over every slot's Apps, re-read
+        ' from disk each tick (Form1.RawSlotApps), plus the open schedule's apps. So the follow-up
+        ' this comment used to promise (b3-iii) is DONE, and neither loop keys off the
+        ' raw-editable v9 mirror by itself any more.
         ' v1.1 S3a: enforcedApps carries the open schedule's apps AND every ENFORCING slot's
         ' apps, so the kill set is now driven by the MAC-COVERED [SlotN] Apps rather than by
         ' the raw-editable v9 [Process] List. iniProcessList stays as the BASE (widen-only:
@@ -3406,11 +3408,15 @@ Public Class Service1
     ' reads as blank (=> Ignore => the trigger is deleted, no state change).
     Friend Const TriggerMaxBytes As Long = 4096
 
-    ' P41: how many trigger files one tick will consume. 2 x MaxSlots, so every armed slot can
-    ' have both a request and a cancel in flight. The surplus is LEFT ON DISK for the next
-    ' tick rather than deleted: deferring an EXIT trigger is fail-closed (the block simply
-    ' holds ~10s longer) and deferring an `add` delays a widen by <= 10s. The cap exists so a
-    ' directory stuffed with 100k trigger files cannot stall the enforcement tick.
+    ' P41: how many trigger files one tick will consume. It was sized 2 x MaxSlots for the two
+    ' trigger families that existed then (a request and a cancel per armed slot); S3b/S5 brought
+    ' the count to FOUR (the partner-code and `add` channels), so the true worst case is
+    ' 4 x MaxSlots = 32. The constant is deliberately left at 16 (F40, accepted): the surplus is
+    ' LEFT ON DISK for the next tick rather than deleted, so a full flood only DEFERS - deferring
+    ' an EXIT trigger is fail-closed (the block simply holds ~10s longer) and deferring an `add`
+    ' delays a widen by <= 10s. Note SelectTriggerFiles sorts ORDINAL, so under a flood
+    ' `monkmode_add.request.*` is always served first and `monkmode_partner.code.*` last. The cap
+    ' exists so a directory stuffed with 100k trigger files cannot stall the enforcement tick.
     Friend Const MaxTriggerFilesPerTick As Integer = 16
 
     ' The id a trigger file name addresses, or "" if it is not one of ours. Ordinal-

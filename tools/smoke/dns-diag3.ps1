@@ -28,7 +28,18 @@ $backup = 'C:\Users\samra\monkmode-smoketest\hosts.diag3.backup.txt'
 $name   = 'example.org'
 Copy-Item $hosts $backup -Force
 function Unlock { $h = Get-Item $hosts; if ($h.Attributes -band [IO.FileAttributes]::ReadOnly) { $h.Attributes = $h.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly) } }
-function WriteBlock { Unlock; $e=[System.IO.File]::ReadAllText($hosts); $e=($e -replace '(?s)#### MonkMode Entries ####.*$','').TrimEnd(); [System.IO.File]::WriteAllText($hosts, $e + "`r`n#### MonkMode Entries ####`r`n127.0.0.1 example.org`r`n") }
+# Remove MonkMode's region only. Since FX7 the block is CLOSED by an end marker and the user's
+# own lines may sit BELOW it, so cutting marker-to-EOF (what this did before) destroys them.
+# Both markers must own their whole line, matching StripMonkModeBlock. A legacy block with no
+# end marker still strips to EOF - the old behaviour, and the only safe reading, because nothing
+# in such a file distinguishes a user-appended line from ours.
+function StripBlock([string]$text) {
+    if ($text -match '(?m)^#### MonkMode End ####\r?$') {
+        return ($text -replace '(?sm)^#### MonkMode Entries ####\r?$.*?^#### MonkMode End ####\r?$(\r?\n)?', '')
+    }
+    return ($text -replace '(?sm)^#### MonkMode Entries ####\r?$.*', '')
+}
+function WriteBlock { Unlock; $e=[System.IO.File]::ReadAllText($hosts); $e=(StripBlock $e).TrimEnd(); [System.IO.File]::WriteAllText($hosts, $e + "`r`n#### MonkMode Entries ####`r`n127.0.0.1 example.org`r`n#### MonkMode End ####`r`n") }
 function Res($label) { Start-Sleep -Milliseconds 300; $a = try { [System.Net.Dns]::GetHostAddresses($name) | % { $_.ToString() } } catch { @("ERR") }; Write-Host ("  {0,-46} -> {1}" -f $label, ($a -join ',')) }
 
 Write-Host "X. no persistent handle (write + readonly attr only):"

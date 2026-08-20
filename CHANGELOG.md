@@ -10,9 +10,131 @@ VB.NET 2.0 WinForms blocker that no longer built. The fork rebuilt it as a .NET 
 CLI and hardened enforcement so that, once a block starts, it cannot be casually
 removed before its timer expires. See [The fork base](#the-fork-base) below.
 
-## [Unreleased]
+## [Unreleased] — v1.1 (multi-block + URL-level blocking)
 
-Nothing queued (see `vault/dev/repos/monk-mode/tasks.md` for the live queue).
+The v1.1 line turns the single machine-wide block into up to **eight independent
+blocks** that start, run and end on their own timers, adds **URL-pattern**
+nudging and **delayed starts**, and closes the nine defect families the 19/08/2026
+adversarial bug-hunt found. Not yet tagged: the elevated smoke-B batch is the
+remaining gate.
+
+### Added
+
+- **Multi-slot blocks.** `monkmode block` starts a *new* block beside the ones
+  already running (up to `MaxSlots = 8`) instead of refusing. Each slot carries
+  its own end time, sites, apps, URL patterns, cooling-off deadline, partner code
+  and committed flag; `monkmode status` lists one row per block with its **id**,
+  and every verb that addresses one block takes `--id N` (`add`, `unblock`).
+  `unblock --cancel` and `unblock --code` deliberately take none: a cancel
+  broadcasts to every armed block (it puts them *back* into full enforcement) and
+  a code already belongs to exactly one block. A slot **retires on its own timer**
+  without disturbing the others; only the last one leaving tears the machine down.
+- **`--start` (delayed blocks).** `block --start +90m --for 2h` arms a **PENDING**
+  slot that begins in 90 minutes and then runs for two hours (`--for` measures from
+  the start), at most 30 days ahead. The service — not the CLI — computes the end
+  time at the PENDING→ACTIVE transition from the monotonic mark, so a clock roll
+  cannot shorten it. A pending slot's sites are hosts-blocked from *arm* time
+  (deliberate over-block).
+- **`--urls` URL patterns + the browser URL watcher.** `block --urls
+  "*/watch*,*reddit.com/r/*"` attaches per-block URL patterns; the user-session
+  notifier reads the foreground Chromium omnibox via UI Automation every 2 s and
+  redirects a matching page to the site's home (one global 5 s cooldown, not one
+  per window). Chrome, Edge and Brave are watched; Firefox is not. This is a
+  **nudge, never enforcement** — the hosts block is what actually stops a site.
+- **Block page.** While a block is running the notifier serves a small
+  "locked in — Xh left" page on `127.0.0.1:80`, so a plain-HTTP visit to a blocked
+  site shows why rather than a browser error. HTTP only (an `https://` visit keeps
+  the browser's own error page), loopback only, and the request is never parsed.
+- **Stats, streaks and a tray icon.** Per-block app-kill and redirect counters in a
+  deliberately separate, non-MAC sidecar under `%ProgramData%\MonkMode\`
+  (`stats-service.ini`, `stats-notify.ini` — one writer each), surfaced by
+  `monkmode stats` (streaks, lifetime hours), `monkmode status` and the tray
+  tooltip. Zero enforcement authority, and the counters survive a retire, a
+  teardown and `unblock --force` (streak history is user data).
+- **Overnight schedule windows.** `--windows "Mon-Fri 22:30-04:00"` — an end
+  before the start now means *overnight*, accepted by the CLI validator and both
+  parsers; the after-midnight tail belongs to the start day's mask.
+- **Preset bundles and the `mm-lock` grammar** (preset layer, `presets\`): a
+  shortform-URL preset, a doom-scroll site preset, a games/launcher app preset, the
+  one-word wrappers `mm-shorts` / `mm-games`, and
+  `mm-lock [doomscroll|shorts|social|games|everything] [for 2h | until 22:00 |
+  tonight] [committed]` — an unknown word refuses and prints the vocabulary.
+- **Hosts end marker.** MonkMode's hosts region is now closed by
+  `#### MonkMode End ####` on its own line, so your own content *below* the block
+  survives every write.
+
+### Changed
+
+- **Retargeted the whole stack to .NET 10 LTS** (`net10.0-windows`, supported to
+  11/2028), with runtime packages, test tooling and the CI pins brought current
+  (12/08/2026).
+- **Enforcement canonical v9 → v11.** A two-level canonical — a global header plus
+  one MAC-covered group per slot — replaced the single machine-wide block (v10),
+  and v11 brought the global `[Schedule]` pair back under the MAC (FX1). One MAC
+  covers the whole file: a failure freezes *every* slot, never some of them. The
+  forward-migration freeze is unchanged — **arm blocks after upgrading the
+  binaries, not across an upgrade**.
+- **`monkmode add` is service-adjudicated**, via a slot-addressed request trigger,
+  so it can only ever grow the block it names (~10 s to take effect).
+- **A schedule and a manual block still refuse to coexist**, in *both* directions
+  (see FX3): a schedule is global state, not a slot. `schedule --id` /
+  schedule-as-a-slot was considered and deferred out of v1.1.
+
+### Fixed
+
+Nine fix slices closing the 19/08/2026 bug-hunt's P0/P1/P2 ladder
+(`logs\2026-08-19-v11-bughunt.md`):
+
+- **FX1 (F1, P0) — the one fail-open in the report.** The v10 canonical stopped
+  covering the global `[Schedule] Spec`/`ActiveUntil` the service still enforces
+  from, so blanking `Spec` in a text editor left the MAC valid and tore an open
+  scheduled window down mid-window. Both keys are back inside the canonical (v11).
+- **FX2 (F31, P1) — hosts data loss.** `StripMonkModeBlock` matched the marker as
+  *text* and cut at that character index, so a user's own hosts line that merely
+  *mentioned* the marker was truncated and every line below it deleted, on the
+  first tick of the first block. The marker must now own its whole line.
+- **FX3 (F3, P1) — block-over-schedule.** `monkmode block` had lost its refusal
+  beside an armed schedule (a schedule is not a slot), and arming over one
+  destroyed the schedule two different ways. The mutual exclusion is restored in
+  both directions, in the command and independently in the writer.
+- **FX4 (F4 + F30, P1) — arm-input hardening.** The shipped URL-only wrappers
+  either could not arm at all or inherited the *whole* default blocklist; and one
+  control character in any `--sites`/`--apps`/`--urls` value permanently bricked
+  the config and froze every other running block. URL-only arms now inherit
+  nothing, and any value carrying a character below `0x20` (tab included) or
+  `0x7F` is **refused**, naming the offending value, before anything is armed.
+- **FX5 (F2 + F5 + F6, P1) — no unverified source may narrow what is blocked.**
+  Arming a second block used to unblock the first one's sites if the hosts
+  snapshot was missing or locked (the arm now unions the snapshot, MAC-verified
+  config truth and its own entries); a locked hosts file or a wedged SCM could
+  swallow the one-time partner code of an already-committed block (both are now
+  reported and non-fatal); and a slot retire trusted an unverified re-read of the
+  config.
+- **FX6 (F7–F10, P2) — config-writer and race family.** An orphaned
+  `[Time] TimeChanging` flag can no longer wedge a block forever (the hold is
+  bounded to 300 s of monotonic time); all four notifier writes go through one
+  guarded shared-config writer; a confirmed arm can no longer be clobbered by a
+  concurrent service write; and the arm confirm finds its slot by id at any
+  position.
+- **FX7 (F35, P2) — user hosts content below the block.** The three hosts writers
+  now emit `#### MonkMode End ####`, and the strip preserves everything below it.
+  A pre-v1.1 block with no end marker still strips to end-of-file (nothing in the
+  file distinguishes your line from ours) and converges in exactly one rewrite.
+- **FX8 (F12–F14 + F33–F34, P2) — URL-watcher family.** Trailing-dot hosts now
+  match; a derived redirect host that is not plausible aborts the redirect (never
+  the match); a redirect is only ever synthesised into the *same* window the read
+  came from, re-checked as a watched browser, once per read; and a hung UI
+  Automation read no longer disables the watcher for the life of the process.
+- **FX9 (F11 + F32, P2) — block-page bind gate and install-dir ACL.** The block
+  page now binds `127.0.0.1:80` only while a **deadline** is genuinely ahead of the
+  monotonic mark, so `--start +30d` no longer holds the machine's only port 80 for
+  a month; and `install.ps1 -InstallDir` pointed outside Program Files now stamps
+  an explicit admin-only DACL instead of silently inheriting `Users: Modify`.
+
+### Known limitations
+
+The accepted, documented residuals for this line — including everything the
+bug-hunt ranked P3 — are listed in `docs/RUNBOOK.md` §5.
 
 ## [1.0.0] — 16/07/2026
 
