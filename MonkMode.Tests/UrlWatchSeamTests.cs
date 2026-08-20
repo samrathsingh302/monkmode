@@ -414,6 +414,159 @@ public class UrlWatchSeamTests
             throw new InvalidOperationException("collection went bang");
         }
     }
+
+    // ---------------------------------------------------------------
+    // F14 + F34 - the REDIRECT-TIME gate (19/08/2026 bug-hunt, both P2)
+    // ---------------------------------------------------------------
+    //
+    // The redirect re-resolves the foreground window, because the pass runs on a pool thread and
+    // the user may have alt-tabbed since the read. What used to make that safe was FindOmnibox:
+    // "a non-Chromium window has no element matching the omnibox id or class". It is not a safety
+    // property - AutomationId and ClassName are values a process publishes about its OWN controls
+    // (F34) - and it says nothing at all about whether the window in front of us is the one that
+    // was on a blocked URL (F14). MayRedirectToWindow is the gate that actually holds, and it is
+    // pure, so the decision is pinned here without a browser in the room. What the WINDOW HANDLES
+    // mean live is smoke-owed; what the predicate DECIDES is not.
+
+    private static readonly IntPtr Blocked = new(0x1234);   // the window the hit was read from
+    private static readonly IntPtr Other = new(0x5678);     // some other window entirely
+
+    [Fact]
+    public void F14_ARedirectIsRefused_WhenTheForegroundIsNoLongerTheWindowTheHitCameFrom()
+    {
+        // THE F14 REPRO: read a blocked URL in Chrome, user alt-tabs to Edge (a watched browser,
+        // so the old process-name reasoning would have waved it through) during the UIA read.
+        // Edge is on a half-written form. Acting would navigate it away and lose that state.
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Other, "msedge"));
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Other, "chrome"));
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Other, "brave"));
+        // A second window of the SAME browser is still a different window, and the one the user
+        // is looking at now was never shown to be on a blocked URL.
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, new IntPtr(0x1235), "chrome"));
+        // The window the hit really came from, still in front: this is the case the feature is
+        // for, and it must still work - refusing everything would be a silent feature deletion.
+        Assert.True(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Blocked, "chrome"));
+    }
+
+    [Fact]
+    public void F34_ARedirectIsRefused_WhenTheWindowIsNotAWatchedBrowserProcess()
+    {
+        // THE F34 REPRO: a non-browser window that PASSES the omnibox-shape check. Any app can
+        // publish a ControlType.Edit whose AutomationId is "view_1012" or whose ClassName ends
+        // "OmniboxViewViews" - they are self-declared metadata, not identity - so FindOmnibox
+        // would hand back an element and MonkMode would SetFocus + SetValue + synthesise Enter
+        // into it. The process re-check is what refuses, and it is applied to the window we are
+        // about to ACT on, not only to the one we read.
+        foreach (var impostor in new[] { "notepad", "explorer", "chromedriver", "bravery",
+                                         "firefox", "mm_notify", "", " ", ".exe", null })
+            Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Blocked, impostor!),
+                         $"typed into '{impostor}'");
+        // Even the exact window the URL was read from is refused once its process is not one we
+        // watch - which is the shape a window handle reused by another process would take.
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Blocked, "notepad"));
+        // The three watched browsers, in the casings Process.ProcessName and a caller may use.
+        foreach (var browser in new[] { "chrome", "Chrome", "CHROME.EXE", "msedge", "brave.exe" })
+            Assert.True(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, Blocked, browser), browser);
+    }
+
+    [Fact]
+    public void NoRecordedWindowAndNoForegroundWindow_BothMeanDoNothing()
+    {
+        // Zero on either side is "we do not know", and the answer to not knowing is never to
+        // type into somebody's window. A Zero READ handle is what a failed or absent address-bar
+        // read leaves behind, which is also what makes the record one-shot: LivePerformRedirect
+        // swaps it back to Zero, so one read can authorise at most one redirect.
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(IntPtr.Zero, Blocked, "chrome"));
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(Blocked, IntPtr.Zero, "chrome"));
+        Assert.False(mm_notify.UrlWatch.MayRedirectToWindow(IntPtr.Zero, IntPtr.Zero, "chrome"));
+    }
+
+    // ---------------------------------------------------------------
+    // F33 - the in-flight latch is BOUNDED (19/08/2026 bug-hunt, P2)
+    // ---------------------------------------------------------------
+    //
+    // Every UIA call in a pass is untimed, and the latch was released only in the work item's
+    // Finally - which never runs for a pass that never RETURNS. One hanging provider (a stub
+    // named chrome.exe, foregrounded once) killed the watcher for the life of the process,
+    // silently. The pass cannot be aborted (no safe way to abort a thread inside a cross-process
+    // UIA call, and Thread.Abort is gone), so the fix is that a stale pass stops BLOCKING.
+
+    [Fact]
+    public void F33_AHungPassStopsBlockingNewPasses_OnceItIsStale()
+    {
+        const long stale = mm_notify.UrlWatch.WatchPassStaleMs;
+        Assert.Equal(60_000L, stale);                      // 30 beats of the 2s watcher
+        // Idle: any beat starts a pass. 0 is the idle marker.
+        Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(0, 10_000, stale));
+        // A pass in flight blocks the beats inside the bound - the property the latch exists for,
+        // so a slow-but-live browser cannot pile passes up.
+        Assert.False(mm_notify.UrlWatch.ShouldStartWatchPass(10_000, 10_000, stale));
+        Assert.False(mm_notify.UrlWatch.ShouldStartWatchPass(10_000, 12_000, stale));
+        Assert.False(mm_notify.UrlWatch.ShouldStartWatchPass(10_000, 69_999, stale));
+        // THE F33 REPRO: past the bound the watcher is no longer hostage to it.
+        Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(10_000, 70_000, stale));
+        Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(10_000, 10_000_000, stale));
+        // ...and it stays unblocked for ever after, so "dead for the boot" is unreachable.
+        for (var t = 70_000L; t < 10_000_000L; t += 97_777L)
+            Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(10_000, t, stale));
+    }
+
+    [Fact]
+    public void F33_NonsenseMarksStartAPass_BecauseAWedgedWatcherIsTheFailureThatMatters()
+    {
+        // Same R1 call ShouldActOnHit makes, for the same reason: a wrong "start" costs one extra
+        // concurrent pass, a wrong "don't" costs the watcher for the whole boot.
+        var extremes = new long[] { long.MinValue, -1, 0, 1, 59_999, 60_000, long.MaxValue };
+        foreach (var since in extremes)
+        foreach (var now in extremes)
+        foreach (var bound in extremes)
+        {
+            var started = mm_notify.UrlWatch.ShouldStartWatchPass(since, now, bound);
+            if (since <= 0 || now < since || bound <= 0) Assert.True(started);
+        }
+        // And it is monotone in now: once a pass is stale, more time cannot un-stale it.
+        var rng = new Random(20260819);
+        for (var i = 0; i < 20_000; i++)
+        {
+            long since = rng.Next(1, 1_000_000);
+            long bound = rng.Next(1, 200_000);
+            long now = since + rng.Next(0, 400_000);
+            if (!mm_notify.UrlWatch.ShouldStartWatchPass(since, now, bound)) continue;
+            Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(since, now + rng.Next(1, 100_000), bound));
+        }
+    }
+
+    [Fact]
+    public void F33_TheLatchIsClaimedAndReleasedByStartTick_SoATakenOverPassCannotReleaseTheNewOne()
+    {
+        // The Form1 side of the fix, as the compare-and-swap algebra it actually is: the latch
+        // holds the START TICK of the pass in flight, a pass releases it by CAS against its OWN
+        // tick, and a pass that was taken over therefore finds a different value and clears
+        // NOTHING. Without that, the hung pass returning at minute 40 would open the gate
+        // underneath the pass that replaced it and let passes run two-deep for ever.
+        long latch = 0;
+        const long stale = mm_notify.UrlWatch.WatchPassStaleMs;
+
+        // Beat 1 at t=1000 claims the idle latch.
+        Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(latch, 1000, stale));
+        Assert.Equal(0L, Interlocked.CompareExchange(ref latch, 1000L, 0L));
+        const long hungPassStart = 1000L;
+
+        // Beats inside the bound are refused; the beat past it takes the latch over.
+        Assert.False(mm_notify.UrlWatch.ShouldStartWatchPass(latch, 3000, stale));
+        Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(latch, 61_000, stale));
+        Assert.Equal(hungPassStart, Interlocked.CompareExchange(ref latch, 61_000L, hungPassStart));
+
+        // The hung pass finally returns and tries to release. It must not succeed.
+        Interlocked.CompareExchange(ref latch, 0L, hungPassStart);
+        Assert.Equal(61_000L, latch);
+        Assert.False(mm_notify.UrlWatch.ShouldStartWatchPass(latch, 62_000, stale));
+
+        // The pass that actually owns the latch releases it, and the watcher is idle again.
+        Interlocked.CompareExchange(ref latch, 0L, 61_000L);
+        Assert.Equal(0L, latch);
+        Assert.True(mm_notify.UrlWatch.ShouldStartWatchPass(latch, 62_000, stale));
+    }
 }
 
 // The notifier's view of the armed slots' URL patterns (v1.1 S7): the union the watcher matches

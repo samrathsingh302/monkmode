@@ -72,11 +72,12 @@ Public Class Form1
     ' v1.1 S7 URL-watch state. urlLastActionTick is the Environment.TickCount64 of the
     ' last redirect ATTEMPT (P60's 5s cooldown is measured off it - attempt, not success,
     ' so a browser that keeps refusing the SetValue is retried once per cooldown rather
-    ' than once per beat). urlWatchInFlight is a 0/1 re-entrancy latch: at most one pass
-    ' is ever in flight, so a UIA read that blocks for seconds cannot pile up passes.
-    ' Both are touched from a pool thread, hence Interlocked throughout.
+    ' than once per beat). urlWatchPassStartedTick is the re-entrancy latch: 0 = idle,
+    ' otherwise the TickCount64 at which the pass in flight STARTED, so at most one pass
+    ' runs at a time AND a pass that hangs can be timed out (F33). Both are touched from
+    ' a pool thread, hence Interlocked throughout.
     Private urlLastActionTick As Long = 0
-    Private urlWatchInFlight As Integer = 0
+    Private urlWatchPassStartedTick As Long = 0
 
     ' v1.1 S7d (P50/P51): the loopback block page. The server object exists for the
     ' life of the notifier but binds NOTHING until a block is actually held, and its
@@ -662,8 +663,26 @@ Public Class Form1
     ' The latch is released in the pass's Finally, so a pass that throws (it cannot - every
     ' entry point in UrlWatch is total - but a ThreadPool item that dies would otherwise wedge
     ' the watcher permanently) still re-opens the gate.
+    '
+    ' F33 (19/08/2026 bug-hunt, P2) - THE LATCH IS BOUNDED. A Finally only runs when the pass
+    ' RETURNS, and every UIA call in a pass is untimed: a provider that hangs for ever (a stub
+    ' named "chrome.exe" publishing one, foregrounded once) left the latch set for the life of
+    ' the process, i.e. the watcher silently dead for the whole boot with no signal anywhere.
+    ' So the latch now stores WHEN the pass started, and a beat past UrlWatch.WatchPassStaleMs
+    ' takes the latch over and starts a new pass. The hung thread is NOT aborted (there is no
+    ' safe way to abort a thread inside a cross-process UIA call) - it is simply no longer able
+    ' to keep the watcher shut. Because it may still be alive, the release is a COMPARE-AND-SWAP
+    ' on the pass's OWN start tick: a taken-over pass that finally returns finds a different
+    ' mark, clears nothing, and so cannot open the gate underneath the pass that replaced it.
     Private Sub urlWatchTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles urlWatchTimer.Tick
-        If System.Threading.Interlocked.CompareExchange(urlWatchInFlight, 1, 0) <> 0 Then Return
+        Dim startedAt As Long = System.Threading.Interlocked.Read(urlWatchPassStartedTick)
+        Dim myStart As Long = Environment.TickCount64
+        If Not UrlWatch.ShouldStartWatchPass(startedAt, myStart, UrlWatch.WatchPassStaleMs) Then Return
+        ' 0 is the idle marker, so a genuine tick of 0 must not be stored as a start mark.
+        If myStart <= 0 Then myStart = 1
+        ' Claim the latch against the value we judged: only one beat can win, and a beat that
+        ' loses simply waits for the next one.
+        If System.Threading.Interlocked.CompareExchange(urlWatchPassStartedTick, myStart, startedAt) <> startedAt Then Return
         Try
             System.Threading.ThreadPool.QueueUserWorkItem(
                 Sub()
@@ -671,13 +690,13 @@ Public Class Form1
                         RunUrlWatchPass()
                     Catch ex As Exception
                     Finally
-                        System.Threading.Interlocked.Exchange(urlWatchInFlight, 0)
+                        System.Threading.Interlocked.CompareExchange(urlWatchPassStartedTick, 0, myStart)
                     End Try
                 End Sub)
         Catch ex As Exception
             ' The queue itself refused (pool exhaustion). Re-open the latch and wait for
             ' the next beat; never let this reach the timer.
-            System.Threading.Interlocked.Exchange(urlWatchInFlight, 0)
+            System.Threading.Interlocked.CompareExchange(urlWatchPassStartedTick, 0, myStart)
         End Try
     End Sub
 
@@ -702,6 +721,12 @@ Public Class Form1
         If target Is Nothing OrElse target.Length = 0 Then Return
         ' Stamped BEFORE the attempt: the cooldown bounds ATTEMPTS, so a browser that keeps
         ' refusing the SetValue is retried once per 5s, not on every 2s beat.
+        '
+        ' F33 note: since a hung pass can now be taken over, a very late pass may stamp an OLD
+        ' tick over a newer one. The consequence is one extra nudge sooner than the cooldown
+        ' asked for - the widening direction, and bounded by the 5s cooldown either way. The
+        ' redirect it would then attempt is separately refused unless the foreground window is
+        ' still the exact window that pass read from (UrlWatch.MayRedirectToWindow).
         System.Threading.Interlocked.Exchange(urlLastActionTick, nowTick)
         If UrlWatch.PerformRedirect(target) Then RecordRedirect(target)
     End Sub

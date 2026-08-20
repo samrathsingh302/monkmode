@@ -83,9 +83,9 @@ Friend Module UrlWatch
     '    In pin order: null/blank => ""; trim; lower-case invariant; a scheme
     '    other than http/https => "" (about:, data:, chrome:, edge:, brave:,
     '    file:, view-source:, mailto:, a bare drive letter, ...); strip the
-    '    scheme; strip "userinfo@"; strip ":port"; strip a leading "www."; drop
-    '    "?query" / "#fragment" and everything after; append "/" when no path
-    '    remains.
+    '    scheme; strip "userinfo@"; strip ":port"; strip a leading "www."; strip
+    '    a TRAILING ROOT DOT (F12); drop "?query" / "#fragment" and everything
+    '    after; append "/" when no path remains.
     '
     '    Scheme-less input is FIRST-CLASS, not an error path: the Chromium
     '    omnibox strips "https://" and "www." from the displayed Value when it is
@@ -164,6 +164,25 @@ Friend Module UrlWatch
         ' "m.youtube.com/shorts/x", and because P59's redirect needs to know it
         ' was the mobile host.
         If authority.StartsWith("www.", StringComparison.Ordinal) Then authority = authority.Substring(4).Trim()
+
+        ' F12 (19/08/2026 bug-hunt, P2): the TRAILING ROOT DOT. "youtube.com." is
+        ' the same site spelled fully-qualified - the browser reaches it (hosts
+        ' matching is exact-name, so the hosts block misses it too), and before
+        ' this the token read "youtube.com./shorts/abc", in which the pattern
+        ' "youtube.com/" never occurs. The watcher was silent on exactly the case
+        ' F2b exists to catch, and the watcher is the ONLY net for that shape.
+        ' Stripping it WIDENS what matches, which is the blocking direction (R1).
+        ' Dots and whitespace are peeled alternately until the authority stops
+        ' changing, because either can expose the other ("youtube.com . " ->
+        ' "youtube.com ." -> "youtube.com"): a single pass would leave a token
+        ' that is not a fixed point, and IDEMPOTENCE is what lets every caller
+        ' normalise defensively. The loop terminates because each iteration that
+        ' continues has strictly shortened the string.
+        Dim beforePeel As Integer
+        Do
+            beforePeel = authority.Length
+            authority = authority.TrimEnd("."c).Trim()
+        Loop While authority.Length <> beforePeel
 
         ' No host left => nothing real was navigated to. Returning "" (rather
         ' than a hostless "/") keeps RedirectTargetFor from ever emitting
@@ -312,10 +331,54 @@ Friend Module UrlWatch
     '    unusable. That is exactly what a user who blocked the whole of YouTube
     '    asked for, so it is documented rather than repaired; a user who wants
     '    the feed to survive writes the "youtube.com/" home token instead.
+    '    F13 (19/08/2026 bug-hunt, P2): could this token really be the host of the
+    '    page the browser is on? Pure, total.
+    '
+    '    THE SHAPE THIS EXISTS FOR: the omnibox reports FREE TEXT verbatim, so
+    '    typing "why is youtube.com/shorts down" is read as a URL. It matches the
+    '    pattern "youtube.com/shorts" (substring - correctly, and the MATCH is not
+    '    touched here), and the target was then built from the derived host
+    '    "why is youtube.com", i.e. the watcher typed "https://why is youtube.com/"
+    '    into the address bar and pressed Enter. Interior whitespace is not
+    '    recoverable at normalisation time (see the re-trim note in P56, which only
+    '    cleans the EDGES), so the non-empty-authority guard there never fired.
+    '
+    '    In a FAIL-SOFT layer, no action beats wrong action: the hosts block is the
+    '    enforcement and is untouched either way, so refusing to act on a host that
+    '    cannot be a host costs one nudge and prevents a navigation the user never
+    '    asked for. Deliberately NARROW in what it refuses - only the ACTION is
+    '    gated, never the match:
+    '      - whitespace and control characters: the free-text case, plus the NULs
+    '        and tabs a hostile omnibox can carry;
+    '      - any OTHER ASCII character outside [a-z0-9-._] (case-insensitive): the
+    '        residue the strips leave behind on malformed input ("[" from an IPv6
+    '        literal, a backslash from a UNC path, quotes, braces).
+    '    NON-ASCII IS ALLOWED THROUGH: P56 deliberately leaves IDN/unicode hosts
+    '    exactly as they arrive, and refusing them here would silently drop the
+    '    nudge for a user whose --urls patterns are unicode too.
+    Friend Function IsPlausibleRedirectHost(ByVal host As String) As Boolean
+        If String.IsNullOrEmpty(host) Then Return False
+        For i As Integer = 0 To host.Length - 1
+            Dim c As Char = host(i)
+            If Char.IsWhiteSpace(c) OrElse Char.IsControl(c) Then Return False
+            If c < ChrW(128) Then
+                If (c >= "a"c AndAlso c <= "z"c) OrElse (c >= "A"c AndAlso c <= "Z"c) _
+                   OrElse (c >= "0"c AndAlso c <= "9"c) _
+                   OrElse c = "-"c OrElse c = "."c OrElse c = "_"c Then Continue For
+                Return False
+            End If
+        Next
+        Return True
+    End Function
+
     Friend Function RedirectTargetFor(ByVal url As String, ByVal patterns As IEnumerable(Of String)) As String
         If MatchedPatternFor(url, patterns).Length = 0 Then Return ""
         Dim host As String = HostOfNormalized(NormalizeUrlForMatch(url))
         If host.Length = 0 Then Return ""
+        ' F13: a hit whose host is not a plausible host is a hit on free text, not
+        ' on a page. The MATCH stands (nothing above this line changed); only the
+        ' ACTION is refused, which is always the safe direction here.
+        If Not IsPlausibleRedirectHost(host) Then Return ""
         If host = "youtube.com" OrElse host = "m.youtube.com" Then Return YouTubeRedirect
         Return "https://" & host & "/"
     End Function
@@ -337,6 +400,48 @@ Friend Module UrlWatch
         If nowTick < lastActionTick Then Return True   ' time went backwards
         If cooldownMs <= 0 Then Return True            ' no cooldown asked for
         Return (nowTick - lastActionTick) >= cooldownMs
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' F33 - the in-flight latch's stale bound
+    ' ------------------------------------------------------------------
+
+    '    F33 (19/08/2026 bug-hunt, P2): how long a watch pass may hold the
+    '    re-entrancy latch before a later beat is allowed to start anyway.
+    '
+    '    60s = 30 beats of the 2s watcher, i.e. an order of magnitude beyond the
+    '    slowest plausible UIA read. Every UIA call in a pass is untimed, and a
+    '    provider that never RETURNS (as opposed to one that throws) used to leave
+    '    the latch set for the life of the process: the watcher was silently dead
+    '    for the whole boot, with no signal anywhere. A non-elevated user can name
+    '    a stub "chrome.exe" and publish a hanging UIA provider, so that was one
+    '    foreground activation away from switchable-off.
+    Friend Const WatchPassStaleMs As Long = 60000
+
+    '    May a new watch pass start? `inFlightSinceTick` is the Environment.TickCount64
+    '    at which the pass currently holding the latch started, or 0 for "idle" -
+    '    the same 0-means-never convention ShouldActOnHit uses for its mark (on a
+    '    machine whose TickCount64 really is 0 the cost is one extra pass, once).
+    '
+    '    Total, and nonsense answers "start it": a mark from the future, or an
+    '    absent bound, means the mark cannot be trusted, and KEEPING THE WATCHER
+    '    ALIVE is the direction that preserves the nudge. The cost of a wrong
+    '    "start" is one extra concurrent pass; the cost of a wrong "don't" is the
+    '    watcher never running again, which is the bug this exists for.
+    '
+    '    THE HUNG PASS IS NOT KILLED - there is no safe way to abort a thread
+    '    blocked in a cross-process UIA call, and Thread.Abort is gone from .NET
+    '    anyway. It is simply no longer able to keep newer passes out; if it ever
+    '    returns it must not clear a newer pass's mark, which is why the caller
+    '    releases the latch by compare-and-swap on its OWN start tick rather than
+    '    by an unconditional store (Form1.urlWatchTimer_Tick).
+    Friend Function ShouldStartWatchPass(ByVal inFlightSinceTick As Long,
+                                         ByVal nowTick As Long,
+                                         ByVal staleAfterMs As Long) As Boolean
+        If inFlightSinceTick <= 0 Then Return True          ' idle - nothing holds the latch
+        If nowTick < inFlightSinceTick Then Return True     ' a mark from the future: junk
+        If staleAfterMs <= 0 Then Return True               ' no bound asked for
+        Return (nowTick - inFlightSinceTick) >= staleAfterMs
     End Function
 
     ' ------------------------------------------------------------------
@@ -460,6 +565,45 @@ Friend Module UrlWatch
             If String.Equals(n, b, StringComparison.OrdinalIgnoreCase) Then Return True
         Next
         Return False
+    End Function
+
+    '    F14 + F34 (19/08/2026 bug-hunt, both P2): the REDIRECT-TIME gate. May we
+    '    act on this window? Pure, total - the two findings are one decision.
+    '
+    '    The redirect re-resolves the foreground window (the user may have
+    '    alt-tabbed during the pool-thread UIA read, and typing into a window they
+    '    are no longer looking at is indefensible), and everything that made that
+    '    re-resolution SAFE used to rest on FindOmnibox:
+    '
+    '      F34: "a non-Chromium window has no element matching the omnibox id or
+    '      class" is NOT a security property. AutomationId and ClassName are values
+    '      a process publishes about its OWN controls; any app can expose a
+    '      ControlType.Edit with AutomationId "view_1012" or a ClassName ending
+    '      "OmniboxViewViews". IsWatchedBrowser was applied at READ time only, so
+    '      MonkMode would SetFocus + SetValue + synthesise Enter into a window that
+    '      was not a browser at all.
+    '
+    '      F14: even a genuine browser is the WRONG one if it is not the window the
+    '      hit came from. Alt-tabbing from blocked Chrome to Edge on a half-written
+    '      form navigated Edge away and lost the page state - the watcher acting on
+    '      a window that was never shown to be on a blocked URL.
+    '
+    '    So BOTH must hold at redirect time: the foreground window is the very
+    '    window whose address bar produced the hit, AND its process is a watched
+    '    browser NOW (re-read, not carried over). Window identity subsumes "still
+    '    on a blocked URL" for the alt-tab case and needs no pattern set down here.
+    '    Zero handles are refused on both sides, so "no window was recorded" and
+    '    "there is no foreground window" both mean DO NOTHING.
+    '
+    '    Refusing costs one nudge - the next beat past the cooldown tries again,
+    '    and the hosts block never depended on this at all.
+    Friend Function MayRedirectToWindow(ByVal readWindow As IntPtr,
+                                        ByVal foregroundWindow As IntPtr,
+                                        ByVal foregroundProcessName As String) As Boolean
+        If readWindow = IntPtr.Zero Then Return False          ' no hit was read from a window
+        If foregroundWindow = IntPtr.Zero Then Return False    ' nothing is in the foreground
+        If readWindow <> foregroundWindow Then Return False    ' F14: a DIFFERENT window now
+        Return IsWatchedBrowser(foregroundProcessName)         ' F34: and it must be a browser
     End Function
 
     ' ------------------------------------------------------------------
@@ -648,10 +792,18 @@ Friend Module UrlWatch
     Private Sub SendKeyEvent(ByVal bVk As Byte, ByVal bScan As Byte, ByVal dwFlags As UInteger, ByVal dwExtraInfo As UIntPtr)
     End Sub
 
-    '    The foreground window's process name (no ".exe"), "" when there is no
-    '    foreground window or the process has already gone. Callers wrap.
-    Private Function LiveForegroundProcessName() As String
-        Dim h As IntPtr = GetForegroundWindow()
+    '    F14/F34: the window the CURRENT hit was read from, or Zero for "none".
+    '    Written only by a successful LiveReadForegroundUrl and CONSUMED (swapped
+    '    back to Zero) by LivePerformRedirect, so one read authorises at most one
+    '    redirect, and a redirect can never be authorised by a read that did not
+    '    happen. Touched from a pool thread - and, since F33 lets a stale pass be
+    '    taken over, potentially from two at once - hence Interlocked on every
+    '    access rather than a plain store.
+    Private lastReadWindow As IntPtr = IntPtr.Zero
+
+    '    The process name (no ".exe") behind a window handle, "" when the handle is
+    '    Zero or the process has already gone. Callers wrap.
+    Private Function ProcessNameOfWindow(ByVal h As IntPtr) As String
         If h = IntPtr.Zero Then Return ""
         Dim pid As UInteger = 0UI
         GetWindowThreadProcessId(h, pid)
@@ -659,6 +811,12 @@ Friend Module UrlWatch
         Using p As Process = Process.GetProcessById(CInt(pid))
             Return If(p.ProcessName, "")
         End Using
+    End Function
+
+    '    The foreground window's process name (no ".exe"), "" when there is no
+    '    foreground window or the process has already gone. Callers wrap.
+    Private Function LiveForegroundProcessName() As String
+        Return ProcessNameOfWindow(GetForegroundWindow())
     End Function
 
     '    Read the FOREGROUND window's address bar. Foreground only, by design: a
@@ -672,6 +830,9 @@ Friend Module UrlWatch
     '    events on every keystroke (it froze NVDA for seconds); this is called once
     '    per 2s beat from a pool thread and holds no subscription.
     Private Function LiveReadForegroundUrl() As String
+        ' F14/F34: forget any earlier window FIRST, so a read that fails anywhere
+        ' below cannot leave a stale handle standing as authorisation to redirect.
+        System.Threading.Interlocked.Exchange(lastReadWindow, IntPtr.Zero)
         Dim h As IntPtr = GetForegroundWindow()
         If h = IntPtr.Zero Then Return ""
         Dim root As AutomationElement = AutomationElement.FromHandle(h)
@@ -680,7 +841,11 @@ Friend Module UrlWatch
         If box Is Nothing Then Return ""
         Dim vp As ValuePattern = TryCast(box.GetCurrentPattern(ValuePattern.Pattern), ValuePattern)
         If vp Is Nothing Then Return ""
-        Return If(vp.Current.Value, "")
+        Dim value As String = If(vp.Current.Value, "")
+        ' Record the window this URL actually came from - the redirect may only act
+        ' on THIS window (MayRedirectToWindow).
+        If value.Length > 0 Then System.Threading.Interlocked.Exchange(lastReadWindow, h)
+        Return value
     End Function
 
     '    SetValue + Enter on the foreground window's address bar. False when there
@@ -689,18 +854,26 @@ Friend Module UrlWatch
     '    page), so the navigation would never happen.
     '
     '    The foreground window is re-read here rather than carried over from the
-    '    read: the user may have alt-tabbed in between, and typing into the window
-    '    they are looking at NOW is the only defensible choice. What stops that
-    '    being dangerous is FindOmnibox's strict identification - if the new
-    '    foreground window is not a Chromium browser it has no element matching the
-    '    omnibox id or class, so this returns False and nothing is typed anywhere.
+    '    read: the user may have alt-tabbed in between, and typing into a window
+    '    that is no longer in front of them is indefensible. What stops the
+    '    re-resolution being dangerous is MayRedirectToWindow - NOT, as this
+    '    comment used to claim, FindOmnibox's identification, which rests on an
+    '    AutomationId and a ClassName any process may publish about its own
+    '    controls (F34), and which says nothing about whether the window in front
+    '    of us now is the one that was on a blocked URL (F14). So: the foreground
+    '    window must BE the window the hit was read from, and its process must
+    '    still be a watched browser, both re-checked here. Otherwise: nothing.
+    '
+    '    The recorded window is CONSUMED (swapped to Zero) whether or not the gate
+    '    passes, so one address-bar read authorises at most one redirect.
     '
     '    The three ACTIONS are handed to PerformRedirectSteps rather than run here,
     '    so their ORDER and their refusal rule are unit-testable without a browser;
     '    this function is only the lookup that finds what to hand it.
     Private Function LivePerformRedirect(ByVal target As String) As Boolean
+        Dim readWindow As IntPtr = System.Threading.Interlocked.Exchange(lastReadWindow, IntPtr.Zero)
         Dim h As IntPtr = GetForegroundWindow()
-        If h = IntPtr.Zero Then Return False
+        If Not MayRedirectToWindow(readWindow, h, ProcessNameOfWindow(h)) Then Return False
         Dim root As AutomationElement = AutomationElement.FromHandle(h)
         If root Is Nothing Then Return False
         Dim box As AutomationElement = FindOmnibox(root)

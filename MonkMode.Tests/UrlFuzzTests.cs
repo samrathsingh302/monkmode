@@ -41,11 +41,12 @@
 //     (AppKillMatchTests.cs's header argues the identical case for the process matcher).
 //   - MONOTONICITY: adding a pattern can never turn a hit into a miss, and the boolean is
 //     order-independent. Both would be silent under-blocks.
-//   - the two KNOWN RESIDUALS from the 19/08/2026 bug-hunt are pinned as CURRENT behaviour,
-//     named as residuals, with the finding id in the comment - F12 (trailing-dot FQDN) and
-//     F13 (whitespace host in a redirect target). Pinning the desired behaviour would leave
-//     the suite red and pinning them silently would hide them; naming them means the fix slice
-//     has a test to invert.
+//   - F12 (trailing-dot FQDN) and F13 (whitespace host in a redirect target) were pinned here
+//     as CURRENT behaviour under KnownResidual_ names so the fix slice would have assertions to
+//     invert rather than tests to invent. FX8 fixed both; the pins are inverted in place and
+//     renamed Fixed_F12_/Fixed_F13_, and they now FAIL if either fix is reverted. F60 (a
+//     scheme-less ported URL with a query and no path) is still a residual and still pinned as
+//     current behaviour.
 //
 // Fences honoured: strings only. Nothing here touches the filesystem, the registry, the SCM,
 // a browser, a socket or any UIA type - the whole file runs against mm_notify.UrlWatch's pure
@@ -461,38 +462,118 @@ public class UrlFuzzTests
     }
 
     // ---------------------------------------------------------------------------------
-    // 5. the two KNOWN RESIDUALS - current behaviour, named, with their finding ids
+    // 5. F12 and F13 - FIXED by FX8 (19/08/2026 bug-hunt). These two were pinned here as
+    //    KnownResidual_F12_TrailingDotFqdnIsNotMatched and
+    //    KnownResidual_F13_InteriorWhitespaceSurvivesIntoTheRedirectHost, i.e. as CURRENT
+    //    behaviour with the finding id in-comment so the fix slice would have assertions to
+    //    invert rather than tests to invent. Inverted below. F60 stays a residual.
     // ---------------------------------------------------------------------------------
 
     [Fact]
-    public void KnownResidual_F12_TrailingDotFqdnIsNotMatched()
+    public void Fixed_F12_TrailingDotFqdnIsNormalisedAwayAndMatches()
     {
-        // FINDING F12 (19/08/2026 bug-hunt, P2): "http://youtube.com./shorts/abc" loads (hosts
-        // matching is exact-name) but the authority keeps its trailing dot, so the pattern
-        // "youtube.com" -> "youtube.com/" never occurs in "youtube.com./shorts/abc" and the
-        // watcher is silent on the one case F2b exists to catch. Pinned as CURRENT behaviour,
-        // not as desired behaviour: the fix slice inverts these three assertions.
-        Assert.Equal("youtube.com./shorts/abc", N("http://youtube.com./shorts/abc"));
-        Assert.False(M("http://youtube.com./shorts/abc", "youtube.com/shorts"));
-        Assert.False(M("http://youtube.com./", "youtube.com/"));
-        // The ordinary FQDN is unaffected, which is why the residual is P2 and not P1.
+        // FINDING F12 (P2, FIXED): "http://youtube.com./shorts/abc" loads - hosts matching is
+        // exact-name, so the hosts block misses the trailing-dot spelling too and the WATCHER IS
+        // THE ONLY NET. The authority used to keep its dot, so the pattern "youtube.com/" never
+        // occurred in the token and the watcher was silent on the one case F2b exists to catch.
+        // The root dot is now stripped, which WIDENS what matches - the blocking direction (R1).
+        Assert.Equal("youtube.com/shorts/abc", N("http://youtube.com./shorts/abc"));
+        Assert.True(M("http://youtube.com./shorts/abc", "youtube.com/shorts"));
+        Assert.True(M("http://youtube.com./", "youtube.com/"));       // the P58 home token too
+        // The ordinary FQDN is unaffected - the fix widens, it never moves an existing match.
         Assert.True(M("http://youtube.com/shorts/abc", "youtube.com/shorts"));
+        // The evasion is closed in every spelling it can be typed in, including the ones that
+        // put the dot next to another strip (www., a port, userinfo, a query) and the
+        // multi-dot/whitespace shapes that would defeat a single non-repeating peel.
+        foreach (var evasion in new[]
+                 {
+                     "youtube.com./shorts/x", "www.youtube.com./shorts/x", "http://youtube.com.:443/shorts/x",
+                     "https://user@youtube.com./shorts/x?a=b", "YOUTUBE.COM./SHORTS/X",
+                     "youtube.com../shorts/x", "youtube.com...../shorts/x", "  youtube.com. /shorts/x",
+                     "youtube.com. ./shorts/x", "m.youtube.com./shorts/x",
+                 })
+            Assert.True(M(evasion, "youtube.com/shorts"), $"F12 evasion survived: {Quote(evasion)}");
+        // ...and the redirect for the trailing-dot form lands on the SAME destination as the
+        // ordinary form, rather than on a host nobody could reach ("https://youtube.com./").
+        Assert.Equal(mm_notify.UrlWatch.YouTubeRedirect, R("youtube.com./shorts/x", "youtube.com/shorts"));
+        Assert.Equal("https://instagram.com/", R("www.instagram.com./reels/x", "instagram.com/reels"));
+        // The peel is a fixed point, so the token still survives a second normalisation - the
+        // property every caller relies on when it normalises defensively.
+        foreach (var raw in new[] { "youtube.com./", "youtube.com. . ", "a.b.c...", "..." })
+            Assert.Equal(N(raw), N(N(raw)));
+        // A host that is ONLY dots leaves no host at all, which is "" (never a hit) and not a
+        // hostless token - the shape RedirectTargetFor's "https:///" guard exists for.
+        Assert.Equal("", N("..."));
+        Assert.Equal("", N("http://./x"));
     }
 
     [Fact]
-    public void KnownResidual_F13_InteriorWhitespaceSurvivesIntoTheRedirectHost()
+    public void Fixed_F13_AGarbageDerivedHostAbortsTheRedirect_ButNotTheMatch()
     {
-        // FINDING F13 (19/08/2026 bug-hunt, P2): omnibox free text is read verbatim, so typing
-        // "why is youtube.com/shorts down" matches, and the target is built from an authority
-        // that still carries interior spaces. Normalize deliberately only re-trims the EDGES
-        // (UrlWatch.vb:151-159 argues interior whitespace is not recoverable), so the guard at
-        // :171 - authority non-empty - never fires. Pinned as CURRENT behaviour.
+        // FINDING F13 (P2, FIXED): omnibox free text is reported verbatim, so typing
+        // "why is youtube.com/shorts down" IS read as a URL. It matches "youtube.com/shorts" by
+        // substring, and the target used to be built from the derived host "why is youtube.com" -
+        // the watcher typed "https://why is youtube.com/" into the address bar and pressed Enter.
+        // Interior whitespace is not recoverable at normalisation time (P56 re-trims only the
+        // EDGES), so the non-empty-authority guard never fired.
+        //
+        // The fix gates the ACTION, never the match: in a fail-soft layer no action beats wrong
+        // action, and narrowing what MATCHES would be the fail-open direction.
         const string typed = "why is youtube.com/shorts down";
-        Assert.Equal("why is youtube.com/shorts down", N(typed));
-        Assert.True(M(typed, "youtube.com/shorts"));
-        Assert.Equal("https://why is youtube.com/", R(typed, "youtube.com/shorts"));
-        // The trimmed sibling behaves properly, so the residual is confined to free text.
+        Assert.Equal("why is youtube.com/shorts down", N(typed));   // normalisation unchanged
+        Assert.True(M(typed, "youtube.com/shorts"));                // the MATCH still stands
+        Assert.Equal("", R(typed, "youtube.com/shorts"));           // ...but nothing is typed
+        // Every free-text shape whose words land in the AUTHORITY - i.e. before the first '/',
+        // which is the whole of what HostOfNormalized hands the redirect builder.
+        foreach (var freeText in new[]
+                 {
+                     "why is youtube.com/shorts down", "is youtube.com/shorts blocked",
+                     "how to unblock youtube.com/shorts", "search for youtube.com/shorts",
+                 })
+        {
+            Assert.True(M(freeText, "youtube.com/shorts"), $"match lost for {Quote(freeText)}");
+            Assert.Equal("", R(freeText, "youtube.com/shorts"));
+        }
+        // THE BOUNDARY, so this is not read as "refuse anything with a space in it": free text
+        // whose junk falls in the PATH still leaves a real, navigable host, and that is a hit on
+        // that host by every rule this layer has. It redirects, exactly as it always did.
+        Assert.Equal(mm_notify.UrlWatch.YouTubeRedirect, R("youtube.com/shorts is down", "youtube.com/shorts"));
+        // The trimmed sibling is untouched: a real hit still redirects.
         Assert.Equal(mm_notify.UrlWatch.YouTubeRedirect, R("youtube.com/shorts", "youtube.com/shorts"));
+    }
+
+    [Fact]
+    public void Fixed_F13_ThePlausibleHostPredicate_RefusesOnlyWhatCannotBeAHost()
+    {
+        // The predicate itself, so the F13 gate cannot be widened into a MATCH narrowing by
+        // accident. Real hosts - including the IDN forms P56 deliberately leaves alone - pass.
+        foreach (var ok in new[] { "youtube.com", "m.youtube.com", "localhost", "192.168.0.1",
+                                   "xn--nicode-4ya.de", "a-b.c.d.example", "my_host.example",
+                                   // u-umlaut: a raw IDN host passes, because P56 leaves unicode
+                                   // hosts exactly as they arrive and refusing them here would
+                                   // drop the nudge for a user whose --urls are unicode too.
+                                   ((char)0x00fc) + "nicode.de", "YouTube.com" })
+            Assert.True(mm_notify.UrlWatch.IsPlausibleRedirectHost(ok), ok);
+        // ...and everything that could only have come from free text or from a malformed
+        // authority the strips could not repair.
+        foreach (var junk in new[] { "", " ", "why is youtube.com", "youtube com", "a\tb.com",
+                                     "a b.com", "a" + ((char)0x00a0) + "b.com",   // space, then NBSP
+                                     "a\"b.com", "a<b.com", "a|b.com", "a{b}.com", "a%b.com",
+                                     "a/b.com", "a:b.com", "a@b.com", "a?b.com", "a#b.com" })
+            Assert.False(mm_notify.UrlWatch.IsPlausibleRedirectHost(junk), Quote(junk));
+        Assert.False(mm_notify.UrlWatch.IsPlausibleRedirectHost(null!));
+        // The corollary at the layer's edge: no target that leaves this layer can carry a
+        // character that would make the emitted URL mean something other than a host.
+        var greedy = new[] { "/", ".", "com", "youtube.com", "a", "localhost", "1", "b" };
+        foreach (var raw in RandomCorpus())
+        {
+            var target = R(raw, greedy);
+            if (target.Length == 0) continue;
+            var host = target.Substring("https://".Length).TrimEnd('/');
+            Assert.True(mm_notify.UrlWatch.IsPlausibleRedirectHost(
+                            target == mm_notify.UrlWatch.YouTubeRedirect ? "youtube.com" : host),
+                        $"implausible host escaped in {Quote(target)} from {Quote(raw)}");
+        }
     }
 
     [Fact]

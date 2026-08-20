@@ -237,16 +237,23 @@ public class UrlMatchTests
     }
 
     [Theory]
-    // A trailing-dot ("fully qualified") host is left alone and therefore never matches an
-    // ordinary pattern. DOCUMENTED RESIDUAL, not an oversight: the hosts file misses the same
-    // trick, so closing it here would buy nothing, and stripping a trailing dot is a normalisation
-    // decision nobody has pinned. Recorded so a future reader sees it was considered.
-    [InlineData("youtube.com./", "youtube.com./")]
-    [InlineData("www.youtube.com./shorts/x", "youtube.com./shorts/x")]
-    public void NormalizeUrlForMatch_TrailingDotHost_IsLeftAlone_KnownResidual(string raw, string expected)
+    // FINDING F12 (19/08/2026 bug-hunt, P2, FIXED by FX8). This pin used to read
+    // NormalizeUrlForMatch_TrailingDotHost_IsLeftAlone_KnownResidual and argued that leaving the
+    // trailing dot alone "buys nothing because the hosts file misses the same trick". That got
+    // the direction backwards: the hosts file missing it is exactly why the WATCHER is the only
+    // net for "youtube.com./shorts" - the page loads, and the nudge layer was the last thing
+    // that could have noticed. The root dot is now peeled off the authority, which WIDENS what
+    // matches (R1's blocking direction) and leaves every other host untouched.
+    [InlineData("youtube.com./", "youtube.com/")]
+    [InlineData("www.youtube.com./shorts/x", "youtube.com/shorts/x")]
+    [InlineData("http://youtube.com.:8080/shorts/x", "youtube.com/shorts/x")]
+    [InlineData("youtube.com../shorts/x", "youtube.com/shorts/x")]   // more than one, too
+    [InlineData("...", "")]                                          // dots ALL the way: no host
+    public void NormalizeUrlForMatch_TrailingDotHost_IsStripped_F12(string raw, string expected)
     {
         Assert.Equal(expected, N(raw));
-        Assert.False(M(raw, "youtube.com/shorts"));   // ...and so it misses. Deliberate.
+        // ...and the match it used to miss now lands - unless there was no host at all.
+        Assert.Equal(expected.Length > 0, M(raw, "youtube.com/shorts", "youtube.com/"));
     }
 
     // =================================================================================
@@ -622,10 +629,16 @@ public class UrlMatchTests
     }
 
     [Fact]
-    public void RedirectTargetFor_IsTotal_AndAgreesWithUrlMatchesPatterns()
+    public void RedirectTargetFor_IsTotal_AndOnlyEverActsOnAHit()
     {
-        // The two must never disagree: a non-empty target means "act", and acting without a hit
-        // would be the watcher typing into the omnibox of a site nobody blocked.
+        // ACTING IMPLIES A HIT, always: a non-empty target without a match would be the watcher
+        // typing into the omnibox of a site nobody blocked. That direction is absolute.
+        //
+        // The converse holds EXCEPT for F13: a hit whose derived host could not be a host (the
+        // omnibox was showing free text, not a page) is matched but NOT acted on, because in a
+        // fail-soft layer no action beats wrong action. So the one permitted disagreement is
+        // named here rather than dropped, and a fix that started refusing REAL hosts - a
+        // narrowing, i.e. the fail-open direction - would fail this test.
         foreach (var url in Corpus)
         {
             foreach (var pattern in new[] { "youtube.com/", "youtube.com/shorts", "", "/", null })
@@ -634,7 +647,12 @@ public class UrlMatchTests
                 var ex = Record.Exception(() =>
                 {
                     var target = mm_notify.UrlWatch.RedirectTargetFor(url!, patterns);
-                    Assert.Equal(mm_notify.UrlWatch.UrlMatchesPatterns(url!, patterns), target.Length > 0);
+                    var hit = mm_notify.UrlWatch.UrlMatchesPatterns(url!, patterns);
+                    if (target.Length > 0) Assert.True(hit, $"acted without a hit on '{url}'");
+                    else if (hit)
+                        Assert.False(mm_notify.UrlWatch.IsPlausibleRedirectHost(
+                                         mm_notify.UrlWatch.HostOfNormalized(N(url))),
+                                     $"a plausible host was refused a target: '{url}'");
                 });
                 Assert.Null(ex);
             }
