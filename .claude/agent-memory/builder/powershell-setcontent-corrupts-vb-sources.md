@@ -1,6 +1,6 @@
 ---
 name: powershell-setcontent-corrupts-vb-sources
-description: Never script monk-mode .vb/.cs edits through PowerShell Get-Content/Set-Content (BOM + mangled non-ASCII) or a Python read/write (CRLF flattened to LF); use the Edit tool or Copy-Item
+description: Never script monk-mode .vb/.cs edits through PowerShell Get-Content/Set-Content (BOM + mangled non-ASCII), a Python read/write, or sed -i (both flatten CRLF to LF); use the Edit tool or Copy-Item
 metadata:
   type: feedback
 ---
@@ -24,6 +24,13 @@ replacements; git hid it (`core.autocrlf=true` normalises the diff), so the tell
 "LF will be replaced by CRLF" warning plus a suspiciously small `--stat`. Recovered with
 `git checkout --` and redone as 5 Edit calls. Verify endings with
 `grep -vc $'\r' <file>` — it must be 0 for every repo source file.
+
+A third shape: **`sed -i` in the Bash tool**. On 20/08/2026 (FX9) a one-line `sed -i`
+mutation-test edit on `MM_notify/BlockPage.vb` flattened the *whole file* CRLF→LF (GNU sed
+rewrites the file from its own LF-normalised buffer). Same tells: the "LF will be replaced
+by CRLF" warning and `file <path>` losing "with CRLF line terminators". Recovered with
+`git checkout --` and the addition re-applied with one Edit call. **Mutation tests are not
+an exception** — do the mutation with the Edit tool too, and revert it the same way.
 
 **How to apply:** whenever tempted to script an identical edit across the four
 project copies. `Copy-Item` for whole-file duplication (ConfigIntegrity.vb / IniFile.vb
