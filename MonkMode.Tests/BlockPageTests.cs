@@ -322,6 +322,305 @@ public class BlockPageResponseTests
     }
 }
 
+// ---- FX9 (F11): WHEN MAY THE PAGE HOLD PORT 80? ----
+//
+// The harm: the gate was "does the config NAME a block?", which counts a slot the moment its
+// ScheduleSpec OR StartAt OR Until is non-empty. `monkmode block --start +30d --for 1h` therefore
+// took 127.0.0.1:80 - with ExclusiveAddressUse, so nothing else on the machine could have it - for
+// THIRTY DAYS, and a schedule sat on it between windows.
+//
+// The gate is now "is a block's own TIMER running?". The two tests that FAIL on the old behaviour
+// are PendingSlot_ThirtyDaysOut and ScheduleBetweenWindows below; the rest fence the fix so it
+// cannot over-narrow, because the failure direction that matters is releasing the port while a
+// block's timer IS running.
+//
+// WHAT THIS COSTS - pin the trade, not a free lunch. A PENDING slot is NOT idle: its sites are
+// written into hosts at arm time and Service1.SlotContributesLists keeps them in the hosts union
+// for the whole wait (Service1.vb:1189-1196, :3143-3156), so this gate genuinely gives up the
+// MonkMode page for up to thirty days and the user gets the browser's own connection-refused page
+// instead. That is the recorded decision: a month-long exclusive hold on the machine's only port
+// 80 is the worse of the two harms, and the BLOCK is unaffected either way - hosts refuses those
+// domains for every second of the wait, bound socket or not. Narrowing is safe HERE and nowhere
+// else in the notifier for exactly that reason: what an under-bind costs is the prettiness of the
+// refusal, never the refusal.
+public class BlockPageBindGateTests
+{
+    private static readonly System.Globalization.CultureInfo CA = new("en-CA");
+    private static readonly DateTime Mark = new(2026, 8, 19, 9, 0, 0);
+    private static string Stamp(DateTime dt) => dt.ToString(CA);
+
+    private static mm_notify.BlockPage.SlotBindState Slot(
+        string until = "", string startAt = "", string spec = "", string windowUntil = "")
+    {
+        var s = new mm_notify.BlockPage.SlotBindState();
+        s.UntilText = until;
+        s.StartAtText = startAt;
+        s.ScheduleSpec = spec;
+        s.WindowUntilText = windowUntil;
+        return s;
+    }
+
+    private static bool Bind(params mm_notify.BlockPage.SlotBindState[] slots)
+        => mm_notify.BlockPage.ShouldBindNow(new List<mm_notify.BlockPage.SlotBindState>(slots), Stamp(Mark));
+
+    // ---- THE BUG, both halves ----
+
+    // `monkmode block --start +30d --for 1h`: StartAt is set, the service has not computed an
+    // Until yet, so the slot's own timer is not running. Thirty days of EXCLUSIVE port 80 for a
+    // block that has not begun is what this fix exists to end.
+    //
+    // The slot is not idle, though, and this assertion is not free: its sites are hosts-blocked
+    // from arm time (Service1.SlotContributesLists keeps a PENDING slot in the hosts union), so
+    // what the False here buys - a machine that keeps its port 80 - is paid for with thirty days
+    // of browser connection-refused pages instead of MonkMode's. Deliberate; see the trade at the
+    // top of this file. Flipping this to True is exactly the regression FX9 closed.
+    [Fact]
+    public void PendingSlot_ThirtyDaysOut_DoesNotHoldThePort()
+    {
+        Assert.False(Bind(Slot(startAt: Stamp(Mark.AddDays(30)))));
+    }
+
+    // A schedule slot between its windows: the service clears ScheduleActiveUntil at each close
+    // and stamps it again at the next open, so "no window end" IS "no window open".
+    [Fact]
+    public void ScheduleBetweenWindows_DoesNotHoldThePort()
+    {
+        Assert.False(Bind(Slot(spec: "v2;12345:0900-1700;sites=reddit.com")));
+    }
+
+    // ---- what MUST still hold the port ----
+
+    [Fact]
+    public void ArmedAndStartedSlot_HoldsThePort()
+    {
+        Assert.True(Bind(Slot(until: Stamp(Mark.AddHours(1)))));
+    }
+
+    [Fact]
+    public void ScheduleMidWindow_HoldsThePort()
+    {
+        Assert.True(Bind(Slot(spec: "v2;12345:0900-1700;sites=reddit.com",
+                              windowUntil: Stamp(Mark.AddMinutes(30)))));
+    }
+
+    // A pending slot cannot pull the page down off a sibling that IS running. Any one enforcing
+    // slot binds for all of them.
+    [Fact]
+    public void OneRunningSlotAmongPendingOnes_HoldsThePort()
+    {
+        Assert.True(Bind(
+            Slot(startAt: Stamp(Mark.AddDays(30))),
+            Slot(spec: "v2;6:2200-2300"),
+            Slot(until: Stamp(Mark.AddMinutes(5)))));
+    }
+
+    // ---- the documented boundary bias: a page held slightly too long, never a port held too long ----
+    //
+    // The service retires a slot on its own 10s tick, so its hosts entries can outlive the slot's
+    // end by a tick; releasing the socket the instant the timer runs out would answer those still-
+    // live entries with connection-refused. BindGraceSeconds of overhang covers that, and then the
+    // port genuinely goes back.
+    [Theory]
+    [InlineData(3600, true)]     // an hour left
+    [InlineData(1, true)]        // a second left
+    [InlineData(0, true)]        // exactly at the mark - inside the grace
+    [InlineData(-59, true)]      // just ended - hosts may not be cleaned up yet
+    [InlineData(-60, false)]     // the grace is spent
+    [InlineData(-3600, false)]   // long over
+    public void GracePastTheEnd_HoldsThePort_ThenReleasesIt(int secondsFromMark, bool expected)
+    {
+        Assert.Equal(expected, Bind(Slot(until: Stamp(Mark.AddSeconds(secondsFromMark)))));
+        // A schedule window's close is measured on exactly the same rule.
+        Assert.Equal(expected, Bind(Slot(spec: "v2;12345:0900-1700",
+                                         windowUntil: Stamp(Mark.AddSeconds(secondsFromMark)))));
+    }
+
+    // ---- every uncertainty binds ----
+
+    [Theory]
+    [InlineData("not a date")]
+    [InlineData("?")]                    // BlockPage.UnreadableStamp - what Form1 hands over for a stamp it cannot decrypt
+    [InlineData("2026-13-45 99:99:99")]
+    public void APresentButUnreadableDeadline_HoldsThePort(string until)
+    {
+        Assert.True(Bind(Slot(until: until)));
+        Assert.True(Bind(Slot(windowUntil: until)));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    [InlineData("not a mark")]
+    public void AnUnmeasurableMark_HoldsThePortForAnySlotCarryingADeadline(string? mark)
+    {
+        Assert.True(mm_notify.BlockPage.ShouldBindNow(
+            new List<mm_notify.BlockPage.SlotBindState> { Slot(until: Stamp(Mark.AddHours(1))) }, mark!));
+    }
+
+    // ...but PENDING and between-windows are NOT-RUNNING as a matter of SHAPE, not of timing, so no
+    // unreadable mark can talk them into holding the port. This is the case that would quietly
+    // restore the thirty-day hold if the bias were applied one level too high.
+    [Theory]
+    [InlineData("")]
+    [InlineData("not a mark")]
+    public void AnUnmeasurableMark_StillDoesNotHoldThePortForAStructurallyNotStartedSlot(string mark)
+    {
+        Assert.False(mm_notify.BlockPage.ShouldBindNow(
+            new List<mm_notify.BlockPage.SlotBindState>
+            {
+                Slot(startAt: Stamp(Mark.AddDays(30))),
+                Slot(spec: "v2;12345:0900-1700"),
+            }, mark));
+    }
+
+    // ---- nothing named at all ----
+
+    [Fact]
+    public void NoSlots_ReleaseThePort()
+    {
+        Assert.False(mm_notify.BlockPage.ShouldBindNow(null, Stamp(Mark)));
+        Assert.False(Bind());
+        Assert.False(Bind(Slot(), Slot(), Slot()));       // blank sections, as an empty config reads
+    }
+
+    [Fact]
+    public void ANullSlotEntry_IsSkipped_NotThrown()
+    {
+        // Explicit arrays: `Bind(null!)` would bind the params array itself to null, not an entry.
+        Assert.False(Bind(new mm_notify.BlockPage.SlotBindState[] { null! }));
+        Assert.True(Bind(new mm_notify.BlockPage.SlotBindState[] { null!, Slot(until: Stamp(Mark.AddHours(1))) }));
+    }
+
+    // The mark is the monotonic [Time] HighWater, never the wall clock - so rolling the system
+    // clock forward cannot make MonkMode drop the page (nor rolling it back hold it forever).
+    [Fact]
+    public void TheVerdictIsMeasuredAgainstTheGivenMark_NotTheWallClock()
+    {
+        var longAgo = new DateTime(1999, 1, 1, 0, 0, 0);
+        Assert.True(mm_notify.BlockPage.ShouldBindNow(
+            new List<mm_notify.BlockPage.SlotBindState> { Slot(until: Stamp(longAgo.AddHours(1))) },
+            Stamp(longAgo)));
+        Assert.False(mm_notify.BlockPage.ShouldBindNow(
+            new List<mm_notify.BlockPage.SlotBindState> { Slot(until: Stamp(longAgo.AddHours(1))) },
+            Stamp(longAgo.AddHours(2))));
+    }
+
+    [Fact]
+    public void PinnedConstants()
+    {
+        Assert.Equal(60, mm_notify.BlockPage.BindGraceSeconds);
+        Assert.Equal("?", mm_notify.BlockPage.UnreadableStamp);
+    }
+}
+
+// The same gate driven through the REAL notifier reader: a config in the notifier's own IniFile,
+// with the encrypted stamps the CLI and service actually write, straight into the decision
+// RefreshBlockPage takes. This is what catches a reader wired to the wrong key name - the pure
+// truth table above cannot.
+//
+// No file, no socket, no service: an in-memory IniFile (the pattern the notifier's other slot
+// tests use) and Form1's read-only decision.
+public class BlockPageBindGateFromConfigTests
+{
+    private static readonly System.Globalization.CultureInfo CA = new("en-CA");
+    private static readonly DateTime Mark = new(2026, 8, 19, 9, 0, 0);
+    private static readonly mm_notify.Simple3Des Enc = new("mm_textbox");
+
+    private static string E(DateTime dt) => Enc.EncryptData(dt.ToString(CA));
+
+    private static mm_notify.IniFile ConfigWithMark(params (string key, string value)[] slot1)
+    {
+        var ini = new mm_notify.IniFile();
+        ini.SetKeyValue("Time", "HighWater", Enc.EncryptData(Mark.ToString(CA)));
+        foreach ((string key, string value) in slot1) ini.SetKeyValue("Slot1", key, value);
+        return ini;
+    }
+
+    private static bool Serve(mm_notify.IniFile ini) => new mm_notify.Form1().ShouldServeBlockPage(ini);
+
+    // The headline case, end to end: `monkmode block --sites reddit.com --start +30d --for 1h`
+    // writes StartAt + DurationSeconds and leaves Until empty until the service activates it.
+    //
+    // reddit.com IS blocked throughout that wait - the CLI wrote it into hosts at arm and the
+    // service keeps a PENDING slot in the hosts union - so what this asserts is that MonkMode
+    // gives up its PAGE for the wait, not the block, in exchange for not holding the machine's
+    // port 80 exclusively for a month. The trade is argued at the top of this file.
+    [Fact]
+    public void APendingBlockThirtyDaysOut_DoesNotHoldPort80()
+    {
+        Assert.False(Serve(ConfigWithMark(
+            ("Id", "1"),
+            ("StartAt", E(Mark.AddDays(30))),
+            ("DurationSeconds", "3600"),
+            ("Until", ""),
+            ("Sites", "reddit.com"))));
+    }
+
+    [Fact]
+    public void ARunningBlock_HoldsPort80()
+    {
+        Assert.True(Serve(ConfigWithMark(
+            ("Id", "1"),
+            ("Until", E(Mark.AddHours(1))),
+            ("Sites", "reddit.com"))));
+    }
+
+    [Fact]
+    public void AScheduleSlot_HoldsPort80_OnlyWhileItsWindowIsOpen()
+    {
+        Assert.False(Serve(ConfigWithMark(
+            ("Id", "2"),
+            ("ScheduleSpec", "v2;12345:0900-1700;sites=reddit.com"),
+            ("ScheduleActiveUntil", ""))));
+
+        Assert.True(Serve(ConfigWithMark(
+            ("Id", "2"),
+            ("ScheduleSpec", "v2;12345:0900-1700;sites=reddit.com"),
+            ("ScheduleActiveUntil", E(Mark.AddHours(3))))));
+    }
+
+    [Fact]
+    public void AnEmptyConfig_HoldsNothing()
+    {
+        Assert.False(Serve(new mm_notify.IniFile()));
+        Assert.False(Serve(ConfigWithMark()));
+    }
+
+    // A stamp that is present but will not decrypt (garbage in the file, or a config written under
+    // a different key) must BIND, not release: the notifier reads without a MAC gate, and "I cannot
+    // read this" is never a reason to take the page down under a possibly-live block.
+    [Fact]
+    public void AnUndecryptableUntil_HoldsPort80()
+    {
+        Assert.True(Serve(ConfigWithMark(("Id", "1"), ("Until", "!!!not base64!!!"))));
+        Assert.True(Serve(ConfigWithMark(("Id", "1"), ("Until", Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 })))));
+    }
+
+    // A config that cannot be scanned at all must HOLD the page, not release it. A truncated or
+    // failed read is not evidence that nothing is blocked, and releasing on it would be the one
+    // direction this gate must never fail in.
+    [Fact]
+    public void AConfigThatCannotBeScannedAtAll_HoldsPort80()
+    {
+        Assert.True(new mm_notify.Form1().ShouldServeBlockPage(null));
+    }
+
+    // A slot beyond position 1 counts too: the scan is bounded by MaxSlots, not by the stored
+    // [Slots] SlotCount, so forging SlotCount=0 cannot silence the page (nor, in the other
+    // direction, resurrect a hold).
+    [Fact]
+    public void ASlotBeyondTheStoredCount_IsStillSeen()
+    {
+        var ini = new mm_notify.IniFile();
+        ini.SetKeyValue("Time", "HighWater", Enc.EncryptData(Mark.ToString(CA)));
+        ini.SetKeyValue("Slots", "SlotCount", "0");
+        ini.SetKeyValue("Slot5", "Id", "5");
+        ini.SetKeyValue("Slot5", "Until", E(Mark.AddMinutes(20)));
+
+        Assert.True(Serve(ini));
+    }
+}
+
 // The listener seam. Every server here is started on an EPHEMERAL port (0) and stopped in a
 // finally; nothing binds 80.
 public class BlockPageListenerTests
@@ -566,6 +865,88 @@ public class BlockPageListenerTests
         finally
         {
             try { silent?.Close(); } catch { }
+            server.StopServing();
+        }
+    }
+
+    // FX9 (F11): the LIFECYCLE the fix introduces - the page now RELEASES the port and takes it
+    // back later, where before it bound once and held. Driven on an ephemeral port through the
+    // real decision (Form1.ShouldServeBlockPage over a real config) and the real server; only the
+    // two-line "bind or release" that RefreshBlockPage wraps around them is written out here.
+    //
+    // The timeline is one config read at three marks: before the pending block starts, during it,
+    // and an hour after it ends. What is asserted is CONVERGENCE - the socket ends up in the state
+    // the config says it should be in, and re-binding after a deliberate release works - not the
+    // live 5s cadence, which is smoke-owed.
+    [Fact]
+    public void BindReleaseAndRebind_FollowTheConfig_Converging()
+    {
+        var CA = new System.Globalization.CultureInfo("en-CA");
+        var enc = new mm_notify.Simple3Des("mm_textbox");
+        var start = new DateTime(2026, 8, 19, 9, 0, 0);
+        var form = new mm_notify.Form1();
+        var server = new mm_notify.BlockPageServer();
+
+        // ONE armed block: starts at 09:00, runs an hour. StartAt+Until is the ACTIVE shape; the
+        // PENDING shape (no Until) is the one the "before" beat below uses.
+        mm_notify.IniFile ConfigAt(DateTime mark, bool activated)
+        {
+            var ini = new mm_notify.IniFile();
+            ini.SetKeyValue("Time", "HighWater", enc.EncryptData(mark.ToString(CA)));
+            ini.SetKeyValue("Slot1", "Id", "1");
+            ini.SetKeyValue("Slot1", "StartAt", enc.EncryptData(start.ToString(CA)));
+            ini.SetKeyValue("Slot1", "DurationSeconds", "3600");
+            ini.SetKeyValue("Slot1", "Until", activated ? enc.EncryptData(start.AddHours(1).ToString(CA)) : "");
+            ini.SetKeyValue("Slot1", "Sites", "reddit.com");
+            return ini;
+        }
+
+        // The notifier's beat, minus the P50 retry gate (pinned separately by ShouldRetryBind).
+        void Beat(mm_notify.IniFile ini)
+        {
+            if (!form.ShouldServeBlockPage(ini)) { server.StopServing(); return; }
+            server.SetBody(mm_notify.BlockPage.BuildBlockPageHtml(new List<mm_notify.BlockPage.SlotLine>(), ""));
+            if (!server.IsListening) server.TryStart(0);
+        }
+
+        try
+        {
+            // 1. An hour BEFORE the start: PENDING. No port taken - the point of F11. (The
+            //    sites are hosts-blocked already; it is the PAGE that waits, not the block.)
+            Beat(ConfigAt(start.AddHours(-1), activated: false));
+            Assert.False(server.IsListening);
+
+            // 2. Thirty minutes IN: the service has stamped Until. Bind.
+            Beat(ConfigAt(start.AddMinutes(30), activated: true));
+            Assert.True(server.IsListening);
+            int firstPort = server.BoundPort;
+            Assert.NotEqual(mm_notify.BlockPage.LoopbackPort, firstPort);
+
+            // 3. Same state again: idempotent, still the same socket. No flap.
+            Beat(ConfigAt(start.AddMinutes(31), activated: true));
+            Assert.True(server.IsListening);
+            Assert.Equal(firstPort, server.BoundPort);
+
+            // 4. An hour AFTER the end (well past BindGraceSeconds): released.
+            Beat(ConfigAt(start.AddHours(2), activated: true));
+            Assert.False(server.IsListening);
+            Assert.Equal(0, server.BoundPort);
+
+            // 5. Repeating the released beat changes nothing - it converges, it does not oscillate.
+            Beat(ConfigAt(start.AddHours(2), activated: true));
+            Assert.False(server.IsListening);
+
+            // 6. A NEW block arms: the server takes a port again after a deliberate release.
+            var rearmed = ConfigAt(start.AddHours(2), activated: false);
+            rearmed.SetKeyValue("Slot1", "StartAt", enc.EncryptData(start.AddHours(2).ToString(CA)));
+            rearmed.SetKeyValue("Slot1", "Until", enc.EncryptData(start.AddHours(3).ToString(CA)));
+            Beat(rearmed);
+            Assert.True(server.IsListening);
+            Assert.True(server.BoundPort > 0);
+            Assert.NotEqual(mm_notify.BlockPage.LoopbackPort, server.BoundPort);
+        }
+        finally
+        {
             server.StopServing();
         }
     }

@@ -189,6 +189,132 @@ Friend Module BlockPage
         Return (nowTick - lastAttemptTick) >= intervalMs
     End Function
 
+    ' ================= FX9 (F11): WHEN MAY THE PAGE HOLD PORT 80? =================
+    '
+    ' THE HARM THIS ENDS. The gate used to be "does the config NAME a block?" - the
+    ' RawSlotBlockCount floor, which counts a position the moment its ScheduleSpec OR
+    ' StartAt OR Until is non-empty. `monkmode block --start +30d --for 1h` therefore
+    ' took 127.0.0.1:80 with ExclusiveAddressUse - so nothing else on the machine could
+    ' have it - for THIRTY DAYS, and a schedule sat on it between windows. A cosmetic
+    ' page evicting every other local web server for a month is the harm; the page is
+    ' now up only while a block's own TIMER is running.
+    '
+    ' THE TRADE, STATED HONESTLY - THIS IS NOT A FREE LUNCH. A PENDING slot's sites are
+    ' ALREADY BLOCKED from arm time: the CLI writes them into hosts and into
+    ' monkmode_hosts.block at arm, and Service1.SlotContributesLists is
+    ' `SlotEnforcesNow OrElse SlotIsPending`, so they are in the hosts union, the kill
+    ' union and the P37 snapshot truth throughout the wait (Service1.vb:1189-1196,
+    ' :3143-3156 - a documented, accepted v1.1 over-block). So "not started" does NOT
+    ' mean "not enforcing", and this gate DOES cost something real: for the whole pending
+    ' window a blocked http:// visit gets a browser connection-refused page instead of
+    ' MonkMode's. That is the DECISION, not an oversight - a month-long exclusive hold on
+    ' the machine's only port 80 is the worse harm of the two, and the thing that is
+    ' protected either way is the block itself: hosts keeps refusing those domains for
+    ' every second of the wait, with or without this socket. Same trade, smaller, for a
+    ' schedule between windows.
+    '
+    ' WHY THE WIDE READING IS RIGHT EVERYWHERE ELSE AND WRONG HERE. RawSlotApps /
+    ' RawSlotUrlPatterns / RawSlotBlockCount over-approximate deliberately: their cost
+    ' is one extra kill or one extra toast word, and under-counting would drop a live
+    ' block. This gate's cost is an exclusive hold on a well-known port belonging to the
+    ' whole machine, and its under-count costs only the PRETTINESS of the refusal. That
+    ' is why this is the one notifier scan that narrows.
+    '
+    ' THE BIAS, WHERE IT IS STILL UNCERTAIN. Every ambiguity binds:
+    '   * a deadline present but unparseable (or undecryptable - Form1 hands those over
+    '     as UnreadableStamp) => BIND;
+    '   * an unreadable [Time] HighWater mark, so nothing can be measured => any slot
+    '     carrying a deadline BINDS;
+    '   * BindGraceSeconds past a deadline => still BIND, because the service removes a
+    '     retired slot's hosts entries a tick AFTER its end, and the page should outlive
+    '     the entries that send a browser here rather than the other way round.
+    ' What never binds is a STRUCTURAL not-yet-started: PENDING (StartAt set, no Until
+    ' yet) and a schedule with no open window have no timer running as a matter of shape,
+    ' not of timing, so no mark and no grace can turn them into a bind. Their sites stay
+    ' hosts-blocked regardless - see THE TRADE above.
+    '
+    ' NO MAC GATE, like every other notifier read. A forged config can only take the
+    ' PAGE down, which is cosmetic; it cannot touch hosts, the kill list or the service.
+    '
+    ' CONVERGENCE, NOT FLAP. The verdict is a pure function of stored fields and the
+    ' MONOTONIC mark, and both only ever move forward, so for a fixed config the answer
+    ' flips at most once (bind -> release) and re-binds only when the config itself
+    ' changes. There is no oscillation for the 5s poll to chase.
+
+    ' Grace past a deadline before the page is released. The service retires a slot on
+    ' its own 10s tick, so its hosts entries can outlive its end by a tick; 60s covers
+    ' that with room and is the sanctioned direction of error (a page held slightly too
+    ' long, never a port held for thirty days).
+    Friend Const BindGraceSeconds As Integer = 60
+
+    ' What Form1 substitutes for a slot stamp that is present in the file but cannot be
+    ' decrypted or is empty after decryption. Deliberately never a parseable datetime, so
+    ' it reads as "present, unmeasurable" => BIND. Public so the tests pin the bias on the
+    ' same literal the notifier uses.
+    Friend Const UnreadableStamp As String = "?"
+
+    ' One slot as the bind decision sees it. All three stamps are en-CA PLAINTEXT
+    ' (Form1 has already decrypted them); ScheduleSpec is plaintext-as-stored.
+    '   UntilText       - the slot's own end. "" for PENDING and for a schedule slot.
+    '   StartAtText     - the delayed start. Set + no UntilText = PENDING.
+    '   ScheduleSpec    - the slot's window rule, if it is a schedule slot.
+    '   WindowUntilText - ScheduleActiveUntil: the SERVICE stamps it when a window opens
+    '                     and clears it at the close, so it is the one honest "is a
+    '                     window open?" signal the notifier can read without growing a
+    '                     window evaluator of its own.
+    Friend Class SlotBindState
+        Friend UntilText As String = ""
+        Friend StartAtText As String = ""
+        Friend ScheduleSpec As String = ""
+        Friend WindowUntilText As String = ""
+    End Class
+
+    ' The gate. True = at least one slot's own TIMER is running right now (or is inside
+    ' the boundary grace, or cannot be measured), so serve the page; False = release the
+    ' port, which for a PENDING or between-windows slot means giving up the page while
+    ' its sites stay hosts-blocked. asOfMark is the monotonic [Time] HighWater string,
+    ' never the wall clock - so rolling the system clock cannot make MonkMode drop the
+    ' page. PURE; never throws.
+    Friend Function ShouldBindNow(ByVal slots As IEnumerable(Of SlotBindState), ByVal asOfMark As String) As Boolean
+        If slots Is Nothing Then Return False
+        Dim mark As DateTime
+        Dim markOk As Boolean = DateTime.TryParse(If(asOfMark, ""), BindCulture, DateTimeStyles.None, mark)
+        For Each s As SlotBindState In slots
+            If s Is Nothing Then Continue For
+            If SlotEnforcesNow(s, mark, markOk) Then Return True
+        Next
+        Return False
+    End Function
+
+    ' Is THIS slot's own TIMER running? An open (or just-closed) schedule window, or a
+    ' running (or just-ended) end of its own. Everything else - PENDING, a schedule
+    ' between windows, a slot with no stamps at all - is No.
+    '
+    ' "Timer running", NOT "enforcing": a PENDING slot's sites are in the hosts union
+    ' from arm time and so ARE enforced here (Service1.SlotContributesLists). This asks
+    ' the narrower question the PAGE is entitled to ask - see THE TRADE in the essay.
+    Private Function SlotEnforcesNow(ByVal s As SlotBindState, ByVal mark As DateTime, ByVal markOk As Boolean) As Boolean
+        If StampStillAhead(s.WindowUntilText, mark, markOk) Then Return True
+        Return StampStillAhead(s.UntilText, mark, markOk)
+    End Function
+
+    ' Is this deadline still ahead of the mark, allowing BindGraceSeconds of overhang?
+    ' "" (no deadline at all) => False - the ONLY answer that releases the port, and the
+    ' one PENDING and between-windows both land on (deliberately: they are still
+    ' hosts-blocked, they just get the browser's own refusal page). Unparseable, or an
+    ' unmeasurable mark => True (bind: never release on an uncertainty).
+    Private Function StampStillAhead(ByVal text As String, ByVal mark As DateTime, ByVal markOk As Boolean) As Boolean
+        If If(text, "") = "" Then Return False
+        If Not markOk Then Return True
+        Dim deadline As DateTime
+        If Not DateTime.TryParse(text, BindCulture, DateTimeStyles.None, deadline) Then Return True
+        Return deadline.AddSeconds(BindGraceSeconds) > mark
+    End Function
+
+    ' Config datetimes are en-CA everywhere in MonkMode, the mark and the deadlines here
+    ' included (same constant Notifications keeps for the same reason).
+    Private ReadOnly BindCulture As New CultureInfo("en-CA")
+
 End Module
 
 ' The listener seam. ONE background accept thread, one pre-rendered response, no

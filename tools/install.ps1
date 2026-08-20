@@ -27,6 +27,8 @@
 #   3. Publishes a self-contained win-x64 payload (via build-dist.ps1 -SelfContained),
 #      OR copies a pre-built payload you pass with -PayloadDir.
 #   4. Copies that payload to C:\Program Files\MonkMode\ (creating/upgrading in place).
+#   4a. If -InstallDir pointed somewhere OUTSIDE Program Files, stamps the admin-only write
+#      ACL on it by hand (F32) - see "WHY PROGRAM FILES" below for what that ACL is for.
 #   5. Adds C:\Program Files\MonkMode\ to the MACHINE PATH, idempotently (no duplicate
 #      entries on re-run).
 #
@@ -49,6 +51,11 @@
 #   MonkMode_srv.exe with a no-op before the next block arms. It does NOT make MonkMode
 #   admin-proof - the honest ceiling (an admin who wants out can always take it) is
 #   unchanged; see docs\USER-GUIDE.md and the ARCHITECTURE.md bypass table.
+#
+#   That ACL is a property of the FOLDER, not of this script, so -InstallDir used to be able
+#   to void the whole argument silently (F32): a folder on a data drive inherits
+#   BUILTIN\Users : Modify. Step 4a now applies the same admin-only shape by hand to any
+#   install dir outside Program Files, and REFUSES the install if it cannot.
 #
 # WHY REFUSE WHILE THE SERVICE EXISTS (R9 forward-migration freeze):
 #   The enforcement config (monkmode_settings.ini) carries a compile-time schema version
@@ -150,6 +157,95 @@ foreach ($exe in $requiredExes) {
     $p = Join-Path $InstallDir $exe
     if (-not (Test-Path $p)) {
         throw "Copy incomplete: '$exe' did not land in $InstallDir."
+    }
+}
+
+# ---- 4a. Harden a NON-Program-Files install dir with the admin-only ACL (F32) --
+# FX9. "WHY PROGRAM FILES" above is the whole tamper argument: an admin-only write ACL is
+# what stops a standard (non-elevated) user swapping MonkMode_srv.exe for a no-op before
+# the next block arms. That argument is a property of the FOLDER, not of the script - and
+# -InstallDir lets you point the install at, say, D:\Apps\MonkMode, where a freshly created
+# folder inherits the data drive's root ACL, which grants BUILTIN\Users : Modify. That put
+# the four executables, the MAC'd config, the C1b shadow backup, the hosts snapshot and the
+# whole trigger zone inside a non-elevated user's reach while the script still printed the
+# ordinary success banner. (The MAC itself is DPAPI-keyed, so the config could never be
+# FORGED - but the binaries that read it could simply be replaced.)
+#
+# So: whenever the effective install dir is NOT already under Program Files, stamp the same
+# shape Program Files has - inheritance BROKEN, SYSTEM and Administrators full control,
+# Users read+execute and nothing more - and say so out loud.
+#
+# The Program Files default is untouched by design: it already inherits exactly this and
+# re-stamping it would churn an ACL that is right, for no gain.
+#
+# AFTER the copy, not before, and that is deliberate: Set-Acl writes the directory DACL
+# through SetNamedSecurityInfo, which PROPAGATES the new inheritable ACEs down to children
+# that were inheriting - so the four exes copied in at step 4 are re-stamped with it, and so
+# are the runtime files a previous install left behind. Hardening first would miss those,
+# because Copy-Item -Force overwrites a file's contents while leaving its ACL alone.
+# (Measured, not assumed: a file inheriting Users:Modify came back Users:ReadAndExecute.)
+#
+# A FAILURE HERE IS FATAL, unlike the stats ACE below. The stats folder is cosmetic; this
+# one IS the tamper model. Silently continuing would hand back precisely the machine F32
+# describes - installed, on PATH, and writable by the user it is meant to constrain - so
+# the installer stops before the PATH edit and says what to do instead.
+$installFull = (Resolve-Path -LiteralPath $InstallDir).ProviderPath
+
+# (Step 5's $normalise below is the same three lines for the PATH comparison. Kept as its
+# own local rather than hoisting step 5's, so this fix does not disturb the PATH block.)
+$normalisePath = {
+    param($x)
+    if ($null -eq $x -or $x -eq '') { return '' }
+    return $x.Trim().TrimEnd('\').ToLowerInvariant()
+}
+$installNorm = & $normalisePath $installFull
+
+# All THREE Program Files roots: on a 32-bit PowerShell host $env:ProgramFiles is the (x86)
+# folder and ProgramW6432 is the 64-bit one, so checking only the first would "harden" a
+# genuine Program Files path (or miss one). Every one of them is admin-write-only.
+$underProgramFiles = $false
+foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
+    $pfNorm = & $normalisePath $pf
+    if ($pfNorm -eq '') { continue }
+    if ($installNorm -eq $pfNorm -or $installNorm.StartsWith($pfNorm + '\')) {
+        $underProgramFiles = $true
+        break
+    }
+}
+
+if (-not $underProgramFiles) {
+    try {
+        # Well-known SIDs, not names: "Users"/"Administrators" are localised on a non-English
+        # Windows and would fail to resolve there (same reason as the stats ACE below).
+        $systemSid = New-Object Security.Principal.SecurityIdentifier(
+            [Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+        $adminsSid = New-Object Security.Principal.SecurityIdentifier(
+            [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $usersSid = New-Object Security.Principal.SecurityIdentifier(
+            [Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+
+        # Built from EMPTY rather than from Get-Acl: the inherited Users:Modify ACE is the
+        # bug, so the fix has to replace the DACL, not add to it. SetAccessRuleProtection
+        # ($true, $false) = stop inheriting AND do not copy what was inherited in.
+        $acl = New-Object Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $systemSid, 'FullControl', 'ObjectInherit,ContainerInherit', 'None', 'Allow')))
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $adminsSid, 'FullControl', 'ObjectInherit,ContainerInherit', 'None', 'Allow')))
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $usersSid, 'ReadAndExecute', 'ObjectInherit,ContainerInherit', 'None', 'Allow')))
+        Set-Acl -Path $installFull -AclObject $acl
+
+        Write-Host "$installFull is outside Program Files, so it inherited a user-writable ACL." -ForegroundColor Yellow
+        Write-Host "Hardened it: inheritance broken; SYSTEM + Administrators full control, BUILTIN\Users read/execute only."
+        Write-Host "That admin-only write ACL is what stops a non-elevated user replacing MonkMode_srv.exe before the next block arms."
+    } catch {
+        throw ("Could not apply the admin-only ACL to '$installFull' ($_). " +
+               "The payload has been copied but the folder may still be USER-WRITABLE, which voids MonkMode's tamper model " +
+               "(a standard user could swap MonkMode_srv.exe for a no-op). The installer has stopped BEFORE the PATH edit. " +
+               "Either re-run without -InstallDir to install to the default '$env:ProgramFiles\MonkMode', or set the ACL by hand " +
+               "(icacls ""$installFull"" /inheritance:r /grant ""*S-1-5-18:(OI)(CI)F"" ""*S-1-5-32-544:(OI)(CI)F"" ""*S-1-5-32-545:(OI)(CI)RX"") and re-run.")
     }
 }
 

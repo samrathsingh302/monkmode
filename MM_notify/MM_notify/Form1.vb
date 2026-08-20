@@ -469,9 +469,14 @@ Public Class Form1
     '   - an UNREADABLE config changes NOTHING (return): the page keeps saying what it
     '     last said, exactly as the tray keeps its last tooltip. The one path that
     '     genuinely ends the page is the block-ended path, which stops it explicitly.
-    '   - no block named in the config => stop the listener. The page must never be up
-    '     while nothing is blocked (it would answer for a domain that now resolves
-    '     normally), so this is the un-bind trigger.
+    '   - no block's TIMER running right now => stop the listener. FX9 (F11) narrowed
+    '     this from "the config NAMES a block" to "a block's own timer is running",
+    '     because the old floor let a `--start +30d` slot hold port 80 EXCLUSIVELY for
+    '     thirty days. Note what that costs, because it is a decision and not a free
+    '     win: a PENDING slot's sites are hosts-blocked from arm time, so during the
+    '     wait a blocked http:// visit now gets the browser's connection-refused page
+    '     instead of MonkMode's. The block itself is untouched either way. The whole
+    '     decision, and the argument for that trade, is BlockPage.ShouldBindNow.
     '   - a block held => refresh the page, and if the socket is not up, try to bind -
     '     but no more than once per RebindRetryIntervalMs (P50).
     ' Never throws.
@@ -484,11 +489,7 @@ Public Class Form1
                 Return
             End Try
 
-            ' The same raw, ungated floor RawSlotApps / RawSlotUrlPatterns use: a
-            ' position counts as a block the moment the config names it. Over-counting
-            ' costs one extra page; under-counting would pull the page down under a
-            ' live block, so the widest reading is the right one here too.
-            If RawSlotBlockCount(ini) <= 0 Then
+            If Not ShouldServeBlockPage(ini) Then
                 pageServer.StopServing()
                 Return
             End If
@@ -558,6 +559,62 @@ Public Class Form1
         Catch ex As Exception
         End Try
         Return rows
+    End Function
+
+    ' FX9 (F11): the WHOLE bind decision for a loaded config - the reader below plus the
+    ' pure gate - with no socket in it, so the tests drive the real ini through the real
+    ' decision. RefreshBlockPage adds only "and then bind or release". Friend so the pins
+    ' reach it as mm_notify.Form1; READ-ONLY and never throws (BlockPageBindStates and
+    ' HighWaterMark are both total).
+    Friend Function ShouldServeBlockPage(ByVal ini As IniFile) As Boolean
+        Return BlockPage.ShouldBindNow(BlockPageBindStates(ini), HighWaterMark(ini))
+    End Function
+
+    ' FX9 (F11): the same MaxSlots-bounded raw scan as BlockPageSlots above, reading the
+    ' four fields the BIND decision needs: the slot's own end, its delayed start, its
+    ' window rule and the service-stamped window end. Bound by MaxSlots rather than the
+    ' stored SlotCount like every other notifier scan, so a forged SlotCount cannot
+    ' silence the page. Encrypted stamps that will not decrypt come back as
+    ' BlockPage.UnreadableStamp, which ShouldBindNow reads as "present, unmeasurable" =>
+    ' bind - the page is never released on an uncertainty. READ-ONLY and never throws.
+    Private Function BlockPageBindStates(ByVal ini As IniFile) As List(Of BlockPage.SlotBindState)
+        Dim rows As New List(Of BlockPage.SlotBindState)
+        Try
+            For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+                Dim sec As String = "Slot" & pos.ToString(CultureInfo.InvariantCulture)
+                Dim row As New BlockPage.SlotBindState
+                row.UntilText = BindStamp(ini.GetKeyValue(sec, "Until"))
+                row.StartAtText = BindStamp(ini.GetKeyValue(sec, "StartAt"))
+                row.ScheduleSpec = If(ini.GetKeyValue(sec, "ScheduleSpec"), "")
+                row.WindowUntilText = BindStamp(ini.GetKeyValue(sec, "ScheduleActiveUntil"))
+                rows.Add(row)
+            Next
+        Catch ex As Exception
+            ' A scan that DIED partway would hand over a truncated list, and a truncated
+            ' list releases the port - the one direction this gate must never fail in. So
+            ' append a slot carrying an unreadable deadline, which ShouldBindNow reads as
+            ' "present, unmeasurable" => keep the page up. (No other notifier slot scan
+            ' needs this: they all fail towards MORE blocked already.)
+            Dim unreadable As New BlockPage.SlotBindState
+            unreadable.UntilText = BlockPage.UnreadableStamp
+            rows.Add(unreadable)
+        End Try
+        Return rows
+    End Function
+
+    ' Decrypt one slot stamp for the bind decision. "" stays "" (the field is genuinely
+    ' absent - the one answer that can release the port); anything present but
+    ' undecryptable becomes BlockPage.UnreadableStamp so the bias runs towards binding.
+    ' Never throws.
+    Private Function BindStamp(ByVal encText As String) As String
+        If If(encText, "") = "" Then Return ""
+        Try
+            Dim plain As String = enc.DecryptData(encText)
+            If plain = "" Then Return BlockPage.UnreadableStamp
+            Return plain
+        Catch ex As Exception
+            Return BlockPage.UnreadableStamp
+        End Try
     End Function
 
     ' D4/D4b: show a notification, fail-soft (a toast is cosmetic; it must never bubble an exception
