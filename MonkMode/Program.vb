@@ -1171,6 +1171,16 @@ Module Program
         ' can't re-restore a stale prior.
         Step_("Restoring browser DoH policy", Sub() Blocker.RemoveDohPolicy())
         Step_("Clearing the notifier autorun", Sub() Blocker.ClearNotifierAutorun())
+        ' F70, and LAST on purpose. Everything above removed the ENFORCEMENT; the config file
+        ' itself survives (it carries NextSlotId, which P17 says never restarts), and until this
+        ' step it still SAID a block was armed. Two guards read only that file - AnySlotArmed()
+        ' below in DoSchedule, and Get-BuildRefusals in tools\build-dist.ps1 - so a torn-down
+        ' machine refused both `monkmode schedule` (exit 3) and any rebuild/install of the dist,
+        ' with nothing enforcing anywhere. This is the step the service's own genuine-expiry
+        ' teardown has always had (Service1.PersistZeroSlotConfigAt, P39) and the escape hatch
+        ' did not. Last, so a crash anywhere above leaves the config still armed - the safe side,
+        ' cleared by re-running the same command. See Blocker.PersistZeroSlotConfig.
+        Step_("Clearing the armed state from the config", Sub() Blocker.PersistZeroSlotConfig())
 
         Console.WriteLine("Done. MonkMode has been removed. If your browser still shows a block, flush DNS / reopen it.")
         Return 0

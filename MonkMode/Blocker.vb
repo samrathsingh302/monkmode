@@ -3205,6 +3205,87 @@ Module Blocker
         End Try
     End Sub
 
+    ' F70: the escape hatch (`unblock --force`) used to leave the ARMED CONFIG on disk after it
+    ' had deleted the service, killed the watchdog pair and stripped hosts. That config is the
+    ' only thing two guards read, so a machine with NOTHING enforcing still answered "a block is
+    ' armed": AnySlotArmed() reads [Slots] SlotCount straight out of it, which made DoSchedule
+    ' refuse with exit 3, and tools\build-dist.ps1's Get-BuildRefusals refused to rebuild or
+    ' install the dist for the same reason. Both refusals are in the SAFE direction - nothing
+    ' lifts - but together they WEDGE the documented escape hatch: after using it the user can
+    ' neither set a schedule nor reinstall, with no block anywhere on the machine.
+    '
+    ' The fix is PARITY, not a weaker guard. The service's own genuine-expiry teardown already
+    ' persists a zero-slot config (Service1.PersistZeroSlotConfigAt, P39); the escape hatch was
+    ' simply missing the equivalent step, so the two teardown paths disagreed about what a
+    ' torn-down machine's config says. Every guard keeps reading the config exactly as it does
+    ' now - none of them learns to consult the SCM instead, because AnySlotArmed exists
+    ' PRECISELY to answer the armed question WITHOUT the SCM (BlockIsActive's short-circuit on a
+    ' stopped service was the hole it was added to close; see DoSchedule's guard comment).
+    '
+    ' ORDERING: this runs LAST in the teardown, after the service delete, the hosts strip and
+    ' the snapshot/backup deletes. A crash before it leaves the config still armed - exactly the
+    ' F70 state, i.e. the SAFE side, and re-running `unblock --force` clears it. It can never
+    ' under-block, because by the time it runs there is nothing left to enforce, and it runs
+    ' after DeleteBackup so no shadow copy of the armed config survives it.
+    '
+    ' What it writes mirrors PersistZeroSlotConfigAt: every [SlotN] section removed, SlotCount 0
+    ' (NextSlotId deliberately NOT reset - P17: ids never restart across a teardown, so a
+    ' replayed monkmode_partner.code.<id> can never address a different block), the guard scalars
+    ' cleared, the v9 mirror neutralised to the expired sentinel, and the [Schedule] pair
+    ' cleared - UNCONDITIONALLY here, unlike the service's spent-only clear (FX3), because
+    ' --force tears the whole machine down and prints "MonkMode has been removed": an armed Spec
+    ' outliving a deleted service is the same stale belief this fixes, and it is build-dist's
+    ' second refusal reason. B7: the MAC is re-stamped ONLY when it was valid before the edit, so
+    ' a tampered config stays frozen rather than being re-blessed. Exceptions are deliberately
+    ' NOT swallowed here - the caller wraps every teardown step in Step_, which reports the
+    ' failure and continues, exactly like the other steps.
+    '
+    ' AND IT REFUSES WHILE A BLOCK IS LIVE, for the same reason WriteScheduleConfig does (S3b):
+    ' "the refusal lives in the command and the writer is Public and test-driven, so the writer
+    ' must refuse too". Zeroing the slots of a config a RUNNING service is enforcing from would
+    ' be a one-call teardown - the next tick would read zero slots, classify TeardownAll and
+    ' lift every block - so the writer may not be a lift primitive that only happens to be
+    ' called from the right place today. On the real path this always passes: DoUnblock has
+    ' already killed the watchdog pair and deleted the service by the time it runs, so
+    ' BlockIsActive() short-circuits False on the stopped service. If the kill somehow FAILED
+    ' and something is still enforcing, skipping the clear is the fail-CLOSED side: --force has
+    ' already failed at its real job, and the config is left saying exactly what is true.
+    ' The Friend overload is the seam the unit tests drive, so they pin the rule without ever
+    ' querying the SCM (dev fence: tests never touch the real service).
+    Public Sub PersistZeroSlotConfig()
+        PersistZeroSlotConfig(BlockIsActive())
+    End Sub
+
+    Friend Sub PersistZeroSlotConfig(ByVal blockIsActive As Boolean)
+        If blockIsActive Then Return
+        If Not File.Exists(IniPath()) Then Return
+        Dim ini As New IniFile
+        ini.Load(IniPath())
+        Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
+        For pos As Integer = 1 To ConfigIntegrity.MaxSlots
+            ini.RemoveSection(SlotSection(pos))
+        Next
+        ini.AddSection("Slots")
+        ini.SetKeyValue("Slots", "SlotCount", "0")
+        ini.AddSection("Guard")
+        ini.SetKeyValue("Guard", "HoldUntil", "")
+        ini.AddSection("Schedule")
+        ini.SetKeyValue("Schedule", "Spec", "")
+        ini.SetKeyValue("Schedule", "ActiveUntil", "")
+        ini.AddSection("Time")
+        ini.SetKeyValue("Time", "Until", enc.EncryptData(ScheduleOnlyExpiredUntil))
+        ini.SetKeyValue("Time", "CoolOffUntil", "")
+        ini.AddSection("Process")
+        ini.SetKeyValue("Process", "List", "null")
+        ini.AddSection("User")
+        ini.SetKeyValue("User", "CustomSites", "null")
+        ' Derived from what SURVIVED (nothing), never hardcoded, so the count and the cleared
+        ' fields can never disagree - the same shape the service's teardown uses.
+        ini.SetKeyValue("Guard", "ArmedCount", GuardedSlotCount(ini, 0).ToString(CultureInfo.InvariantCulture))
+        If macValid Then RestampMacWithExistingKey(ini)
+        ini.Save(IniPath())
+    End Sub
+
     ' The CLI side of the restore-on-corrupt path: if the primary ini is
     ' corrupt/blanked/short AND a MAC-valid backup exists, restore the primary from
     ' it, so a `status`/`add` sees the real block (self-healed) instead of a
