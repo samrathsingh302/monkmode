@@ -243,6 +243,14 @@ point, not a product:
   installs/starts the service via the Service Control Manager). Requires the
   .NET 10 desktop runtime.
 
+- **Run every `monkmode` command from a prompt that is already elevated.** The exe
+  is manifested `requireAdministrator`, so from a *non*-elevated prompt Windows
+  raises UAC and then runs it in a **new console window that closes the instant the
+  command returns**. Your original prompt gets **no output and exit code 0** — even
+  `monkmode status` looks like it silently did nothing. It is not broken; the output
+  went to a window you never saw. (Redirecting or capturing does not rescue it
+  either: the child console is not your stdout.) See `docs/RUNBOOK.md` §4.5.
+
 ## Removing a block or the service
 
 The intended way out of an active block is one of the exits above — cooling-off,

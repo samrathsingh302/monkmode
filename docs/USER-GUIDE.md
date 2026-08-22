@@ -67,6 +67,12 @@ the target machine needs no .NET installed), copies it to `C:\Program Files\Monk
 and adds that folder to the machine `PATH`. Open a **new** elevated prompt afterwards
 so the updated `PATH` is picked up, then continue at Section 2 (`monkmode setup`).
 
+> **"I ran `monkmode status` and nothing happened."** You were in a prompt that is not
+> elevated. `monkmode.exe` requires Administrator, so Windows raises UAC and runs it in a
+> **new console window that closes the instant it finishes** — your prompt gets no output
+> and exit code 0, which looks exactly like a broken install. It is not. Open an elevated
+> prompt and run it again. (`docs\RUNBOOK.md` §4.5.)
+
 What the installer deliberately does **not** do:
 
 - It does **not** install or start the service — your first `monkmode block` does that.
@@ -80,6 +86,14 @@ or running) — never upgrade the binaries across an armed block, or a MAC'd con
 freeze fail-closed (the forward-migration freeze; see Section 10). Let any live block
 end and remove the service first, then re-run the installer. Re-running it on a machine
 with no `MONKMODE` service upgrades in place, and the `PATH` entry is never duplicated.
+
+**An upgrade keeps your data.** The installer copies **binaries only**: your account setup
+(`monkmode_setup.ini`), the enforcement config and its shadow backup, the block history and
+the DoH/hosts snapshots are never copied out of the payload, so an in-place upgrade leaves
+the ones already in the install folder alone. If the payload folder happens to carry any of
+them — `dist\` normally does, because `build-dist.ps1` deliberately preserves them there —
+the installer prints a `SKIPPED data files` line naming them. (Before 22/08/2026 it copied
+them, and a re-install silently restored a stale `monkmode_setup.ini` over the real one; F72.)
 
 Options: `-PayloadDir <folder>` installs a pre-built payload instead of publishing;
 `-InstallDir <folder>` overrides the target location.

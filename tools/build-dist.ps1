@@ -85,7 +85,9 @@ $hostsMarker = '#### MonkMode Entries ####'
 
 # The files in the output folder that are RUNTIME STATE, not build output. Same
 # set tools\uninstall.ps1 preserves (plus the two snapshots, which it now also
-# keeps): losing any of them loses user data that nothing can reconstruct.
+# keeps) and tools\install.ps1 refuses to copy OUT of a payload dir (F72 - because
+# THIS folder is the default payload, and these files are exactly what must not
+# travel with it): losing any of them loses user data that nothing can reconstruct.
 $runtimeFiles = @(
     'monkmode_settings.ini',        # the enforcement config (MAC-covered)
     'monkmode_settings.ini.bak',    # C1b shadow backup the service recovers from

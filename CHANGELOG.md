@@ -10,6 +10,45 @@ VB.NET 2.0 WinForms blocker that no longer built. The fork rebuilt it as a .NET 
 CLI and hardened enforcement so that, once a block starts, it cannot be casually
 removed before its timer expires. See [The fork base](#the-fork-base) below.
 
+## [Unreleased]
+
+Three defects found on and just after tag day, all outside enforcement.
+
+### Fixed
+
+- **F71 — a full arm/teardown cycle dropped the hosts file's trailing newline.** The
+  CLI's writer normalised the user's tail (`StripOurBlock` trims every trailing
+  CR/LF/space/tab) and then re-appended one CRLF as its block separator — so on a
+  *fresh* arm, with no marker present, the newline it swallowed and re-issued was the
+  user's own. The teardown strip then removed one terminator, correctly undoing what it
+  believed was the separator, and the user's newline never came back: the 20/08 smoke
+  measured hosts going 1051 → 1049 bytes with `diff` reporting *"\ No newline at end of
+  file"*. No hosts LINE was ever lost, but "byte-identical after teardown" was not true.
+  The writer uses `HostsAboveBlock` now — which drops a terminator only when a marker is
+  actually there — so the separator is unambiguous and the cycle is byte-exact in both
+  directions: a file that ended with a newline keeps it, one that did not does not gain
+  one. This also ends a CLI↔service layout divergence (the service's writers always
+  assembled it this way). Pinned by three round-trip tests that drive the real writer and
+  both real teardown strips against a temp fixture and assert on bytes.
+- **F72 — `install.ps1` clobbered the install's own data files.** The payload copy was a
+  flat `Copy-Item '*' -Recurse -Force`, and the default payload dir is `dist\`, which is
+  not a build artefact but a live install — `build-dist.ps1` deliberately preserves the
+  six runtime data files there. So an install copied whatever setup, config, history and
+  snapshots that folder had accumulated over the install dir's own. Measured on the 22/08
+  v1.1 deploy: Program Files' `monkmode_setup.ini` was replaced by `dist\`'s 20/08
+  smoke-session copy, destroying the real account setup; `monkmode_settings.ini` survived
+  only because `dist\` had none, and restoring a *stale enforcement config* over a newer
+  one is the far worse version of the same bug. The installer now copies **binaries only**
+  and prints a `SKIPPED data files` line naming anything it left behind.
+- **F73 — a non-elevated `monkmode` run looks like it did nothing.** `monkmode.exe` is
+  manifested `requireAdministrator`, so a non-elevated invocation is elevated by Windows
+  into a **new console window that closes the moment it returns**: the calling prompt gets
+  zero lines and exit code 0, and even `monkmode status` reads as a broken install.
+  Documented, not shimmed — the elevation is load-bearing (the CLI writes hosts, the SCM
+  and HKLM) and a relauncher would put a second process on the arm path for a
+  documentation problem. `README.md`, `docs/USER-GUIDE.md` §1a, `docs/RUNBOOK.md` §4.5 and
+  the `install.ps1` closing banner now all name the failure mode.
+
 ## [1.1.0] — 22/08/2026 (multi-block + URL-level blocking)
 
 The v1.1 line turns the single machine-wide block into up to **eight independent

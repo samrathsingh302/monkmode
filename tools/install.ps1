@@ -26,7 +26,10 @@
 #      "Never upgrade across a block" below.
 #   3. Publishes a self-contained win-x64 payload (via build-dist.ps1 -SelfContained),
 #      OR copies a pre-built payload you pass with -PayloadDir.
-#   4. Copies that payload to C:\Program Files\MonkMode\ (creating/upgrading in place).
+#   4. Copies that payload to C:\Program Files\MonkMode\ (creating/upgrading in place) -
+#      BINARIES ONLY. The six runtime data files (setup, enforcement config + shadow, block
+#      history, DoH/hosts snapshots) are never copied out of the payload, so an upgrade keeps
+#      the install dir's own and a fresh install starts clean (F72).
 #   4a. If -InstallDir pointed somewhere OUTSIDE Program Files, stamps the admin-only write
 #      ACL on it by hand (F32) - see "WHY PROGRAM FILES" below for what that ACL is for.
 #   5. Adds C:\Program Files\MonkMode\ to the MACHINE PATH, idempotently (no duplicate
@@ -94,6 +97,21 @@ $ErrorActionPreference = 'Stop'
 # The four executables that MUST all be present in one folder (the runtime contract).
 $requiredExes = @('monkmode.exe', 'MonkMode_srv.exe', 'mm_notify.exe', 'mm_guard.exe')
 
+# F72. The files in an install dir that are RUNTIME STATE, not build output. This is the
+# SAME SET tools\build-dist.ps1 preserves across a rebuild ($runtimeFiles, build-dist.ps1:89-96)
+# and tools\uninstall.ps1 keeps without -PurgeData ($dataFiles, uninstall.ps1:120-127). Three
+# copies of one list is two too many, but the alternative is dot-sourcing one script from
+# another across an elevation boundary; keep them in step by hand and cross-reference, which
+# is what the other two already do.
+$dataFiles = @(
+    'monkmode_settings.ini',        # the enforcement config (MAC-covered)
+    'monkmode_settings.ini.bak',    # C1b shadow backup the service recovers from
+    'monkmode_setup.ini',           # account setup - without it every arm refuses exit 4
+    'monkmode_stats',               # block history
+    'monkmode_doh.snapshot',        # B5a: the user's REAL browser DoH policy
+    'monkmode_hosts.block'          # B2: the hosts self-heal repair source
+)
+
 $serviceName = 'MONKMODE'
 
 # ---- 1. Elevation self-check -------------------------------------------------
@@ -140,8 +158,8 @@ foreach ($exe in $requiredExes) {
 
 # ---- 4. Copy the payload to the install dir (create / upgrade in place) -------
 # Safe re-run: the service-exists gate above guarantees no live/idle block here, so
-# overwriting the files in place is an ordinary upgrade. -Force overwrites; existing
-# runtime files not in the payload (there should be none) are left as-is.
+# overwriting the files in place is an ordinary upgrade. -Force overwrites the BINARIES;
+# the install dir's own data files are never touched (F72, below).
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Write-Host "Created $InstallDir"
@@ -149,8 +167,46 @@ if (-not (Test-Path $InstallDir)) {
     Write-Host "Upgrading in place: $InstallDir already exists."
 }
 
+# F72 (22/08/2026) - THIS COPY USED TO DESTROY THE INSTALL'S OWN DATA. It was a flat
+# `Copy-Item -Path (Join-Path $PayloadDir '*') -Recurse -Force`, which copies EVERYTHING in
+# the payload dir - and the default payload dir is <repo>\dist, which is not a build artefact
+# but a live install: build-dist.ps1 deliberately PRESERVES the six data files there across a
+# rebuild. So a payload assembled in dist\ carries whatever setup/config/history that folder
+# accumulated, and the copy silently restored it over the install dir's own. Measured on the
+# 22/08 v1.1 deploy: C:\Program Files\MonkMode\monkmode_setup.ini was replaced by dist\'s
+# 20/08 smoke-session copy, so the real account setup was destroyed and `monkmode setup` had
+# to be re-run. monkmode_settings.ini survived only because dist\ happened to have none - and
+# THAT is the bad case, because restoring a STALE enforcement config over a newer one puts
+# the wrong block truth in front of the service. The script prints "Upgrading in place" and
+# docs\RUNBOOK.md promises the data is preserved, so this contradicted a stated guarantee.
+#
+# The installer copies BUILD OUTPUT. Data belongs to the install dir and never travels in a
+# payload - in EITHER direction: on an upgrade, skipping protects the install's live data;
+# on a fresh install, skipping is what stops a stale smoke-session setup being planted in a
+# brand-new folder as if it were the user's own.
+#
+# Refusing outright when the payload carries data files was considered (it does mean the
+# payload was assembled over an install dir) and rejected: the DEFAULT payload dir IS dist\,
+# which legitimately carries them by build-dist.ps1's own design, so refusing would break the
+# ordinary no-arguments install on any machine that has ever armed a block from dist\.
+# Skipping is the same guarantee without the false alarm; the skip is printed, not silent.
+#
+# Directories still copy with -Recurse (a self-contained payload has satellite resource dirs
+# cs\, de\, ja\ ...); only top-level FILES are filtered, which is the only level data ever
+# lives at.
 Write-Host "Copying payload from $PayloadDir ..."
-Copy-Item -Path (Join-Path $PayloadDir '*') -Destination $InstallDir -Recurse -Force
+$skippedData = @()
+foreach ($item in (Get-ChildItem -LiteralPath $PayloadDir -Force)) {
+    if ((-not $item.PSIsContainer) -and ($dataFiles -contains $item.Name)) {
+        $skippedData += $item.Name
+        continue
+    }
+    Copy-Item -LiteralPath $item.FullName -Destination $InstallDir -Recurse -Force
+}
+if ($skippedData.Count -gt 0) {
+    Write-Host ("  SKIPPED data files carried by the payload ($($skippedData -join ', ')) - " +
+                "'$InstallDir' keeps its own (F72).") -ForegroundColor Yellow
+}
 
 # Re-verify the four exes actually landed.
 foreach ($exe in $requiredExes) {
@@ -334,6 +390,12 @@ Write-Host ""
 Write-Host "Next steps (from an elevated prompt; open a new one so PATH is picked up):"
 Write-Host "  monkmode setup --partner ""Alex (alex@example.com)"""
 Write-Host "  monkmode block --sites reddit.com --for 2h"
+Write-Host ""
+Write-Host "ELEVATED means elevated (F73). monkmode.exe is manifested requireAdministrator, so from a" -ForegroundColor Yellow
+Write-Host "NON-elevated prompt Windows shows a UAC prompt and then runs it in a NEW console window that" -ForegroundColor Yellow
+Write-Host "closes the instant the command returns. Your prompt gets NO output and exit code 0 - even" -ForegroundColor Yellow
+Write-Host "'monkmode status' looks like it did nothing. It is not broken; you just cannot see it. Run" -ForegroundColor Yellow
+Write-Host "every monkmode command from a prompt that is ALREADY elevated and the output appears normally." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "To remove MonkMode later, run tools\uninstall.ps1 (elevated) once no block is active - it is"
 Write-Host "fail-closed and refuses while a block is enforcing. Or remove by hand per docs\RUNBOOK.md section 3."

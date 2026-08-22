@@ -115,8 +115,9 @@ $runKey      = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
 
 # The account/history data files (all in the install dir, next to the exes - RUNBOOK 2.7).
 # Kept by default; removed only with -PurgeData. Same set tools\build-dist.ps1 preserves
-# across a rebuild - the two lists are the one answer to "what in this folder is not a
-# build artefact", so keep them together.
+# across a rebuild and tools\install.ps1 refuses to copy out of a payload (F72) - the three
+# lists are the one answer to "what in this folder is not a build artefact", so keep them
+# together.
 $dataFiles = @(
     'monkmode_settings.ini',
     'monkmode_settings.ini.bak',

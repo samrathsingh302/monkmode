@@ -406,8 +406,8 @@ as the recovery of last resort.
 
 ## 4. Known operational gotchas
 
-Real, live-observed footguns. The first three have bitten; internalise them
-before scripting or running a smoke.
+Real, live-observed footguns. All but 4.4 have bitten; internalise them before
+scripting or running a smoke.
 
 ### 4.1 Never pipe or capture `monkmode block` output (pipe-wedge)
 
@@ -473,6 +473,37 @@ Operator notes: verify with `icacls "<InstallDir>"` after a non-default install
 repo); and if the path resolves through an 8.3 short name or a junction, the
 root classification errs towards *hardening* or towards needing admin, never
 towards leaving the folder open.
+
+### 4.5 A non-elevated `monkmode` run looks like it did nothing (F73)
+
+`MonkMode\My Project\app.manifest:19` sets
+`<requestedExecutionLevel level="requireAdministrator" />`. From a **non-elevated**
+prompt, Windows therefore does not run `monkmode.exe` in your console at all: it
+raises UAC and starts a **separate console window**, which closes the instant the
+command returns. Every line of output goes there. Your prompt gets **zero lines
+and exit code 0**.
+
+Measured 22/08/2026 on the fresh v1.1 install: `cmd /c 'monkmode status'` from a
+non-elevated shell returned **0 lines of output, exit 0**, while the same command
+in an elevated prompt printed normally; `Process.Start` *without*
+`UseShellExecute` threw *"The requested operation requires elevation"*. This is
+what made a perfectly good install look broken.
+
+- **Diagnosis:** a `monkmode` command that produces no output and exit 0 is almost
+  always **an unelevated shell**, not a broken binary. Check with
+  `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)`
+  — `False` means you are seeing this, not a fault.
+- **Fix:** open an elevated prompt and re-run. Redirection does not help (`>`,
+  `| tee`, `$(...)` all capture *your* console, and the output is in the other
+  one), and note 4.1's separate rule about never capturing a `block` arm anyway.
+- **Not going to change:** dropping `requireAdministrator` is not on the table —
+  the CLI writes the hosts file, the SCM and HKLM, so the elevation is
+  load-bearing, and a `asInvoker` manifest would simply move the failure to a
+  worse place (a half-completed arm). A relauncher shim was considered on 22/08
+  and deliberately **not** built: it would add a second process on the arm path
+  for a documentation problem. Documented instead, here and in `README.md`, and
+  the `install.ps1` closing banner now names the failure mode rather than only
+  saying "from an elevated prompt".
 
 ---
 
