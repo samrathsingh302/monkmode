@@ -25,7 +25,12 @@
 //
 // Two independent implementations exist and both are covered here:
 //   - the service's strip (Service1.StripMonkModeBlock, runs at block expiry);
-//   - the CLI's strip (Blocker.StripOurBlock, runs when a new block is written).
+//   - the CLI's strip (Blocker.StripMonkModeBlock, runs at `unblock`).
+//
+// Blocker.StripOurBlock is covered here too. It used to be the RE-BLOCK strip the
+// writer called; since F71 (22/08/2026) no product code calls it - its TrimEnd was
+// what swallowed the user's trailing newline on a fresh arm - and it is kept as the
+// independent oracle these F31 line-anchoring regressions are written against.
 //
 // Everything here is in-memory strings - the real hosts file is never touched.
 
@@ -390,18 +395,19 @@ public class MarkerLineAnchoringTests
     public void Repro_UserLineMentioningMarker_NothingIsRemoved_Cli()
     {
         Assert.Equal(MentionRepro, CliStrip(MentionRepro));
-        // The re-block strip only normalises the tail, so the user's lines
-        // survive an arm too.
+        // The retired tail-normalising strip only ever normalised the tail, so the
+        // user's lines survived it too (kept as the F31 oracle - see the file header).
         Assert.Equal(MentionRepro.TrimEnd('\r', '\n'), MonkMode.Blocker.StripOurBlock(MentionRepro));
     }
 
     [Fact]
     public void Repro_ArmThenLift_RoundTrip_UserLinesSurvive()
     {
-        // What WriteHostsFile assembles on arm: StripOurBlock(existing) + CRLF
-        // + our block. Lifting it (service expiry or CLI unblock) must give the
-        // user's file back, mention line and all.
-        var baseText = MonkMode.Blocker.StripOurBlock(MentionRepro);
+        // What WriteHostsFileAt assembles on arm: HostsAboveBlock(existing) + CRLF
+        // + our block (F71 - HostsAboveBlock, not StripOurBlock, so the user's own
+        // trailing newline is left alone). Lifting it (service expiry or CLI unblock)
+        // must give the user's file back, mention line and trailing newline and all.
+        var baseText = MonkMode.Blocker.HostsAboveBlock(MentionRepro);
         var written = baseText + "\r\n" + Marker + "\r\n" +
                       MonkMode.Blocker.BuildHostsEntries(new[] { "reddit.com" });
         Assert.Equal(baseText, ServiceStrip(written));

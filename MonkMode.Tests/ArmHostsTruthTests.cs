@@ -92,13 +92,16 @@ public class ArmHostsConfigTruthTests
     private static string Expected(params string[] domains)
         => MonkMode.Blocker.UnionHostsBlock("", MonkMode.Blocker.BuildHostsEntries(domains));
 
-    // What the arm assembles into hosts: the user's own content with its tail normalised,
-    // then CRLF, then our marker block, then (F35) the END marker line that closes it.
+    // What the arm assembles into hosts: the user's own content VERBATIM (F71 - its tail is
+    // no longer normalised, so its trailing newline is still the user's), then the separator
+    // CRLF, then our marker block, then (F35) the END marker line that closes it.
     // Every fixture seeds one user line, both because it is the realistic shape and because
-    // it is the no-data-loss fence under test.
+    // it is the no-data-loss fence under test. The fixtures write `UserLine + "\r\n"`, so the
+    // separator shows up as a blank line - that blank line IS what the teardown strip gives
+    // back as the user's own newline (F71, pinned by HostsTrailingNewlineRoundTripTests).
     private const string UserLine = "127.0.0.1 mine.example";
     private static string ExpectedHosts(params string[] domains)
-        => UserLine + "\r\n" + Expected(domains) + MonkMode.Blocker.EndMarker + "\r\n";
+        => UserLine + "\r\n" + "\r\n" + Expected(domains) + MonkMode.Blocker.EndMarker + "\r\n";
 
     [Fact]
     public void SecondArm_WithTheSnapshotFileMissing_StillCoversTheFirstSlotsSites()
@@ -383,7 +386,9 @@ public class ArmHostsWriteGuardTests
                                                                  new[] { "a.com" }, false, ref warning));
             Assert.Equal("", warning);
             // F35: hosts carries the end marker below the entries; the snapshot does not.
-            Assert.Equal(UserLine + "\r\n" + Expected("a.com") + MonkMode.Blocker.EndMarker + "\r\n",
+            // F71: the user's line keeps its own trailing CRLF and the writer's separator
+            // CRLF sits below it, so the pair reads as one blank line before the marker.
+            Assert.Equal(UserLine + "\r\n" + "\r\n" + Expected("a.com") + MonkMode.Blocker.EndMarker + "\r\n",
                          File.ReadAllText(hosts));
         }
         finally { Wipe(); Drop(dir); }
@@ -584,5 +589,114 @@ public class ArmSlotStoresTrimmedValuesTests
             Assert.False(File.Exists(MonkMode.Blocker.IniPath()));
         }
         finally { Wipe(); }
+    }
+}
+
+// ---- 5. F71: a full arm -> teardown cycle must leave hosts BYTE-IDENTICAL ----
+//
+// The 20/08 smoke (logs\2026-08-20-smoke-b.md section 3) measured the real hosts file going
+// 1051 -> 1049 bytes across one arm/teardown cycle - `diff` against the baseline reported a
+// single hunk, "\ No newline at end of file". Every user LINE survived, so this was never
+// data loss, but the smoke's own "hosts byte-identical" assertion was not true.
+//
+// Cause: WriteHostsFileAt strip-normalised the user's tail (StripOurBlock TrimEnd's every
+// trailing CR/LF/space/tab) and then re-appended exactly one vbCrLf as its block separator.
+// On a FRESH arm there is no marker yet, so nothing of OURS was being trimmed - the newline
+// the writer swallowed and re-issued was the user's own. The teardown strip then removed one
+// terminator, correctly undoing what it believed was the writer's separator, and the user's
+// newline was gone for good. The writer uses HostsAboveBlock now (drop-one only when a marker
+// is actually there), which makes the separator unambiguous in both directions.
+//
+// These drive the REAL writer (WriteArmHostsBlockAt, the one `monkmode block` goes through)
+// and BOTH real teardown strips - MonkMode.Blocker.StripMonkModeBlock (`unblock`, via
+// RestoreHostsFromStrip) and monkmode.Service1.StripMonkModeBlock (genuine expiry, via
+// stopMe) - against a temp hosts fixture, and assert on BYTES, which is the assertion the
+// smoke was trying to make. Never the real hosts file.
+
+[Collection("CliIniWriters")]
+public class HostsTrailingNewlineRoundTripTests
+{
+    private static readonly DateTime Ends = new(2027, 3, 1, 12, 0, 0);
+
+    private static void Wipe()
+    {
+        foreach (var p in new[] { MonkMode.Blocker.IniPath(), MonkMode.Blocker.IniBackupPath(), MonkMode.Blocker.SnapshotPath() })
+        {
+            if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    private static string TempDir()
+    {
+        var d = Path.Combine(AppContext.BaseDirectory, "f71-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(d);
+        return d;
+    }
+
+    private static void Drop(string dir)
+    {
+        foreach (var f in Directory.GetFiles(dir)) File.SetAttributes(f, FileAttributes.Normal);
+        Directory.Delete(dir, true);
+    }
+
+    // Seed `pristine` as the user's hosts file, arm a real block over it, then lift it the
+    // two ways a block can end. The file must come back byte-for-byte, whatever its tail was.
+    private static void ArmThenLift_IsByteIdentical(string pristine)
+    {
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            Assert.True(MonkMode.Blocker.ArmSlot(new[] { "a.com" }, Array.Empty<string>(), "", null, Ends, false).Ok);
+            var snapshot = Path.Combine(dir, "monkmode_hosts.block");
+            var hosts = Path.Combine(dir, "hosts");
+            File.WriteAllText(hosts, pristine);
+            var before = File.ReadAllBytes(hosts);
+
+            MonkMode.Blocker.WriteArmHostsBlockAt(MonkMode.Blocker.IniPath(), snapshot, hosts,
+                                                  new[] { "a.com" }, freshArm: true);
+
+            // The arm really did land: our block is in the file and the user's lines are still there.
+            var armed = File.ReadAllText(hosts);
+            Assert.Contains(MonkMode.Blocker.Marker, armed, StringComparison.Ordinal);
+            Assert.Contains("127.0.0.1 mine.example", armed, StringComparison.Ordinal);
+            Assert.Contains("# my hosts", armed, StringComparison.Ordinal);
+
+            // Both lift paths agree, and both give the user's file back unchanged.
+            var cliLift = MonkMode.Blocker.StripMonkModeBlock(armed);
+            var serviceLift = monkmode.Service1.StripMonkModeBlock(armed);
+            Assert.Equal(cliLift, serviceLift);
+            Assert.Equal(pristine, cliLift);
+
+            // ...and on DISK, through the real atomic writer the lift paths use: byte-identical,
+            // which is the thing the smoke measured and found 2 bytes short.
+            MonkMode.AtomicHosts.WriteAtomic(hosts, cliLift);
+            Assert.Equal(before, File.ReadAllBytes(hosts));
+        }
+        finally { Wipe(); Drop(dir); }
+    }
+
+    [Fact]
+    public void HostsThatEndedWithATrailingNewline_StillHasItAfterTeardown()
+    {
+        // The F71 repro: the ordinary shape of a hosts file. Pre-fix this came back
+        // one CRLF short.
+        ArmThenLift_IsByteIdentical("# my hosts\r\n127.0.0.1 mine.example\r\n");
+    }
+
+    [Fact]
+    public void HostsThatHadNoTrailingNewline_DoesNotGainOne()
+    {
+        // The other direction, and the reason the fix is not simply "stop stripping a
+        // terminator at teardown": a file with no trailing newline must not acquire one.
+        ArmThenLift_IsByteIdentical("# my hosts\r\n127.0.0.1 mine.example");
+    }
+
+    [Fact]
+    public void HostsThatEndedWithABlankLine_KeepsExactlyThatBlankLine()
+    {
+        // Trailing blank lines are the user's content too - StripOurBlock's TrimEnd ate all
+        // of them, not just one, so a fresh arm used to be lossier than the 2 bytes measured.
+        ArmThenLift_IsByteIdentical("# my hosts\r\n127.0.0.1 mine.example\r\n\r\n");
     }
 }

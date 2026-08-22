@@ -770,12 +770,19 @@ Module Blocker
         Return original
     End Function
 
-    ' The tail-normalising strip used by the RE-BLOCK path (WriteHostsBlock):
-    ' the user's content ABOVE our block, with any trailing CR/LF/space/tab
-    ' trimmed, because the caller immediately re-appends vbCrLf + a fresh block -
-    ' normalising the tail stops a blank line accumulating before the marker
-    ' across repeated blocks. Deliberately NOT byte-for-byte (that is
+    ' The tail-normalising strip: the user's content ABOVE our block, with any
+    ' trailing CR/LF/space/tab trimmed. Deliberately NOT byte-for-byte (that is
     ' StripMonkModeBlock's job, used by the lift path).
+    '
+    ' F71 (22/08/2026): NO LONGER ON THE WRITE PATH. WriteHostsFileAt used to call this
+    ' and then re-append one vbCrLf, which is precisely how a fresh arm swallowed the
+    ' user's own trailing newline and the teardown never gave it back (the full argument
+    ' is at WriteHostsFileAt). The writer uses HostsAboveBlock now, and no product code
+    ' calls this any more. It is retained because it is the oracle the F31 line-anchored
+    ' strip regressions are written against (MonkMode.Tests\HostsBlockStripTests.cs -
+    ' CliStripOurBlockTests, and the LegacyStripOurBlock comparisons in
+    ' CliServiceStripParityTests); deleting it would delete that regression net for no
+    ' gain beyond tidiness.
     ' F35: it is HostsAboveBlock that is trimmed, not the whole strip - the user's
     ' content BELOW our end marker must keep its own line endings and is re-attached
     ' below the new block by WriteHostsFileAt. With nothing below the end marker the
@@ -821,7 +828,30 @@ Module Blocker
         ClearReadOnly(path)
         Dim existing As String = ""
         If File.Exists(path) Then existing = File.ReadAllText(path)
-        Dim baseText As String = StripOurBlock(existing)
+        ' F71 (22/08/2026): HostsAboveBlock, NOT StripOurBlock. StripOurBlock TrimEnd's the
+        ' user's tail, and the line below then re-appends exactly one vbCrLf - so on a FRESH
+        ' arm (no marker yet, nothing to drop) the writer CONSUMED the user's own trailing
+        ' newline and re-issued it as its own separator. The teardown strip (HostsAboveBlock,
+        ' via StripMonkModeBlock) then removes exactly one terminator, believing it is undoing
+        ' that separator, and the user's newline never comes back: measured on the 20/08 smoke,
+        ' a full arm/teardown cycle left hosts 1051 -> 1049 bytes, one CRLF short, with `diff`
+        ' reporting "\ No newline at end of file". No user LINE was ever lost, but
+        ' "byte-identical after teardown" was not true.
+        '
+        ' HostsAboveBlock drops exactly ONE terminator when a marker is present (undoing the
+        ' separator a previous write added) and NONE when there is no marker (there is no
+        ' separator of ours to undo), which makes the separator added below unambiguous and
+        ' the cycle byte-exact IN BOTH DIRECTIONS: a file that ended with a newline keeps it,
+        ' and one that did not does not gain one. Re-blocks stay stable too - drop-one then
+        ' add-one is a fixed point, so no blank line accumulates.
+        '
+        ' The visible price is one blank line between the user's content and our marker on a
+        ' hosts file that already ended with a newline. That blank line IS the separator; it
+        ' is what makes the user's own trailing newline recoverable, and it is exactly the
+        ' layout the SERVICE's writers have always produced (Service1.RepairHostsBlock /
+        ' ExactHostsRewrite both assemble HostsAboveBlock(...) & vbCrLf & block), so this also
+        ' ends a CLI<->service layout divergence rather than creating one.
+        Dim baseText As String = HostsAboveBlock(existing)
         ' F35: the user's content above AND below the old block survives, with the new
         ' block re-seated between them and end-markered so the next strip stops there.
         ' Below stays below: hoisting it above our entries would let the user's own line
