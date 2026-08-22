@@ -10,13 +10,13 @@ VB.NET 2.0 WinForms blocker that no longer built. The fork rebuilt it as a .NET 
 CLI and hardened enforcement so that, once a block starts, it cannot be casually
 removed before its timer expires. See [The fork base](#the-fork-base) below.
 
-## [Unreleased] — v1.1 (multi-block + URL-level blocking)
+## [1.1.0] — 22/08/2026 (multi-block + URL-level blocking)
 
 The v1.1 line turns the single machine-wide block into up to **eight independent
 blocks** that start, run and end on their own timers, adds **URL-pattern**
 nudging and **delayed starts**, and closes the nine defect families the 19/08/2026
-adversarial bug-hunt found. Not yet tagged: the elevated smoke-B batch is the
-remaining gate.
+adversarial bug-hunt found. Gated on an elevated smoke batch, which ran on
+20/08/2026 and is summarised under **Live-verification** below.
 
 ### Added
 
@@ -130,6 +130,45 @@ Nine fix slices closing the 19/08/2026 bug-hunt's P0/P1/P2 ladder
   monotonic mark, so `--start +30d` no longer holds the machine's only port 80 for
   a month; and `install.ps1 -InstallDir` pointed outside Program Files now stamps
   an explicit admin-only DACL instead of silently inheriting `Users: Modify`.
+- **F70 — `unblock --force` no longer leaves an armed config behind.** The escape
+  hatch removed the enforcement — watchdog pair killed, service deleted, hosts
+  stripped, snapshot and backup gone — but left the config still carrying a
+  non-zero `[Slots] SlotCount`. Two surfaces read only that file, so on a machine
+  with nothing running, `monkmode schedule` refused with *"A block is armed"*
+  (exit 3) and `build-dist.ps1` refused to rebuild or install. Both refusals were
+  in the safe direction, but neither ever ended: after using the documented escape
+  hatch you could not set a schedule or reinstall until the config was deleted by
+  hand. The forced teardown now persists a zero-slot config, exactly as the
+  service's own genuine-expiry teardown always has. No guard was weakened — the
+  fix is parity between the two teardown paths, not a second opinion for the
+  readers. Block ids still never restart across a teardown, and a tampered config
+  is cleared but never re-stamped with a fresh MAC.
+
+### Live-verification
+
+The elevated smoke batch ran on 20/08/2026 (four sittings; enforcement core
+45/1, with every failure triaged). Proven live on the maintainer's machine, not
+merely unit-tested: three blocks armed inside one hosts marker block; one
+expiring with the other two undisturbed; cooling-off request and cancel (the
+request does **not** lift); a per-slot partner code unlocking only its own block;
+teardown on the last block leaving; the two-marker hosts format and a user's own
+trailing content surviving a full lifecycle; **guardian kill → respawn**;
+**app-kill tampering freezing rather than lifting**; a squatted guardian mutex no
+longer standing the watchdog down; an overnight schedule window; the block page
+answering on loopback; and the block page's bind gate across pending → active →
+expiry. The URL watcher was confirmed on Brave and Edge; Chrome was not installed
+for the batch, so it is claimed on two of three browsers rather than three.
+
+On 22/08/2026 the installer's admin-only DACL (FX9/F32) was drilled directly: an
+install to a path outside Program Files was verified — independently of the
+installer's own output — to break inheritance and grant `BUILTIN\Users` read and
+execute only, on the folder and on the copied executables; a genuine
+non-elevated attempt to overwrite `MonkMode_srv.exe` was **denied**, against a
+control proving the probe detects writable files.
+
+Not proven and carried honestly: a reboot-during-block notifier-count drill, the
+trailing-dot URL case end to end (the watcher is foreground-only, which the
+harness could not drive honestly), and three clock/timezone drills.
 
 ### Known limitations
 
