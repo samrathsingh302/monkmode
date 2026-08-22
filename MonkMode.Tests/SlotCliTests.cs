@@ -1095,3 +1095,53 @@ public class ScheduleGuardHoldTests
         finally { Wipe(); }
     }
 }
+
+// ---- F74: the code print names WHO to send it to ----
+
+public class PartnerRelayLineTests
+{
+    // The label is otherwise read by nothing at runtime: `setup` stored it, echoed the
+    // argument straight back, and no later command ever mentioned it again - so a partner
+    // who had never actually been given a code looked identical to one who had. This line
+    // is the one place the stored label reaches the user, at the one moment the code is on
+    // screen.
+
+    [Fact]
+    public void ALabel_IsNamedInTheRelayLine()
+    {
+        var line = MonkMode.Program.FormatPartnerRelayLine("mum (someone@example.com)");
+        Assert.Contains("mum (someone@example.com)", line);
+        Assert.Contains("NOW", line);
+        Assert.DoesNotContain("\n", line);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void NoUsableLabel_PrintsNothingAtAll(string label)
+    {
+        // Never a bare "send it to:" with nothing after it. The header already tells the
+        // user to hand the code over, so silence is the right degradation.
+        Assert.Equal("", MonkMode.Program.FormatPartnerRelayLine(label));
+    }
+
+    [Fact]
+    public void ANullLabel_IsTreatedAsAbsent_NotACrash()
+    {
+        // SetupPartnerLabel never returns null, but this is the arm path: a direct caller
+        // must not be able to throw between the arm and the one-and-only code print (F6).
+        Assert.Equal("", MonkMode.Program.FormatPartnerRelayLine(null!));
+    }
+
+    [Fact]
+    public void TheRelayLine_NeverContainsTheParseCodeAnchor()
+    {
+        // cv-d-smoke.ps1's ParseCode (:113-118) finds the line matching 'Emergency unlock
+        // code' and takes the NEXT line as the code. If this line ever carried that anchor
+        // it could be matched instead of the real header and the smoke would parse the
+        // wrong line as the code. Belt and braces on top of it being printed BELOW the code.
+        var line = MonkMode.Program.FormatPartnerRelayLine("mum (someone@example.com)");
+        Assert.DoesNotContain("Emergency unlock code", line);
+    }
+}

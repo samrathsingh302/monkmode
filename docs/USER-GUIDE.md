@@ -172,7 +172,7 @@ schema, currently `s4`, independent of the enforcement config). It records:
 
 | Option | What it stores | Notes |
 |---|---|---|
-| `--partner` | A free-text accountability-partner label. | Cosmetic — shown in the setup summary and relayed with the code. No email is sent. |
+| `--partner` | A free-text accountability-partner label (a name, or a name and contact). | Shown in the setup summary **and printed under the one-time code at every block** (F74), so you are told who to send it to at the moment it appears. It gates nothing and **no message is sent** — MonkMode has no outbound capability at all; relaying the code is a physical act you perform. A label you never relay to is worth nothing. |
 | `--cooloff <dur>` | An **account-default** cooling-off wait. | Every later `block` without its own `--cooloff` inherits it. Same duration grammar as `--for`; capped at ~365 days. The ~1 h floor still applies. |
 | `--default-sites a.com,b.com` | An account-default blocklist. | A bare `monkmode block` (no `--sites`/`--preset`/`--file`) inherits it. |
 | `--default-preset social` | Preset categories folded into the default blocklist. | Validated once, here, so a stored default can never make a later block fail to arm. |

@@ -420,6 +420,14 @@ Module Program
         ' the B5a DoH snapshot, and D4d's leftover-notifier kill.
         Dim alreadyArmed As Boolean = Blocker.AnythingArmed()
 
+        ' F74 (22/08/2026): read the accountability-partner label HERE, before the arm, and
+        ' never between the arm and the code print below. SetupPartnerLabel is documented
+        ' never-throws (its whole body is a Try/Catch returning ""), so this is belt AND
+        ' braces - but F6 is the lesson that a throw between the arm and that print costs a
+        ' committed block its ONLY early exit for the block's whole life, and the cheapest
+        ' way to keep that promise is to put nothing new in that window at all.
+        Dim partnerLabel As String = Blocker.SetupPartnerLabel()
+
         ' v1.1 S2: CONFIG FIRST, then the snapshot, then hosts. ArmSlot appends this block
         ' as a new slot (or refuses without side effects), mints its own partner code and
         ' returns it ONCE - only a salted, MAC-covered hash is ever persisted.
@@ -550,6 +558,16 @@ Module Program
         ' blocks tells the partner WHICH one this code opens.
         Console.WriteLine(FormatUnlockCodeHeader(arm.Id))
         Console.WriteLine("    " & partnerCode)
+        ' F74: name WHO to send it to, at the one moment the code is on screen. The label is
+        ' otherwise read by nothing at runtime - `setup` stored it, echoed the argument back,
+        ' and no later command ever mentioned it again, so a partner who was never actually
+        ' given a code looked identical to one who was. This line goes BELOW the code, never
+        ' between the header and it: cv-d-smoke.ps1's ParseCode (:113-118) takes the line
+        ' IMMEDIATELY after the header as the code, and that adjacency is the contract.
+        ' Empty label (none set, or an incomplete/tampered setup file) prints nothing - the
+        ' header already says to hand it over.
+        Dim relay As String = FormatPartnerRelayLine(partnerLabel)
+        If relay <> "" Then Console.WriteLine(relay)
         Console.WriteLine("To end block " & arm.Id & " early, they run:  monkmode unblock --code <CODE>")
         Return 0
     End Function
@@ -1359,6 +1377,17 @@ Module Program
     Friend Function FormatUnlockCodeHeader(ByVal slotId As Integer) As String
         Return "Emergency unlock code for block " & slotId.ToString(CultureInfo.InvariantCulture) &
                " (give it to your accountability partner NOW - it will NOT be shown again):"
+    End Function
+
+    ' F74: the "send it to X" line printed under the one-time code, or "" when there is no
+    ' usable label. Pure and Friend so the wording is pinned by test rather than living in a
+    ' Console.WriteLine nothing can see (the FormatUnlockCodeHeader discipline).
+    ' Whitespace-only labels are treated as absent: SetupPartnerLabel already Trim()s, but a
+    ' direct caller must not be able to print a bare "send it to:" with nothing after it.
+    Friend Function FormatPartnerRelayLine(ByVal partnerLabel As String) As String
+        Dim label As String = If(partnerLabel, "").Trim()
+        If label = "" Then Return ""
+        Return "Send it to your accountability partner NOW: " & label
     End Function
 
     ' C6c: parse an optional --cooloff argument (shared by `setup` and `block`) into seconds,

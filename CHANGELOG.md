@@ -12,7 +12,19 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 ## [Unreleased]
 
-Three defects found on and just after tag day, all outside enforcement.
+Three defects found on and just after tag day, all outside enforcement, plus one usability fix.
+
+### Added
+
+- **F74 — the one-time code now names who to send it to.** The `--partner` label was stored,
+  echoed back once by `setup`, and then read by no runtime code at all, so a partner who had
+  never actually been given a code looked identical to one who had. `block` now prints
+  `Send it to your accountability partner NOW: <label>` directly under the code. The label is
+  read **before** the arm and an absent or unusable one prints nothing, so nothing new can throw
+  in the window between arming and the code print (the F6 rule). The line sits **below** the
+  code, never between the header and it, because `cv-d-smoke.ps1`'s `ParseCode` takes the line
+  immediately after the header as the code. Still no message is sent anywhere — MonkMode has no
+  outbound capability; relaying the code remains a physical act.
 
 ### Fixed
 
