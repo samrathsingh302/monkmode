@@ -1145,3 +1145,49 @@ public class PartnerRelayLineTests
         Assert.DoesNotContain("Emergency unlock code", line);
     }
 }
+
+// ---- F75: the binary has to answer for itself when nobody is around ----
+
+public class VersionCommandTests
+{
+    // The exe's own FileVersion is still the inherited Cold Turkey 0.7.0.0, so Windows'
+    // properties dialog answers "which build is this?" WRONGLY. This command is the only
+    // honest answer available on a machine with no source repo.
+
+    [Fact]
+    public void Version_NamesTheRelease_TheInstallDir_AndTheBuild()
+    {
+        var built = new DateTime(2026, 8, 22, 18, 11, 0, DateTimeKind.Utc);
+        var lines = MonkMode.Program.FormatVersionLines(@"C:\Program Files\MonkMode", built);
+        Assert.Contains(lines, l => l.Contains("MonkMode " + MonkMode.Program.AppVersion));
+        Assert.Contains(lines, l => l.Contains(@"C:\Program Files\MonkMode"));
+        Assert.Contains(lines, l => l.Contains("22/08/2026"));
+    }
+
+    [Fact]
+    public void Version_StaysUsable_WhenTheMachineCannotBeRead()
+    {
+        // `version` must never be the command that throws or prints half a line: it is what
+        // someone runs when things already look broken.
+        var lines = MonkMode.Program.FormatVersionLines("", null);
+        Assert.Contains(lines, l => l.Contains("MonkMode " + MonkMode.Program.AppVersion));
+        Assert.Contains(lines, l => l.Contains("(unknown)"));
+        Assert.All(lines, l => Assert.False(string.IsNullOrWhiteSpace(l)));
+    }
+
+    [Fact]
+    public void Version_DoesNotDoubleTheTrailingSeparator()
+    {
+        var lines = MonkMode.Program.FormatVersionLines(@"C:\Program Files\MonkMode\", null);
+        Assert.Contains(lines, l => l.EndsWith(@"C:\Program Files\MonkMode"));
+    }
+
+    [Fact]
+    public void TheReleaseConstant_MatchesTheChangelogsLatestRelease()
+    {
+        // The constant is hand-maintained (the assembly FileVersion is not worth re-plumbing),
+        // so pin it to something a person would notice: a bare, dotted release number. A
+        // CHANGELOG bump that forgets this constant leaves `monkmode version` lying.
+        Assert.Matches(@"^\d+\.\d+\.\d+$", MonkMode.Program.AppVersion);
+    }
+}

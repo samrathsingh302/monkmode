@@ -556,6 +556,12 @@ This block is COMMITTED: self-serve cooling-off is disabled. The only early exit
 
 ## 7. Emergency recovery
 
+> **You do not need this file to get out of anything.** Since F75 (22/08/2026) the same
+> escape route, and the four normal-looking states people mistake for breakage, are printed
+> by `monkmode help` itself under **"If something looks wrong"** — so a machine with the
+> installed binary and no source repo is still self-sufficient. This section is the detail
+> behind it, not the only copy of it.
+
 ```
 monkmode unblock --force
 ```

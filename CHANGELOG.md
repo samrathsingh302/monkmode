@@ -16,6 +16,17 @@ Three defects found on and just after tag day, all outside enforcement, plus one
 
 ### Added
 
+- **F75 — the binary can now talk you out of a corner on its own.** Every recovery path lived
+  only in `docs/RUNBOOK.md`: a developer file, in a source repo, which someone running the
+  installed binary has no reason to have on disk. `monkmode help` gained an **"If something
+  looks wrong"** section naming the four things that look like breakage and are not (a
+  non-elevated run printing nothing; `service installed but idle`; the service not running;
+  the FROZEN integrity message), and stating plainly that `unblock --force` always works —
+  no code, no waiting, no readable config required. It also gained the one exit the help had
+  never actually named: **a block ends by itself when the timer runs out.** New `monkmode
+  version` reports the release, the install directory and the build's own timestamp, because
+  the assembly's `FileVersion` is still the inherited Cold Turkey `0.7.0.0` and Windows'
+  properties dialog therefore answers "which build is this?" wrongly.
 - **F74 — the one-time code now names who to send it to.** The `--partner` label was stored,
   echoed back once by `setup`, and then read by no runtime code at all, so a partner who had
   never actually been given a code looked identical to one who had. `block` now prints

@@ -70,6 +70,11 @@ Module Program
                 Case "schedule" : Return DoSchedule(args)
                 Case "unblock" : Return DoUnblock(args)
                 Case "help", "-h", "--help", "/?" : PrintUsage() : Return 0
+                ' F75: which build am I on? The exe's file version is still the inherited
+                ' Cold Turkey 0.7.0.0 stamp, so Windows' own properties dialog answers this
+                ' WRONGLY. Cheap, read-only, and the first question anyone asks when
+                ' something looks off.
+                Case "version", "--version", "-v" : PrintVersion() : Return 0
                 Case Else
                     Console.Error.WriteLine("Unknown command: " & verb)
                     PrintUsage()
@@ -1379,6 +1384,44 @@ Module Program
                " (give it to your accountability partner NOW - it will NOT be shown again):"
     End Function
 
+    ' F75: the release this build belongs to. A hand-maintained constant on purpose - the
+    ' assembly's own FileVersion is the inherited Cold Turkey 0.7.0.0 and is not worth
+    ' re-plumbing, and a constant is the one thing a `CHANGELOG.md` bump can keep in step.
+    Friend Const AppVersion As String = "1.1.0"
+
+    ' F75: what `monkmode version` prints, as lines, so the wording is pinned by test. Pure:
+    ' the caller supplies the facts, because the point of this command is to tell the truth
+    ' about a MACHINE, and a function that read the machine itself could not be tested.
+    Friend Function FormatVersionLines(ByVal installDir As String, ByVal builtUtc As DateTime?) As List(Of String)
+        Dim lines As New List(Of String)
+        lines.Add("MonkMode " & AppVersion)
+        lines.Add("  Installed at: " & If(String.IsNullOrWhiteSpace(installDir), "(unknown)", installDir.TrimEnd(CChar("\"))))
+        ' The binary's own timestamp, not a compile-time stamp: it is what actually
+        ' distinguishes two installs of the same release, which is the question being asked.
+        If builtUtc.HasValue Then
+            lines.Add("  This build:   " & builtUtc.Value.ToLocalTime().ToString("dd/MM/yyyy HH:mm", CultureInfo.InvariantCulture))
+        Else
+            lines.Add("  This build:   (unknown)")
+        End If
+        Return lines
+    End Function
+
+    Private Sub PrintVersion()
+        Dim dir As String = ""
+        Dim built As DateTime? = Nothing
+        ' Best-effort: `version` must never be the command that throws. A machine whose own
+        ' paths cannot be read still gets the release number, which is most of the answer.
+        Try
+            dir = Blocker.AppDir()
+            Dim exe As String = Path.Combine(dir, "monkmode.exe")
+            If File.Exists(exe) Then built = File.GetLastWriteTimeUtc(exe)
+        Catch
+        End Try
+        For Each line As String In FormatVersionLines(dir, built)
+            Console.WriteLine(line)
+        Next
+    End Sub
+
     ' F74: the "send it to X" line printed under the one-time code, or "" when there is no
     ' usable label. Pure and Friend so the wording is pinned by test rather than living in a
     ' Console.WriteLine nothing can see (the FormatUnlockCodeHeader discipline).
@@ -1617,9 +1660,14 @@ Module Program
         Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
         Console.WriteLine("  monkmode unblock --code <CODE>  (submit the partner accountability code; the service verifies it and lifts within ~10s)")
         Console.WriteLine("  monkmode unblock --force   (escape hatch: tears down an active block + removes the service)")
+        Console.WriteLine("  monkmode version  (which release and which build this machine is running)")
         Console.WriteLine("  monkmode help")
         Console.WriteLine("")
         Console.WriteLine("Notes:")
+        ' F75: the timer was the ONE exit the help never named. Cooling-off, --code and
+        ' --force were all spelled out above, but "it just ends" was only inferable from the
+        ' --for grammar note - and it is the exit that needs no action, so it belongs first.
+        Console.WriteLine("  - A block ENDS BY ITSELF when its timer runs out. You do not have to do anything; the sites come back within about 10 seconds of the end time.")
         Console.WriteLine("  - Run 'monkmode setup' once before your first block; it explains the accountability code + cooling-off and is required to arm.")
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
         Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
@@ -1636,6 +1684,36 @@ Module Program
         Console.WriteLine("  - 'monkmode setup --cooloff 2h' sets an ACCOUNT DEFAULT cooling-off wait that every block without its own --cooloff inherits; a block's own --cooloff always overrides it. The ~1h minimum still applies.")
         Console.WriteLine("  - 'monkmode setup --default-sites a.com,b.com [--default-preset social]' sets an ACCOUNT DEFAULT blocklist that 'monkmode block' inherits when you give it no --sites/--preset/--file; naming any of those overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
         Console.WriteLine("  - 'monkmode setup --default-apps chrome.exe,foo.exe [--default-app-preset games]' sets an ACCOUNT DEFAULT app-kill list that 'monkmode block' inherits when you give it no --apps/--app-preset; naming either overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
+        PrintTroubleshooting()
+    End Sub
+
+    ' F75: the section that was missing entirely. Every recovery path used to live only in
+    ' docs\RUNBOOK.md - a developer file, in a source repo, which a user running the installed
+    ' binary has no reason to have on disk at all. If this exe is the ONLY thing someone has,
+    ' it has to be able to talk them out of a corner, so the four things that actually look
+    ' like breakage (and are not) are named here, and so is the exit that always works.
+    Private Sub PrintTroubleshooting()
+        Console.WriteLine("")
+        Console.WriteLine("If something looks wrong:")
+        Console.WriteLine("  - NOTHING PRINTED and it returned instantly? You were not in an Administrator prompt.")
+        Console.WriteLine("    MonkMode needs elevation, so Windows re-ran it in a new window that closed immediately -")
+        Console.WriteLine("    your output went there. Open an elevated prompt and run it again. Nothing is broken.")
+        Console.WriteLine("  - 'no active block (service installed but idle)' is NORMAL between blocks. The MonkMode")
+        Console.WriteLine("    service stays registered after a block ends; that is not a leftover block and blocks nothing.")
+        Console.WriteLine("  - 'the MonkMode service isn't running at the moment' is also normal: the blocked sites stay")
+        Console.WriteLine("    in your hosts file regardless, and the service restarts itself.")
+        Console.WriteLine("  - 'the stored configuration failed its integrity check' means MonkMode is FROZEN: it keeps")
+        Console.WriteLine("    blocking and will NOT lift by itself. That is deliberate (it never fails open). Use --force below.")
+        Console.WriteLine("")
+        Console.WriteLine("  THE WAY OUT THAT ALWAYS WORKS:  monkmode unblock --force")
+        Console.WriteLine("    From an Administrator prompt. No code, no waiting, no working config needed. It tears down")
+        Console.WriteLine("    the block, removes the service and restores your hosts file. It is the deliberate escape")
+        Console.WriteLine("    hatch: nothing MonkMode can get into stops it working. Your setup and history survive it.")
+        Console.WriteLine("")
+        Console.WriteLine("  Everything MonkMode stores lives beside this program (run 'monkmode version' for the path),")
+        Console.WriteLine("  plus block counters in %ProgramData%\MonkMode. It needs no internet, no account and no licence,")
+        Console.WriteLine("  it sends nothing anywhere, and nothing expires. Full guide: docs\USER-GUIDE.md in the source")
+        Console.WriteLine("  repo (section 7 is emergency recovery) - but you should not need it to get out of anything.")
     End Sub
 
 End Module
