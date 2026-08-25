@@ -523,6 +523,68 @@ public class SlotArmTests
         }
         finally { Wipe(); }
     }
+    // ---- F76: arming after an idle gap must not inherit a stale monotonic frame ----
+    //
+    // THE BUG (25/08/2026, caught live by the reboot drill). [Time] HighWater advances
+    // ONLY while the service is alive, and the service is stopped/absent between blocks,
+    // so a stored mark is stale by exactly the machine's idle gap. An IMMEDIATE arm writes
+    // Until off the WALL clock, while expiry is Until <= HighWater - so a 45-minute block
+    // armed at 14:06 against a mark left at ~12:02 by the previous block was still
+    // enforcing at 15:16 and tracking to lift at ~16:55, over-running by the whole ~2h gap.
+    // Fail-CLOSED (it over-blocks, never early), but it makes every block after the first
+    // one on a machine lie about when it ends.
+
+    [Theory]
+    // (slotCount, [Schedule] ActiveUntil) => re-seed the frame?
+    [InlineData(0, "", true)]          // the F76 case: nothing armed, nothing anchored
+    [InlineData(0, "   ", true)]       // whitespace is not a window
+    // NOT WIDENED: with any slot armed the mark is that slot's expiry clock. Re-seeding it
+    // forward would lift a RUNNING block early - the exact guarantee Arm2 pins.
+    [InlineData(1, "", false)]
+    [InlineData(8, "", false)]
+    // An OPEN scheduled window closes on ActiveUntil <= HighWater and survives
+    // `schedule --clear`, so it reaches this path with zero slots. Moving the mark forward
+    // under it would close it EARLY.
+    [InlineData(0, "2027-03-01 12:00:00 p.m.", false)]
+    [InlineData(0, "not-a-date", false)]   // fail-closed: unreadable still means "maybe open"
+    public void ShouldReseedMonotonicFrame_OnlyWhenNothingIsAnchoredToIt(
+        int slotCount, string activeUntil, bool expected)
+        => Assert.Equal(expected, MonkMode.Blocker.ShouldReseedMonotonicFrame(slotCount, activeUntil));
+
+    [Fact]
+    public void ArmAfterTeardown_ReseedsTheMonotonicFrame()
+    {
+        Wipe();
+        try
+        {
+            Assert.True(Arm(new[] { "reddit.com" }, Array.Empty<string>(), Ends).Ok);
+
+            // Tear down to a legitimately EMPTY, MAC-valid v10 config - the state a machine
+            // sits in between blocks, and the state `unblock --force` leaves behind.
+            MonkMode.Blocker.PersistZeroSlotConfig(blockIsActive: false);
+            var idle = Load();
+            Assert.Equal("0", idle.GetKeyValue("Slots", "SlotCount"));
+            var staleHighWater = idle.GetKeyValue("Time", "HighWater");
+            var staleNow = idle.GetKeyValue("CurrentTime", "Now");
+            Assert.NotEqual("", staleHighWater);
+
+            // Past a whole second: the stored value is second-resolution en-CA, so without
+            // this a re-seed could reproduce the same ciphertext and the test would pass
+            // for the wrong reason (the same trap Arm2 guards against in the other direction).
+            Thread.Sleep(1100);
+
+            var second = Arm(new[] { "x.com" }, Array.Empty<string>(), Ends.AddHours(1));
+            Assert.True(second.Ok);
+            Assert.False(second.FreshRewrite);       // still an APPEND, not a rewrite...
+            Assert.Equal(2, second.Id);              // ...so P17 holds: the id does NOT restart
+
+            var after = Load();
+            // The frame moved forward with the arm instead of inheriting the idle gap.
+            Assert.NotEqual(staleHighWater, after.GetKeyValue("Time", "HighWater"));
+            Assert.NotEqual(staleNow, after.GetKeyValue("CurrentTime", "Now"));
+        }
+        finally { Wipe(); }
+    }
 }
 
 // P26/P27/P28: the --start grammar. PURE (the reference "now" is injected), so no ini, no
@@ -593,4 +655,5 @@ public class StartGrammarTests
         Assert.True(MonkMode.Program.TryParseStart("31d", Now, ref start, ref err));
         Assert.True(start > Now.AddDays(MonkMode.Program.MaxStartDelayDays));   // DoBlock refuses this
     }
+
 }

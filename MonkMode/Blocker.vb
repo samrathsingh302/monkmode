@@ -1421,6 +1421,32 @@ Module Blocker
         Return False
     End Function
 
+    ' F76 (PURE): may this arm re-seed the machine's monotonic frame ([Time] HighWater +
+    ' [CurrentTime] Now) on the APPEND path? Only when nothing is measured against it.
+    '
+    ' HighWater advances ONLY while the service is alive, and the service is stopped or
+    ' absent between blocks, so a stored mark is stale by exactly the machine's idle gap.
+    ' An immediate arm writes Until off the WALL clock while expiry is Until <= HighWater,
+    ' so arming against a stale frame over-blocks by the whole gap (F76, 25/08/2026: a 45m
+    ' block armed at 14:06 against a mark left at ~12:02 tracked to lift at ~16:55).
+    '
+    ' slotCount > 0 => a RUNNING slot's expiry is measured against the mark; moving it
+    ' forward would lift that slot EARLY. This is the guarantee
+    ' Arm2_PreservesSlot1_And_DoesNotReseed_HighWater_Or_Now pins, and it is NOT weakened:
+    ' with any slot armed the answer stays False.
+    '
+    ' A non-empty [Schedule] ActiveUntil is an OPEN scheduled window, which closes on
+    ' ActiveUntil <= HighWater. It survives `schedule --clear` by design (future windows
+    ' stop, the open one runs to its end), and unlike [Schedule] Spec it is NOT refused by
+    ' the FX3 writer backstop - so it can reach this path with zero slots armed. Re-seeding
+    ' under it would close the window EARLY. Fail-CLOSED: unreadable/garbage text is still
+    ' "a window may be open", so anything non-blank refuses.
+    Friend Function ShouldReseedMonotonicFrame(ByVal slotCount As Integer,
+                                               ByVal scheduleActiveUntil As String) As Boolean
+        If slotCount > 0 Then Return False
+        Return String.IsNullOrWhiteSpace(scheduleActiveUntil)
+    End Function
+
     ' P17 (PURE): the id this arm takes. `Id` is the stored [Slots] NextSlotId, but never
     ' below one past the highest id already present, so an id can NEVER be reused even if
     ' NextSlotId were somehow behind (a retire REMOVES its section and lowers the highest
@@ -1868,6 +1894,33 @@ Module Blocker
             ' running slots' monotonic frame, TimeChanging may be mid-clock-change
             ' cooperation, and the v9 partner verifier is an EXISTING block's exit - none
             ' of them is this arm's to reset. This slot's own code lands in its section.
+            '
+            ' F76 (25/08/2026, caught by the reboot drill): "the running slots' frame" is
+            ' only a reason to leave it alone while slots are actually RUNNING. HighWater
+            ' advances ONLY while the service is alive, and the service is stopped/absent
+            ' between blocks, so with slotCount = 0 the stored mark is stale by exactly the
+            ' machine's idle gap. An IMMEDIATE arm writes Until off the WALL clock (endsAt,
+            ' = now + --for), while expiry is Until <= HighWater (BlockGenuinelyExpired,
+            ' :169-175) - so a frame N behind the wall makes this block over-run by N. Live:
+            ' a 45m block armed 14:06:32 against a mark left at ~12:02 by the previous
+            ' block was still enforcing at 15:16 and was tracking to lift at ~16:55.
+            ' Re-seed BOTH halves of the frame - Now as well, or the service's very next
+            ' ClassifyTimeAdvance reads a stale anchor and calls the gap a ForwardJump.
+            ' Fail-CLOSED either way: this can only ever move a mark FORWARD to now, and
+            ' with no slot armed nothing is measured against it, so it cannot lift anything
+            ' early. (The delayed --start path is already immune: P29 stores no Until and
+            ' the SERVICE computes it as HighWater + DurationSeconds at activation.)
+            '
+            ' GUARD - an open SCHEDULE window is the one thing that is anchored to the mark
+            ' with zero slots armed. [Schedule] Spec is refused above (FX3, :1804), but a
+            ' window that is already OPEN survives `schedule --clear` by design and closes
+            ' on ActiveUntil <= HighWater (ScheduleWindowElapsed, :2610). Moving the mark
+            ' forward under it would close it EARLY, so never re-seed while one is open.
+            If ShouldReseedMonotonicFrame(slotCount, ini.GetKeyValue("Schedule", "ActiveUntil")) Then
+                Dim reseed As String = DateTime.Now.ToString(CA)
+                ini.SetKeyValue("Time", "HighWater", enc.EncryptData(reseed))
+                ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(reseed))
+            End If
         End If
 
         ' FX5 (fold-in): .Trim() the URL patterns, because that is what the control-character
