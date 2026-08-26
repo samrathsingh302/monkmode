@@ -18,729 +18,785 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 -->
 
-# MonkMode — User Guide
+# MonkMode — The Complete User Guide
 
-A practical, command-first manual for the whole lifecycle: install, setup,
-blocks, schedules, presets, cooling-off, the partner code, emergency recovery,
-stats, and removal.
+MonkMode locks you out of distracting websites and apps on your Windows
+computer, **for a length of time you choose, and it does not let you change
+your mind halfway through.** That is the whole point: you set the block while
+you are feeling strong, and it holds while you are feeling weak.
 
-MonkMode is a personal, tamper-resistant website/app blocker for Windows. It is
-a command-line tool (there is no GUI). Once a block starts it cannot be casually
-removed before its timer expires — the point is to protect you from yourself.
+It has no windows or buttons — you control it by **typing short commands**
+into a window on your computer. Every command you need is written out in this
+guide, ready to copy. You do not need to know anything about computers to use
+it; start at Section 1 and go in order.
 
-**The honest ceiling first, because it frames everything below.** MonkMode is
-*impulse-proof, not admin-proof*. You keep Administrator rights on your own
-machine, so a deliberate, explicitly-flagged escape hatch (`monkmode unblock
---force`) always exists, and an offline / WinRE / determined-admin-with-time
-attack always wins eventually. The design goal is to defeat casual-to-determined
-bypasses, not to be unbreakable. See the bypass table (B1–B14) and the full
-ceiling in `ARCHITECTURE.md`.
+**What it does, in one paragraph.** You tell MonkMode which websites and apps
+to block and for how long — say, "block reddit.com for 2 hours". From that
+moment, those websites will not load in any browser, those apps close
+themselves the moment they open, and a countdown runs. When the time is up,
+everything unblocks by itself. Before the time is up, there is no easy way
+out — that is a feature, and Section 8 explains the three deliberate exits
+that do exist.
 
-Throughout, `monkmode` means the CLI executable `monkmode.exe`. Every command
-below is run from an **elevated (Administrator)** prompt — MonkMode edits the
-hosts file and installs a system service, so it will refuse to do anything
-useful without elevation (it exits with "Access denied. Run MonkMode as
-Administrator.").
+**What it honestly cannot do.** MonkMode is *impulse-proof, not
+unbreakable*. It defeats the casual "I'll just turn it off for a minute"
+urge and quite determined fiddling too, but you own this computer: an
+administrator with time, tools and determination can always win eventually,
+and one clearly-marked emergency command (`monkmode unblock --force`,
+Section 8.5) is kept on purpose so a fault can never brick your machine.
+If you want a lock even *you* can't open, hand the one-time code to another
+person and use a committed block (Sections 4.7 and 8.4).
+
+**Privacy:** MonkMode needs no internet, no account and no licence. It sends
+nothing anywhere, ever. Everything it stores stays on your computer.
 
 ---
 
-## 1. Install
+## Contents
 
-The supported install is the `tools\install.ps1` script (slice H1): it publishes a
-self-contained build and copies the four executables to `C:\Program Files\MonkMode\`,
-then adds that folder to the machine `PATH` so `monkmode` works from any elevated
-prompt. Program Files is admin-ACL'd, which raises the tamper bar over a
-user-writable folder. **Installing files does not arm anything** — the first
-`block`/`schedule` you run *is* the enforcement install, registering and starting the
-`MONKMODE` service.
+1. [The one skill you need: the Administrator window](#1-the-one-skill-you-need-the-administrator-window)
+2. [Install MonkMode](#2-install-monkmode)
+3. [First-time setup (required, once)](#3-first-time-setup-required-once)
+4. [Blocking things: the `block` command](#4-blocking-things-the-block-command)
+5. [Running several blocks at once](#5-running-several-blocks-at-once)
+6. [Blocking pages rather than whole sites: `--urls`](#6-blocking-pages-rather-than-whole-sites---urls)
+7. [Blocks on a timetable: `schedule`](#7-blocks-on-a-timetable-schedule)
+8. [How a block ends: the exits](#8-how-a-block-ends-the-exits)
+9. [Checking in: `status`, `stats`, `version`, and what you'll see on screen](#9-checking-in-status-stats-version-and-what-youll-see-on-screen)
+10. [Restarts, clock changes, and what survives](#10-restarts-clock-changes-and-what-survives)
+11. [Troubleshooting — things that look broken but are not](#11-troubleshooting--things-that-look-broken-but-are-not)
+12. [Uninstalling](#12-uninstalling)
+13. [Reference: every command, every flag](#13-reference-every-command-every-flag)
 
-### 1a. Recommended: the install script
+---
 
-From an **elevated** PowerShell prompt, in the repo root:
+## 1. The one skill you need: the Administrator window
+
+Every MonkMode command is typed into an **Administrator PowerShell window**
+(a window where you type commands, opened with extra permission). Here is how
+to open one — this exact sequence, every time:
+
+1. Click the **Start** button (the Windows logo, bottom-left of the screen).
+2. Type: `powershell` (you'll see **Windows PowerShell** appear in the menu).
+3. **Right-click** on **Windows PowerShell**.
+4. Click **"Run as administrator"**.
+5. Windows asks *"Do you want to allow this app to make changes to your
+   device?"* — click **Yes**.
+
+A blue (or black) window opens with a line ending in `>`. That is where you
+type the commands in this guide. Type a command, press **Enter**, and read
+what comes back.
+
+> ### ⚠️ THE #1 MISTAKE — read this box before anything else
+>
+> If you open PowerShell **without** "Run as administrator" (a *normal*
+> window), every MonkMode command will appear to **do nothing at all**:
+> nothing prints, no error, it just returns instantly. It looks exactly like
+> the program is broken. **It is not.** MonkMode needs administrator
+> permission, so Windows relaunches it in a *new* window that closes the
+> instant it finishes — your answer appeared and vanished in a window you
+> never saw.
+>
+> **The fix is always the same:** close the window, and reopen PowerShell
+> using the five steps above — the right-click and **"Run as administrator"**
+> are the part people skip. If commands print things back at you, you are in
+> the right kind of window.
+
+---
+
+## 2. Install MonkMode
+
+You need the MonkMode folder (the source code you downloaded — for example
+from GitHub, via **Code → Download ZIP**, then right-click the ZIP →
+**Extract All**). Installation is one command. It copies the program to
+`C:\Program Files\MonkMode` and makes the word `monkmode` work from any
+Administrator window. **Installing does not block anything yet.**
+
+In an Administrator PowerShell window, go into the MonkMode folder and run
+the installer. If you extracted it to your Downloads folder, that looks like:
 
 ```
+cd C:\Users\YOURNAME\Downloads\monkmode-main
 powershell -ExecutionPolicy Bypass -File tools\install.ps1
 ```
 
-That publishes a self-contained `win-x64` payload (bundling the .NET 10 runtime, so
-the target machine needs no .NET installed), copies it to `C:\Program Files\MonkMode\`,
-and adds that folder to the machine `PATH`. Open a **new** elevated prompt afterwards
-so the updated `PATH` is picked up, then continue at Section 2 (`monkmode setup`).
+(Replace `YOURNAME` with your Windows user name, and the folder name with
+wherever you put it. `cd` means "go into this folder".)
 
-> **"I ran `monkmode status` and nothing happened."** You were in a prompt that is not
-> elevated. `monkmode.exe` requires Administrator, so Windows raises UAC and runs it in a
-> **new console window that closes the instant it finishes** — your prompt gets no output
-> and exit code 0, which looks exactly like a broken install. It is not. Open an elevated
-> prompt and run it again. (`docs\RUNBOOK.md` §4.5.)
+The installer builds a **self-contained** copy — the .NET runtime is bundled,
+so the computer it lands on needs nothing else installed. To *build*, the
+machine needs the free
+[.NET 10 SDK](https://dotnet.microsoft.com/download) once. When it finishes,
+**close the window and open a fresh Administrator PowerShell window** (the
+`monkmode` command is only known to windows opened after the install).
 
-What the installer deliberately does **not** do:
-
-- It does **not** install or start the service — your first `monkmode block` does that.
-- It does **not** create shortcuts (MonkMode is a CLI, no GUI).
-- It does **not** uninstall — that is `tools\uninstall.ps1` (slice H2, Section 9). The
-  uninstaller is deliberately weaker than the exits: it refuses while a block is
-  enforcing and never acts as an escape hatch.
-
-The installer **refuses to run while a `MONKMODE` service already exists** (installed
-or running) — never upgrade the binaries across an armed block, or a MAC'd config can
-freeze fail-closed (the forward-migration freeze; see Section 10). Let any live block
-end and remove the service first, then re-run the installer. Re-running it on a machine
-with no `MONKMODE` service upgrades in place, and the `PATH` entry is never duplicated.
-
-**An upgrade keeps your data.** The installer copies **binaries only**: your account setup
-(`monkmode_setup.ini`), the enforcement config and its shadow backup, the block history and
-the DoH/hosts snapshots are never copied out of the payload, so an in-place upgrade leaves
-the ones already in the install folder alone. If the payload folder happens to carry any of
-them — `dist\` normally does, because `build-dist.ps1` deliberately preserves them there —
-the installer prints a `SKIPPED data files` line naming them. (Before 22/08/2026 it copied
-them, and a re-install silently restored a stale `monkmode_setup.ini` over the real one; F72.)
-
-Options: `-PayloadDir <folder>` installs a pre-built payload instead of publishing;
-`-InstallDir <folder>` overrides the target location.
-
-### 1b. Build from source (manual / dev)
-
-If you would rather run from a plain `dist\` folder (the dev workflow, no Program Files
-copy), build and assemble it yourself. The .NET 10 SDK is user-scoped on this machine
-(not on `PATH`), so call it by its full path:
+Check it worked:
 
 ```
-C:\Users\samra\.dotnet\dotnet.exe build MonkMode.sln -c Release
+monkmode version
 ```
 
-Run the tests the same way:
+You should see something like:
 
 ```
-C:\Users\samra\.dotnet\dotnet.exe test MonkMode.sln -c Release
+MonkMode 1.1.0
+  Installed at: C:\Program Files\MonkMode
+  This build:   22/08/2026 14:31
 ```
 
-### 1c. Assemble the runnable folder (`dist\`)
+Two rules about installing:
 
-All four executables must live together in one folder, alongside
-`monkmode_settings.ini` (which is created at block time). `build-dist.ps1`
-publishes them into `dist\`:
-
-```
-powershell -ExecutionPolicy Bypass -File tools\build-dist.ps1
-```
-
-That produces `dist\` containing:
-
-| File | Role |
-|---|---|
-| `monkmode.exe` | The CLI you run. |
-| `MonkMode_srv.exe` | The `MONKMODE` LocalSystem service (the enforcement core). |
-| `mm_notify.exe` | User-session notifier (app-kill, tray toasts). |
-| `mm_guard.exe` | SYSTEM-session watchdog guardian. |
-
-The script rebuilds `dist\` from scratch each run (it deletes and recreates the
-folder). **Always rebuild `dist\` before any live/smoke run** — a stale `dist\`
-missing `mm_guard.exe` is the classic cause of a half-broken block.
-
-### 1d. First run (elevated)
-
-Open an **elevated** command prompt, `cd` into `dist\`, and run `setup` once
-(Section 2), then start a block (Section 3). For example:
-
-```
-dist\monkmode.exe setup --partner "Alex (alex@example.com)"
-dist\monkmode.exe block --sites reddit.com --for 2h
-```
-
-Requires the .NET 10 desktop runtime. `monkmode.exe` requests Administrator
-elevation automatically (it edits the hosts file and installs/starts the service
-via the Service Control Manager).
+- **The installer refuses to run while the MonkMode service exists** (that
+  is, after you have armed your first block, until you remove the service —
+  Section 12). Never upgrade the program across a running block.
+- **Re-installing keeps your data.** The installer copies program files only;
+  your setup, history and any snapshots already on the machine are left
+  alone.
 
 ---
 
-## 2. Setup (required, once)
+## 3. First-time setup (required, once)
 
-`monkmode setup` is mandatory first-run onboarding. `block` and `schedule`
-**refuse to arm until it has run** (they exit with code 4 and tell you to run
-`setup` first), so your first block always goes through the explanation of how
-to get out. It is idempotent and safe to re-run any time — it never touches a
-live block.
+Before your first block, MonkMode makes you run `setup` once. This is
+deliberate: setup explains how blocks end **before** you are inside one. If
+you skip it, `block` refuses and tells you to run it.
+
+The simplest form:
 
 ```
-monkmode setup [--partner "Alex (alex@example.com)"] [--cooloff 2h] \
-               [--default-sites a.com,b.com] [--default-preset social] \
-               [--default-apps chrome.exe,foo.exe] [--default-app-preset games]
+monkmode setup
 ```
 
-Setup writes a **separate**, MAC-protected file `monkmode_setup.ini` (its own
-schema, currently `s4`, independent of the enforcement config). It records:
+The most useful form names your **accountability partner** — a person you
+trust (friend, spouse, anyone). Each block you start prints a **one-time
+unlock code**; you hand that code to your partner, and only someone holding
+it can end the block early without a long wait:
 
-| Option | What it stores | Notes |
+```
+monkmode setup --partner "Alex (my sister)"
+```
+
+The partner text is just a reminder label shown to you — MonkMode never
+contacts anyone. Handing the code over is something *you* do (text it, say
+it out loud — and then don't keep a copy).
+
+Setup can also store **defaults** so future commands are shorter. All of
+these are optional:
+
+| Option | What it does | Example |
 |---|---|---|
-| `--partner` | A free-text accountability-partner label (a name, or a name and contact). | Shown in the setup summary **and printed under the one-time code at every block** (F74), so you are told who to send it to at the moment it appears. It gates nothing and **no message is sent** — MonkMode has no outbound capability at all; relaying the code is a physical act you perform. A label you never relay to is worth nothing. |
-| `--cooloff <dur>` | An **account-default** cooling-off wait. | Every later `block` without its own `--cooloff` inherits it. Same duration grammar as `--for`; capped at ~365 days. The ~1 h floor still applies. |
-| `--default-sites a.com,b.com` | An account-default blocklist. | A bare `monkmode block` (no `--sites`/`--preset`/`--file`) inherits it. |
-| `--default-preset social` | Preset categories folded into the default blocklist. | Validated once, here, so a stored default can never make a later block fail to arm. |
-| `--default-apps chrome.exe` | An account-default app-kill list. | A `block` with no `--apps`/`--app-preset` inherits it. |
-| `--default-app-preset games` | App-preset categories folded into the default app list. | |
+| `--partner "..."` | Names who to hand each block's code to. | `--partner "Alex (my sister)"` |
+| `--cooloff 2h` | Sets your default cooling-off wait (Section 8.3) for every block that doesn't set its own. | `--cooloff 4h` |
+| `--default-sites a.com,b.com` | Sites blocked when you start a block without naming any. | `--default-sites reddit.com,x.com` |
+| `--default-preset social` | Folds a ready-made category (Section 4.3) into those default sites. | `--default-preset social,video` |
+| `--default-apps a.exe,b.exe` | Apps closed when you start a block without naming any. | `--default-apps steam.exe` |
+| `--default-app-preset games` | Folds a ready-made app category into those default apps. | `--default-app-preset games,chat` |
 
-**Each `setup` run rewrites these defaults** — pass them again if you want to
-keep them. A bad preset name fails fast *before* anything is written (no partial
-state). If Windows DPAPI is unavailable, setup refuses (it can't protect its
-config), exits with code 2, and no block will arm until DPAPI is resolved.
+A complete example — defaults for a social-media-and-games household:
 
-All setup state is fail-closed: a missing, tampered, or DPAPI-unreadable
-`monkmode_setup.ini` reads as "not set up" (arming is refused) or, for the
-defaults, as "no default" (empty). It can never *lift* or weaken a block.
+```
+monkmode setup --partner "Alex (my sister)" --cooloff 2h --default-preset social --default-app-preset games
+```
+
+Things worth knowing about setup:
+
+- **Safe to re-run any time.** It never touches a running block.
+- **Each run replaces the defaults.** If you re-run setup and want to keep
+  your defaults, type them again — a run that omits them clears them.
+- A mistyped category name makes setup fail cleanly before saving anything.
 
 ---
 
-## 3. Blocks
+## 4. Blocking things: the `block` command
 
-A block sinkholes **sites** (hosts-level, machine-wide `127.0.0.1` entries) and
-kills **apps** on sight. Once started, a block **cannot be shortened or
-replaced** until it expires — the service enforces this. Since v1.1 you can run
-**up to eight blocks side by side** (Section 3a): a second `block` starts a *new*
-one rather than refusing, and it can never shorten or replace the first.
+### 4.1 Your first block
 
 ```
-monkmode block [--sites a.com,b.com] [--preset social,video] \
-               [--apps chrome.exe,foo.exe] [--app-preset games,chat] \
-               [--urls "*/watch*,*reddit.com/r/*"] \
-               (--for 2h30m | --until "2026-06-11 18:00") \
-               [--start +90m] [--file list.txt] [--commit] [--cooloff 2h] \
-               [--all-session-kill]
+monkmode block --sites reddit.com --for 2h
 ```
 
-You must give at least one duration (`--for` or `--until`) and at least one
-thing to block (any of `--sites`/`--preset`/`--apps`/`--app-preset`/`--file`/
-`--urls`, or inherited account defaults). If you name nothing and have no
-defaults, it refuses ("Nothing to block.").
-
-### Sources of what to block
-
-| Flag | Effect |
-|---|---|
-| `--sites a.com,b.com` | Explicit domains (comma- or semicolon-separated). URLs are tolerated — scheme and path are stripped; a bare second-level domain also blocks its `www.`, `m.`, `web.` and `mobile.` mirrors (so `snapchat.com` covers `web.snapchat.com`). |
-| `--preset social,video` | Expand named site categories (Section 5) into the site list. Pure input sugar. |
-| `--file list.txt` | Read domains from a file, one per line; blank lines and `#` comments are skipped. |
-| `--apps chrome.exe,foo.exe` | Executable names to kill. `.exe` is appended if you omit it. |
-| `--app-preset games,chat` | Expand named app categories (Section 5) into the app-kill list. |
-| `--urls "*/watch*,*reddit.com/r/*"` | URL patterns for *pages* rather than whole sites (Section 3b). Separate several with `,` or `;`. A best-effort browser nudge, not enforcement. |
-
-Explicit sources are merged; if you name **no** site source at all, the
-account-default blocklist fills in (and likewise for apps), independently per
-dimension. The one exception is a **URL-only** block (`--urls` and nothing else,
-which is what `mm-shorts` sends): it inherits neither default, so a "Shorts only"
-command blocks shorts only. An unknown preset **aborts the block up front** with
-a friendly error (fail-closed — a typo never silently under-blocks).
-
-Any site, app or URL-pattern value carrying a **control character** (anything
-below `0x20`, including tab, plus `0x7F`) is refused up front — the whole command,
-with the offending value named, and nothing armed. Such a character would be
-written verbatim into the config and split the stored line when it was read back,
-freezing this and every other running block permanently.
-
-### Duration
-
-| Flag | Grammar | Examples |
-|---|---|---|
-| `--for <dur>` | `Nd`, `Nh`, `Nm` in any combination, or a bare number = minutes. | `45` (45 min), `90m`, `2h`, `1d12h`, `1d2h30m` |
-| `--until "<datetime>"` | A date/time parsed in your current locale, then the invariant locale. | `--until "2026-06-11 18:00"` |
-
-The block must end **at least a minute in the future** (see the `--for 1`
-gotcha in Section 9), or it refuses.
-
-### Modifier flags
-
-| Flag | Effect |
-|---|---|
-| `--commit` | Arms a **committed** block: self-serve cooling-off is disabled, leaving the partner code (or the timer) as the only early exit. Use it when you mean it. |
-| `--cooloff <dur>` | Sets *this* block's cooling-off wait. Same grammar as `--for`; capped at ~365 days. The ~1 h floor still applies, so this can only ever *extend* the wait, never shorten it. Absent → inherit the account default → else the ~1 h floor. |
-| `--all-session-kill` | Widens app-kill from your session (+ session 0) to **every** logged-in Windows session — useful if you fast-user-switch to a second account to dodge the kill. No effect unless you block apps. |
-| `--start <when>` | Delays the block: `+90m`, `2h`, or an absolute `"2026-08-10 07:00"`. At most 30 days ahead; a moment already past starts now (and says so). `--for` then measures from the **start**, so `--start +90m --for 2h` blocks for two hours beginning in ninety minutes. See Section 3c. |
-
-Note: `--commit` and `--all-session-kill` are on/off flags — pass them bare. If
-you write `--commit=yes`, the value form is **ignored** and the flag is treated
-as OFF (the CLI warns but still proceeds). Unrecognised `--flags` (likely typos
-such as `--site` for `--sites`) are warned about and ignored, never fatal.
-
-### What you see when a block arms
+Press Enter, and MonkMode prints something like this:
 
 ```
-MonkMode is now active until <end time> (<time left>).
-  Sites: ...
-  Apps:  ...
+Block #1 is now active until 26/08/2026 16:04 (2h).
+  Sites: reddit.com
 Close and reopen your browser to see the block. It cannot be removed until the timer ends.
 
-Emergency unlock code for block <N> (give it to your accountability partner NOW - it will NOT be shown again):
-    <CODE>
-To end the block early, they run:  monkmode unblock --code <CODE>
+Emergency unlock code for block 1 (give it to your accountability partner NOW - it will NOT be shown again):
+    XXXX-XXXX-XXXX
+Send it to your accountability partner NOW: Alex (my sister)
+To end block 1 early, they run:  monkmode unblock --code <CODE>
 ```
 
-The **partner code is shown exactly once**, and each block mints its own — see
-Section 6. Check the live state any time with:
+Three things just happened:
+
+1. **reddit.com stopped working**, in every browser, for the whole computer
+   (close and reopen the browser to see it take effect).
+2. A **countdown started**. When it reaches zero the site comes back on its
+   own, within about ten seconds — you do nothing.
+3. A **one-time code was shown, once.** Send it to your partner now, then
+   let it leave your screen. It will never be shown again, and it is not
+   stored anywhere readable — if you keep it for yourself, you have simply
+   made your own lock pickable.
+
+That is the whole product. Everything below is variations.
+
+### 4.2 What to block: sites, apps, files
+
+You can mix and match any of these in one command:
+
+| Flag | What it blocks | Example |
+|---|---|---|
+| `--sites a.com,b.com` | Websites (separate several with commas). Blocking `snapchat.com` also blocks its `www.`, `m.`, `web.` and `mobile.` versions automatically. | `--sites reddit.com,x.com` |
+| `--apps name.exe` | Programs — they are closed within seconds whenever they start. Use the program's file name. | `--apps steam.exe,discord.exe` |
+| `--file list.txt` | Reads website names from a text file, one per line (lines starting `#` are ignored). | `--file mylist.txt` |
+| `--preset <category>` | A ready-made bundle of well-known sites — see 4.3. | `--preset social` |
+| `--app-preset <category>` | A ready-made bundle of well-known apps — see 4.3. | `--app-preset games` |
+| `--urls "..."` | Parts of a site rather than all of it — see Section 6. | `--urls "youtube.com/shorts"` |
+
+A block needs **at least one thing to block** and **one length of time**. If
+you name no sites and no apps at all, your setup defaults (Section 3) fill
+in; with no defaults either, MonkMode refuses rather than arm an empty
+block.
+
+Worked examples:
+
+```
+monkmode block --sites facebook.com,instagram.com --for 3h
+monkmode block --apps steam.exe --for 1d
+monkmode block --preset social,video --apps discord.exe --for 90m
+monkmode block --file exam-season.txt --until "2026-09-01 09:00"
+```
+
+### 4.3 Presets — ready-made categories
+
+Instead of typing site lists, name a category. These are built in:
+
+**Site categories** (`--preset`):
+
+| Name | What's in it |
+|---|---|
+| `social` | facebook.com, instagram.com, twitter.com, x.com, tiktok.com, reddit.com, snapchat.com, tumblr.com, pinterest.com, linkedin.com, threads.net |
+| `video` | youtube.com, netflix.com, twitch.tv, hulu.com, disneyplus.com, primevideo.com |
+| `news` | cnn.com, nytimes.com, foxnews.com, bbc.com, buzzfeed.com, theverge.com |
+| `shopping` | amazon.com, ebay.com, etsy.com, aliexpress.com, walmart.com, target.com |
+| `adult` | six well-known adult sites |
+
+**App categories** (`--app-preset`):
+
+| Name | What's in it |
+|---|---|
+| `games` | steam.exe, epicgameslauncher.exe, battle.net.exe, riotclientservices.exe, leagueclient.exe, valorant.exe, robloxplayerbeta.exe |
+| `chat` | discord.exe, telegram.exe, whatsapp.exe, signal.exe, slack.exe |
+
+Combine categories with commas (`--preset social,video`) and freely mix them
+with your own `--sites`/`--apps`. A category name you mistype makes the
+whole command refuse, listing the valid names — it never quietly blocks
+less than you asked for.
+
+### 4.4 How long: `--for` and `--until`
+
+Every block needs exactly one of these:
+
+| Flag | Meaning | Examples |
+|---|---|---|
+| `--for <length>` | Block for this long, starting now. | `--for 45` (45 minutes) · `--for 90m` · `--for 2h` · `--for 1d12h` |
+| `--until "<date and time>"` | Block until this moment. | `--until "2026-06-11 18:00"` |
+
+The length grammar: `d` = days, `h` = hours, `m` = minutes, in any
+combination; a bare number means minutes. A block must end **more than one
+minute in the future** — `--for 1` is refused (it lands exactly on the
+one-minute line), so the shortest block is `--for 2`.
+
+**Once a block starts it can never be shortened.** Not by you, not by
+another command, not by changing the clock. Adding *more* sites is allowed
+(Section 4.6); taking anything away is not.
+
+### 4.5 Starting later: `--start`
+
+```
+monkmode block --preset social --start "2026-08-27 07:00" --for 8h
+monkmode block --sites reddit.com --start +90m --for 2h
+```
+
+`--start` arms a block that begins in the future — at a set time, or after a
+delay (`+90m` = in ninety minutes). `--for` measures from the **start**, so
+the second example blocks for two full hours beginning ninety minutes from
+now. A start can be at most 30 days ahead; a start time already in the past
+just means "now".
+
+Two honest details about the waiting period:
+
+- **The sites are blocked from the moment you arm**, not from the start
+  time — a waiting block blocks too much rather than too little, on purpose.
+- **A waiting block cannot be cancelled.** The on-screen help says
+  `unblock --cancel` works "freely until it starts" — that wording is wrong
+  (a known fault, kept because it fails in the stricter direction): the
+  cancel does nothing and the block starts anyway. Treat `--start` as
+  seriously as `block` itself.
+
+### 4.6 Growing a running block: `add`
+
+```
+monkmode add --sites x.com,y.com
+```
+
+Adds sites to a block that is already running (it takes effect within about
+ten seconds). A block can only ever **grow** — there is no command to remove
+a site from a running block, on purpose. With more than one block running,
+say which one: `monkmode add --sites x.com --id 2` (Section 5).
+
+### 4.7 The strictness dials: `--commit`, `--cooloff`, `--all-session-kill`
+
+| Flag | What it does |
+|---|---|
+| `--commit` | A **committed** block: the "wait an hour and it unlocks" self-serve exit (Section 8.3) is disabled. The **only** ways out are your partner's code or the timer. Use it when you mean it. |
+| `--cooloff 4h` | Makes *this* block's self-serve wait longer than the standard hour (same time grammar as `--for`). It can only ever make the wait **longer** — a value under an hour still waits the hour. |
+| `--all-session-kill` | If several people (or accounts) are logged into this computer, blocked apps are closed in **every** login session, not just yours — so switching to a second Windows account doesn't dodge the app block. Does nothing unless the block includes apps. |
+
+```
+monkmode block --preset social --for 8h --commit
+monkmode block --sites youtube.com --for 4h --cooloff 3h
+monkmode block --app-preset games --for 2h --all-session-kill
+```
+
+Note: `--commit` and `--all-session-kill` are on/off switches — write them
+bare, exactly as shown. If you write `--commit=yes`, the flag is **ignored**
+(MonkMode warns you and continues without it). Any flag it doesn't
+recognise — a typo like `--site` for `--sites` — also gets a warning and is
+ignored rather than stopping the block.
+
+---
+
+## 5. Running several blocks at once
+
+Starting a block **never** replaces the ones already running — it starts a
+**new** one beside them, up to **eight at a time**. Each block is fully
+independent: its own timer, its own sites and apps, its own one-time code,
+its own cooling-off, its own `--commit`.
+
+```
+monkmode block --preset social --for 8h          → Block #1
+monkmode block --apps steam.exe --for 2h         → Block #2
+monkmode block --sites news.ycombinator.com --for 30m   → Block #3
+```
+
+Each expires on its own timer and the others carry on untouched. See them
+all:
 
 ```
 monkmode status
 ```
 
-`status` prints one row per running block — `Id · State · Ends/Starts ·
-Sites · Apps · URLs · Exit` — where `State` is `ACTIVE` or `PENDING` (a
-`--start` block that has not begun), the three counts are numbers rather than
-names, and the exit column names this block's way out (committed / cooling-off
-pending / the self-serve wait + code). If a schedule is armed instead, it reports
-the schedule and whether a window is open right now.
-
-### Adding sites to a running block
-
-A block can only ever **grow**:
-
 ```
-monkmode add --sites x.com,y.com [--id N]
+MonkMode: 3 blocks active
+ Id  State     Ends / Starts             Sites Apps URLs  Exit
+  1  ACTIVE    2026-08-26 22:04             11    0    0  code+wait
+     Exit:  run 'monkmode unblock --id 1' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.
+  2  ACTIVE    2026-08-26 16:04              0    1    0  code+wait
+     ...
 ```
 
-`add` only adds sites (not apps), only to an already-active manual block, and
-refuses when a schedule is armed (edit the schedule instead). With more than one
-block running, `--id` is **required** — `add` will not guess which one you meant.
-Since v1.1 the request is adjudicated by the *service*, so it takes effect on the
-next tick (~10 s) rather than instantly. There is no command to remove a site
-from a running block — that is by design.
+When more than one block is running, commands that act on *one* block need
+`--id <number>` (the Id column):
 
-### 3a. Running several blocks at once
+- `monkmode add --sites x.com --id 2` — grow block 2.
+- `monkmode unblock --id 2` — start block 2's cooling-off exit.
+- With exactly **one** block running you can leave `--id` off.
+- MonkMode **refuses to guess**: an `add` or `unblock` without `--id` while
+  several blocks run is refused with the list of ids — never aimed at a
+  block you didn't name.
 
-`monkmode block` starts a **new** block beside the ones already running, up to
-**eight** at a time. Each one is independent: its own end time, sites, apps, URL
-patterns, cooling-off wait, partner code and `--commit` flag. A block retires on
-its own timer and the others carry on untouched; MonkMode only tears the machine
-down (service stopped, hosts restored, DoH policy back) when the **last** block
-leaves.
+The unlock **code** needs no id — each code belongs to exactly one block and
+can only ever open that one. Ids are never reused; when block 3 ends, the
+next block is #4. When all eight slots are busy, a ninth `block` refuses and
+lists what is running.
 
-```
-monkmode status                    # ids of everything running
-monkmode add --sites x.com --id 2  # grow block 2
-monkmode unblock --id 2            # start block 2's cooling-off
-```
-
-- `--id` is required for `add` and for a bare `unblock` whenever more than one
-  block is running; with exactly one running you can leave it out. Naming an
-  unknown id changes nothing.
-- `unblock --code <CODE>` and `unblock --cancel` do **not** take an id — a code
-  belongs to exactly one block and is verified only against that one, and
-  `--cancel` cancels every pending cooling-off.
-- `unblock --force` stays **global**: it tears down *all* blocks and removes the
-  service (Section 7).
-- With all eight slots in use, a ninth `block` refuses (exit 3) and lists what is
-  already running.
-- Ids are never reused: block 3 retiring does not free the number 3.
-
-### 3b. URL patterns (`--urls`) — a nudge, not a wall
-
-`--urls` blocks *pages* rather than whole sites — "no Shorts, but YouTube is
-fine". While such a block is running, the notifier reads the **foreground**
-browser's address bar via UI Automation every 2 seconds and, on a match, rewrites
-it to the site's home page (at most one redirect per 5 seconds — the cooldown is
-global, one mark for the whole machine, not one per window or per block).
-
-```
-monkmode block --urls "*/shorts*,*/reels*" --for 4h
-```
-
-Be clear about what this is: **a nudge on top of the block, never the block
-itself.** It watches Chrome, Edge and Brave only (Firefox is not watched), only
-the window you are looking at, and only what the address bar says. Any of those
-failing costs you the nudge and nothing else — no hosts entry, no timer and no
-exit path depends on it. Two consequences worth knowing:
-
-- A **URL-only** block (`--urls` and nothing else, which is what the shipped
-  `mm-shorts` wrapper sends) inherits **neither** account default, so a
-  "Shorts only" command blocks Shorts only.
-- A pattern with no host in it (`--urls /shorts`) is accepted but can never
-  match — write `youtube.com/shorts` instead.
-
-### 3c. Delayed blocks (`--start`)
-
-`--start` arms a block that has not begun yet. It shows as `PENDING` in `status`,
-and `--for` measures from the start:
-
-```
-monkmode block --sites reddit.com --start "2026-08-20 07:00" --for 8h
-monkmode block --preset social --start +90m --for 2h
-```
-
-The end time is computed by the **service**, from its monotonic mark, at the
-moment the block actually starts — so a clock roll while it waits cannot shorten
-it, and a machine that was switched off across the start time runs the full
-duration from boot.
-
-Two deliberate properties of the waiting period:
-
-- **The sites are hosts-blocked from the moment you arm**, not from the start
-  time. A pending block over-blocks rather than under-blocks, by design.
-- **The block page does not run for a pending block** — it binds `127.0.0.1:80`
-  only while a real deadline is ahead of the clock, so unless another block is
-  already running, a blocked `http://` site shows the browser's own
-  connection-refused page during the wait instead of MonkMode's page. The site is
-  blocked either way. That is a deliberate trade: the alternative was
-  `--start +30d` holding the machine's only port 80 for a month.
-
-Note also that a PENDING block cannot be cancelled today: `unblock --id N
---cancel` is a no-op against it and the block still starts, although `status` and
-`help` say otherwise. See `docs/RUNBOOK.md` §5.
+Only when the **last** block ends does MonkMode stand down (sites restored,
+service idle). One more rule: a manual block and a **schedule** (Section 7)
+cannot run at the same time, in either direction.
 
 ---
 
-## 4. Schedules
+## 6. Blocking pages rather than whole sites: `--urls`
 
-A **schedule** is a recurring wall-clock rule the service opens and closes
-automatically, at the same strength as a manual block. A schedule and a manual
-block are **mutually exclusive** — you can't have both armed at once, and the
-refusal works in **both directions**: `schedule` refuses while any block is
-armed, and `block` refuses while a schedule is armed (exit 3, nothing written
-either way). Clear the schedule first with `schedule --clear` — any open window
-still runs to its end — then start the block. A schedule is global state rather
-than one of the eight block slots, which is exactly why it cannot sit beside
-them.
+Sometimes you don't want to block all of YouTube — just Shorts. `--urls`
+attaches **page patterns** to a block:
 
 ```
-monkmode schedule --sites a.com,b.com [--apps chrome.exe] \
-                  --windows "Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00"
-monkmode schedule --clear      # stop future windows; an open window still runs to its end
-monkmode schedule --show       # print the armed schedule (read-only)
-monkmode schedule --validate --sites a.com --windows "Mon-Fri 09:00-17:00"   # dry-run, arms nothing
+monkmode block --urls "youtube.com/shorts" --for 4h
+monkmode block --urls "youtube.com/shorts,instagram.com/reels" --for 2h
+monkmode block --sites reddit.com --urls "youtube.com/shorts" --for 3h
 ```
 
-**Windows grammar:** days `Mon`–`Sun` (single days `Tue`, ranges `Mon-Fri`,
-lists `Sat,Sun`) plus 24-hour `HH:MM-HH:MM`. Separate several windows with `;`. A
-reversed day range (`Fri-Mon`) or an unknown day is rejected with a friendly
-error — nothing is armed on a bad spec.
+While the block runs, MonkMode watches the address bar of the browser window
+you are looking at (Chrome, Edge and Brave), and if the page you are on
+matches a pattern, it steers the browser back to that site's front page
+(YouTube goes to your Subscriptions feed). At most one nudge every five
+seconds.
 
-Since v1.1 an end **before** the start means **overnight**: `Mon-Fri 22:30-04:00`
-holds from half past ten each weekday evening until four the next morning, so it
-covers Tue–Sat 00:00–04:00. The after-midnight tail belongs to the day the window
-*opened*, and a machine rebooted at 02:00 inside such a window re-holds it.
+> ### ⚠️ HOW PATTERNS MATCH — this catches everyone out
+>
+> A pattern is a **piece of text that must appear in the web address.
+> Nothing more.** There are **no wildcards**: a `*` is treated as a literal
+> star character, and since real web addresses never contain a star, **a
+> pattern with `*` in it matches nothing, silently — the block arms and the
+> nudge simply never fires.**
+>
+> - ✅ `youtube.com/shorts` — right. Catches every Shorts page.
+> - ❌ `*/shorts*` — WRONG. Never matches anything, no error is shown.
+> - ✅ `reddit.com/r/all` — right. Catches that page and everything under it.
+> - ❌ `/shorts` (no site name) — accepted but useless: write the site name in.
+>
+> One deliberate special form: a pattern ending in `/` with nothing after it
+> means **only the front page**. `youtube.com/` blocks just the YouTube home
+> feed (where the recommendations are) while leaving the rest of YouTube
+> alone; `youtube.com` (no slash) covers the entire site.
 
-Arming a schedule installs and starts the service (so windows are evaluated) but
-does **not** open a block now and does not write the hosts snapshot — the
-service creates it when a window opens. During an open window the block holds at
-full strength until the window closes; **it cannot be ended early**.
-`--clear` blanks the rule so no future windows open; a currently-open window
-still runs to its monotonic end, after which MonkMode tears down within ~10 s.
+Capital letters don't matter, `www.` is ignored, and the mobile site
+(`m.youtube.com`) is caught by the same patterns. Up to 32 patterns per
+block, each up to 200 characters, separated by commas.
 
-`--show` and `--validate` are read-only and never touch the service, hosts, or
-registry. `--validate` requires `--sites` (the builder needs at least one site)
-and returns exit code 0 (valid) or 1 (invalid), so it is scriptable.
+**Be clear about what this is: a nudge, not a wall.** Site blocking
+(`--sites`) rewires the whole computer and cannot be dodged by another
+browser; `--urls` only watches the front window of the three browsers named
+above, reading what the address bar says. It is enforcement's little
+sibling — very effective against habit-scrolling, not against determination.
+Also, deliberately: a block that names **only** `--urls` (no sites, no apps)
+does **not** pull in your setup defaults — "block Shorts only" means only
+Shorts.
 
 ---
 
-## 5. Presets (input sugar)
+## 7. Blocks on a timetable: `schedule`
 
-Presets are named bundles of well-known sites/apps, expanded into the ordinary
-site/app lists **before** the block arms. They carry **no enforcement
-authority** — the expanded domains/executables are enforced and MAC-covered
-exactly like hand-typed `--sites`/`--apps`, and the preset tables are
-compile-time constants (nothing extra to protect). You pick categories; you
-can't edit them (an *editable* default list is the `setup --default-*` feature
-in Section 2).
+A **schedule** opens and closes blocks automatically on a weekly rhythm —
+"every weekday, nine to five", with no command to type each morning. While a
+window is open it blocks at full strength, and **an open window cannot be
+ended early at all** — no cooling-off, no code. It closes at its end time.
 
-**Site presets** (`--preset`, or `setup --default-preset`):
+```
+monkmode schedule --sites reddit.com,x.com --windows "Mon-Fri 09:00-17:00"
+monkmode schedule --sites youtube.com --apps steam.exe --windows "Mon-Fri 09:00-17:00; Sat,Sun 10:00-14:00"
+```
 
-| Category | Domains (as shipped) |
-|---|---|
-| `social` | facebook, instagram, twitter, x, tiktok, reddit, snapchat, tumblr, pinterest, linkedin, threads |
-| `video` | youtube, netflix, twitch, hulu, disneyplus, primevideo |
-| `news` | cnn, nytimes, foxnews, bbc, buzzfeed, theverge |
-| `shopping` | amazon, ebay, etsy, aliexpress, walmart, target |
-| `adult` | (six well-known adult sites) |
+The `--windows` grammar, in plain words:
 
-**App presets** (`--app-preset`, or `setup --default-app-preset`):
+- Days: `Mon` `Tue` `Wed` `Thu` `Fri` `Sat` `Sun` — a single day (`Tue`), a
+  range (`Mon-Fri`), or a list (`Sat,Sun`).
+- Times: 24-hour `start-end`, like `09:00-17:00`.
+- Several windows: separate with `;` inside the quotes.
+- **Overnight windows:** an end time *before* the start means "through the
+  night" — `Mon-Fri 22:30-04:00` runs from 22:30 each weekday evening to
+  04:00 the next morning. A computer restarted at 02:00 inside such a window
+  comes back still blocked.
 
-| Category | Executables (as shipped) |
-|---|---|
-| `games` | steam, epicgameslauncher, battle.net, riotclientservices, leagueclient, valorant, robloxplayerbeta |
-| `chat` | discord, telegram, whatsapp, signal, slack |
+The other schedule commands:
 
-Combine presets with your own `--sites`/`--apps`; comma-separate several
-categories (`--preset social,video`). An unknown category name aborts the whole
-command with the list of valid names (fail-closed). The live category names are
-printed by `monkmode help`.
+```
+monkmode schedule --show       # print the armed schedule (changes nothing)
+monkmode schedule --clear      # stop future windows (an open window still runs to its end)
+monkmode schedule --validate --sites a.com --windows "Mon-Fri 09:00-17:00"
+                               # check your grammar without arming anything
+```
 
-### The `presets\` wrappers (PowerShell, outside the CLI)
+Rules:
 
-`presets\mm-presets.ps1` is a separate convenience layer — dot-source it into an
-elevated PowerShell profile. It edits nothing MonkMode enforces; every wrapper
-just composes a `monkmode block` command:
-
-| Command | What it arms |
-|---|---|
-| `mm-video` / `mm-insta` / `mm-reddit [3h\|midnight]` | The matching list from `presets\*.txt`. |
-| `mm-shorts [2h]` | The shortform **URL** preset (YouTube Shorts / Instagram Reels / Facebook Reels) — URL-only, so it inherits no defaults. |
-| `mm-games [2h]` | The games/launcher app preset. |
-| `mm-lock [doomscroll\|shorts\|social\|games\|everything] [for 2h \| until 22:00 \| tonight \| midnight] [committed]` | Plain-English composition of the above; `mm-lock` alone arms the doom-scroll bundle. |
-| `mm-status` / `mm-stats` / `mm-edit` | Read-only helpers; `mm-edit` opens the lists folder. |
-| `mm-video-schedule` / `mm-schedule-show` / `mm-schedule-off` | The always-on video schedule. |
-
-An unknown word refuses and prints the vocabulary rather than guessing — nothing
-is armed at that point, and no block can be cut short once it starts. Because a
-second `mm-video` now arms a **second** block rather than bouncing off the v1.0
-"already active" refusal, the wrappers warn first when a block with the same
-shape is already running; the warning is a pause, never a refusal. And because a
-schedule and a block are mutually exclusive, `mm-video-schedule` refuses while any
-block is armed, and the block wrappers refuse while the schedule is armed.
-
-The wrapper site lists (`presets\*.txt`) are **not** the same vocabulary as the
-CLI's built-in `--preset` categories — `mm-video` and `--preset video` can arm
-different lists. Check with `monkmode status` after arming if it matters.
+- **One schedule at a time**, and a schedule and a manual block **cannot
+  coexist** — `schedule` refuses while any block is armed, and `block`
+  refuses while a schedule is armed. Clear the schedule first
+  (`schedule --clear`), then start the block.
+- Re-running `monkmode schedule ...` with new sites/windows **replaces** the
+  schedule (when no window is currently open).
+- To change an armed schedule's sites, re-run the full command with the
+  complete list — `add` does not work on schedules.
 
 ---
 
-## 6. Cooling-off & the partner code
+## 8. How a block ends: the exits
 
-There are three ordinary ways a block ends, in increasing friction. **All three
-are decided by the service** (the sole timing authority), never by the CLI.
+There are exactly four ways. Know them before you start your first block.
 
-### Wait for the timer
+### 8.1 The timer (do nothing)
 
-A block always lifts at its end time. Expiry is decided off a monotonic
-high-water mark, so rolling the clock forward can't bring it early (and a
-backward roll only makes it run longer).
+Every block ends by itself at its end time. The sites come back within about
+ten seconds; you don't run anything. This is the intended exit.
 
-### Cooling-off (self-serve, but delayed)
+### 8.2 The partner code (immediate, needs another person)
 
 ```
-monkmode unblock            # request a cooling-off lift (one block running)
-monkmode unblock --id 2     # ...naming the block, when several are running
-monkmode unblock --cancel   # abort a pending cooling-off; stay blocked
+monkmode unblock --code XXXX-XXXX-XXXX
 ```
 
-Cooling-off is **per block**: each one counts down its own wait and lifts on its
-own, and with more than one block running a bare `unblock` refuses (exit 1) and
-lists the ids rather than guessing — or worse, releasing all of them.
-`--cancel` is the exception: it cancels every pending cooling-off.
+The one-time code shown when the block started (Section 4.1) ends **that
+block** within about ten seconds. This is why you hand the code to a
+partner: the exit exists, but not in your own pocket. A wrong code changes
+nothing (and MonkMode deliberately doesn't say whether a code was right —
+watch whether the block lifts). Each code opens only the block that minted
+it; codes are never shown twice and never stored readably.
 
-`monkmode unblock` does **not** lift the block — it *requests* a lift. The block
-stays fully enforced while the service counts down a mandatory wait of **~1 hour
-of active machine time** (the shipped default floor, `MinCoolOffFloorSeconds =
-3600`), then lifts itself. The wait is measured against the monotonic
-high-water mark (active machine time), not the wall clock. You cannot shorten
-it: the request carries no timing, and the deadline is service-computed and
-floor-clamped. Raise it with `--cooloff` at block time (Section 3); you can
-never shorten it below the floor.
-
-`monkmode status` shows the remaining cooling-off time once one is pending.
-
-### Partner accountability code (immediate)
+### 8.3 Cooling-off (self-serve, but slow on purpose)
 
 ```
-monkmode unblock --code <CODE>
+monkmode unblock            # one block running
+monkmode unblock --id 2     # several running: name the one you mean
 ```
 
-Every block mints a fresh **one-time code**, shown once at block start and
-stored only as a salted, MAC-covered one-way hash (never in plaintext, never
-logged). Relay it to your accountability partner. `unblock --code` drops the
-candidate for the **service** to verify (KDF + constant-time compare against the
-MAC-covered hash); on a match it lifts within ~10 s. The CLI has **zero lift
-authority** — it only submits. A wrong, blank, or tampered code leaves the block
-standing, and correctness is *not* revealed synchronously (the service
-adjudicates on its next tick).
+No partner needed — but it is **not instant**. The block stays fully
+enforced while a countdown of about **one hour of the computer being
+actually on** runs down (time the machine spends asleep or off doesn't
+count). Then it lifts by itself. The wait is at least an hour, always; a
+block armed with `--cooloff 4h` waits four. The point: an urge that can wait
+an hour was not an urge.
 
-**Rotate-on-use:** a fresh code is minted for every block, and a used code dies
-with its block, so a code you watched yourself type can't be banked for the
-next block. A tampered config (invalid MAC) disables the code exit too.
-
-### Committed blocks
-
-A block armed with `--commit` disables self-serve cooling-off entirely. If you
-run `monkmode unblock` against it, it refuses and points you at the code:
+Changed your mind during the wait?
 
 ```
-This block is COMMITTED: self-serve cooling-off is disabled. The only early exit is the accountability code: monkmode unblock --code <CODE>
+monkmode unblock --cancel
 ```
 
----
+That cancels the pending cooling-off and the block simply continues to its
+normal end. `status` shows the remaining wait while one is pending.
 
-## 7. Emergency recovery
+### 8.4 Committed blocks have no cooling-off
 
-> **You do not need this file to get out of anything.** Since F75 (22/08/2026) the same
-> escape route, and the four normal-looking states people mistake for breakage, are printed
-> by `monkmode help` itself under **"If something looks wrong"** — so a machine with the
-> installed binary and no source repo is still self-sufficient. This section is the detail
-> behind it, not the only copy of it.
+A block armed with `--commit` refuses the cooling-off exit outright:
+
+```
+This block is COMMITTED: self-serve cooling-off is disabled. The only early exit is the accountability code:  monkmode unblock --code <CODE>
+```
+
+Timer or code. That's the deal you chose at arm time.
+
+### 8.5 The emergency escape hatch (always works, tears everything down)
 
 ```
 monkmode unblock --force
 ```
 
-This is the deliberate, admin-only, explicitly-flagged **escape hatch**. It is
-**global** — it tears down *every* running block, not one named by `--id` — and
-it removes the service: disables SCM
-recovery, kills the watchdog pair and notifier, removes the deny-DELETE ACE,
-deletes the `MONKMODE` service, strips **only** the MonkMode hosts marker block
-(your own hosts content is preserved byte-for-byte), removes the B2 snapshot, B3
-SafeBoot keys, config backup, cooling-off/partner-code triggers, DoH policy, and
-the notifier autorun. Every step is best-effort and reported; a failure in one
-step does not abort the rest.
+This is the deliberate, always-available way out — kept so that no bug, no
+corrupted file and no fault can ever trap the machine. It does not negotiate
+with any timer: it removes **every** running block, uninstalls the
+protection service, and puts your system files back exactly as they were.
+Your setup and history survive it. It prints each step as it goes; one
+harmless oddity you may see — a line like `Disabling service recovery policy
+... skipped` — just means that step had already been done, and everything
+still tears down.
 
-It is **retained on purpose as brick-insurance**: a fail-closed bug or a dead
-DPAPI store must never trap the machine permanently, so the guaranteed way out
-is kept and documented rather than hidden. It is gated behind an explicit
-`--force`, so it can never be a casual one-word bypass — but an admin who *wants*
-out can always take it. This is the honest ceiling in practice (see the intro
-and `ARCHITECTURE.md` B6 / §5).
-
-### What a genuine expiry looks like
-
-When a block reaches its real end (timer, cooling-off, or a correct code), the
-service strips the hosts block, removes its protections, and **stops itself** —
-but the service registration remains **installed and idle**. That is normal:
-`monkmode status` then reports "no active block (service installed but idle)".
-Only `monkmode unblock --force` (or a manual `sc delete` while idle — see
-Section 8) removes the service registration entirely.
-
-If your browser still shows a block after a lift, flush DNS / reopen the
-browser — the entries are already gone from hosts.
+Two honest sentences about it: it exists because a self-control tool must
+never become a trap, and it is deliberately a *typed, admin-only, flagged*
+command so it can never happen by accident. If you find yourself using it to
+end ordinary blocks, use a partner and `--commit` — that is exactly what
+they are for.
 
 ---
 
-## 8. Stats
+## 9. Checking in: `status`, `stats`, `version`, and what you'll see on screen
 
-```
-monkmode stats
-```
+### `monkmode status`
 
-A read-only summary of your block history: blocks started (completed vs
-active/upcoming), committed count, total planned focus time, longest block,
-first and latest block dates. Stats live in a **deliberately separate,
-non-MAC file** (`monkmode_stats` in the app folder) and are **display-only** —
-they record **counts only** (no site or app names) and have **zero enforcement
-authority**. A corrupt or missing stats file simply reads as no/less history; it
-can never freeze a block or error you out. If nothing is recorded yet, `stats`
-tells you how to start your first block.
+The live picture: one row per running block (id, when it ends, how many
+sites/apps/URL-patterns it covers) and, under each row, exactly how that
+block can end. Also shown when relevant: what MonkMode has stopped today, a
+pending cooling-off's remaining wait, an armed schedule and whether a window
+is open right now. Between blocks it says
+`no active block (service installed but idle)` — that is the normal resting
+state, not a problem.
 
-Since v1.1 `stats` also reports **streaks and lifetime blocked hours**, and two
-counter files under `%ProgramData%\MonkMode\` record how often each block
-actually did something: `stats-service.ini` (app kills, written only by the
-service) and `stats-notify.ini` (URL redirects, written only by the notifier),
-merged when displayed. They sit outside the MAC exactly like `monkmode_stats`,
-and they **survive** a block retiring, a full teardown and even `unblock
---force` — a streak history is your data, not enforcement state. The notifier's
-tray icon shows the same summary in its tooltip and on right-click.
+### `monkmode stats`
+
+Your history, read-only: blocks started and completed, total planned focus
+time, longest block, plus the measured actuals — real hours blocked, apps
+closed, browser nudges, and your **focus-day streak**. Nothing in `stats`
+records *which* sites or apps — counts only. The history survives blocks
+ending, uninstalls, and even `--force`.
+
+### `monkmode version`
+
+Which release and which build this machine runs, and where it is installed.
+(Don't trust right-click → Properties on the exe — it shows an inherited
+version number from the original upstream project.)
+
+### The things MonkMode itself puts on screen
+
+- **The blocked-page screen.** While a block runs, blocked `http://` sites
+  show a local "**Locked in.**" page listing what is blocked and until when.
+  Most modern sites are `https://`, and those simply **fail to load** with
+  the browser's own error page instead — the block is working either way;
+  the browser just refuses to show a substituted page over a secure address.
+- **The tray icon.** A small icon by the clock while blocks run. Hover it
+  for today's numbers; right-click for the same summary.
+- **Toasts.** Brief corner notifications — when a blocked app is closed,
+  and when a block expires.
+
+None of these are the enforcement — closing the tray icon does not weaken
+the block (it re-launches itself anyway; the real enforcement is a Windows
+service plus a watchdog that guard each other).
 
 ---
 
-## 9. Uninstall / removal
+## 10. Restarts, clock changes, and what survives
 
-The intended way out of an *active* block is one of the exits in Section 6
-(cooling-off, the partner code, or the timer). While a block is active the
-service carries a deny-DELETE ACE, so **`sc delete MONKMODE` is refused** — that
-is by design (bypass B6), not a bug.
+**Restarting the computer does not end a block.** The blocking service
+starts itself at boot, before you log in; the sites are blocked even in the
+seconds before it starts. This is tested, not hoped — restart mid-block and
+you come back still blocked, with the timer having credited only real
+elapsed time.
 
-**Removing the service:**
+**Changing the clock does not end a block.** The timer runs on the
+machine's internal elapsed-time counter, not the wall clock. Setting the
+clock forward doesn't bring the end closer; setting it back doesn't
+shorten anything either (the display may look odd; the enforcement doesn't
+care). Time the machine spends switched off is handled conservatively — a
+block never expires *while* the machine is off because of clock tricks.
 
-- **During an active block:** use `monkmode unblock --force` (Section 7). It is
-  the honest, documented removal for a fail-closed corner or a determined admin.
-- **When no block is active** (service installed but idle): the service is idle
-  and `sc delete MONKMODE` removes it normally. `monkmode unblock --force` also
-  works and additionally cleans up the snapshot, SafeBoot keys, DoH policy, and
-  autorun.
+**Killing MonkMode's processes does not end a block.** The service and its
+watchdog restart each other; the service cannot be stopped through the
+normal Windows controls while a block runs (`sc delete` is refused — by
+design); the blocked-sites list self-heals within about ten seconds if
+edited. If tampering ever manages to corrupt MonkMode's files, it **freezes
+fail-closed**: the block keeps enforcing and won't lift by itself, and
+Section 8.5 is the way out.
 
-**Removing the files (`tools\uninstall.ps1`):** once no block is active, the
-sibling uninstaller does the file-level teardown that `install.ps1` (Section 1)
-set up. From an **elevated** prompt in the repo root:
+What survives what:
+
+| Event | Block running? | Your setup + history |
+|---|---|---|
+| Restart / shutdown | ✅ still blocked | ✅ kept |
+| Block expires normally | block ends; others continue | ✅ kept |
+| `unblock --force` | ❌ all blocks removed | ✅ kept |
+| Uninstall (Section 12) | refuses while a block runs | ✅ kept (unless you ask) |
+
+---
+
+## 11. Troubleshooting — things that look broken but are not
+
+**These four states are normal.** They are the ones everyone mistakes for
+breakage (the program's own `monkmode help` prints the same list):
+
+1. **A command printed nothing and returned instantly.** You are in a
+   normal (non-administrator) window — the answer flashed by in a window
+   that closed itself. Section 1's box. Nothing is broken.
+2. **`status` says "no active block (service installed but idle)".** Normal
+   between blocks. The service stays registered after a block ends; it is
+   blocking nothing.
+3. **`status` notes "the MonkMode service isn't running at the moment".**
+   The blocked sites stay blocked regardless (the block lives in a system
+   file, not in the running service), and the service starts itself again.
+   App-closing and the countdown pause briefly; nothing unblocks.
+4. **"the stored configuration failed its integrity check"** means someone
+   or something edited MonkMode's protected files. MonkMode is now
+   **FROZEN**: it keeps blocking and will not lift by itself — deliberately,
+   because the alternative is that any tampering unlocks it. Wait out the
+   timer, or use `monkmode unblock --force` (Section 8.5).
+
+And a few more honest answers:
+
+- **"Another program is warning it can't update the hosts file."** Some
+  networking tools (Tailscale is a known example) routinely rewrite the
+  system's hosts file and will complain during a block that they can't.
+  That warning **is the lock working** — MonkMode holds that file locked so
+  nothing can quietly unblock your sites. The warning is harmless and stops
+  when the block ends.
+- **A site still loads right after arming.** Close and reopen the browser —
+  browsers cache addresses. Still loading? It may be reached via a different
+  domain; `monkmode add --sites <that-domain>` grows the block.
+- **A site still looks blocked right after the block ended.** The reverse of
+  the same cache. Reopen the browser; the system file is already clean.
+- **`--urls` never nudges.** Almost always a `*` in the pattern — see
+  Section 6's box. Patterns are plain text matched inside the address, and
+  stars match nothing.
+- **`--for 1` is refused.** By design; the shortest block is `--for 2`.
+
+If something is genuinely stuck: `monkmode unblock --force` (Section 8.5)
+returns the machine to a clean, unblocked state without touching your data,
+and you can re-arm from there.
+
+---
+
+## 12. Uninstalling
+
+While a block is running, uninstalling is refused — the exits in Section 8
+are the way out of a block. Once nothing is blocking:
 
 ```
+cd <your monkmode source folder>
 powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1
 ```
 
-It is deliberately **weaker than the exits above — never an alternative to
-them.** Detection is fail-closed: it removes nothing unless it can positively
-establish that no block is enforcing (service not running, no hosts marker, no
-live schedule). If a block is still active it **refuses** and routes you back to
-the exits (or to `unblock --force` for the during-a-block removal); it never
-stops a running service, never calls `unblock --force` itself, and never edits
-hosts. When clear, it deletes the idle service registration (`sc delete` on a
-stopped service only), the install dir, the machine `PATH` entry, and the
-current user's notifier autorun. Your account data (`monkmode_setup.ini`,
-`monkmode_stats`, the stale enforcement config, and the `monkmode_doh.snapshot` /
-`monkmode_hosts.block` snapshots) is **kept by default** so a reinstall keeps your
-setup and history; pass `-PurgeData` for a clean slate. The DoH snapshot is kept
-because it holds *your* browser DNS-over-HTTPS setting from before MonkMode — it
-is the only thing that can put that setting back, so `-PurgeData` discards it too.
-Options: `-InstallDir <folder>` if you installed somewhere other than
-`C:\Program Files\MonkMode`; `-IgnoreSchedule` to remove despite a lingering
-recurring schedule (it is then orphaned — clear it with `monkmode schedule
---clear` first).
+The uninstaller double-checks that nothing is enforcing (it refuses rather
+than fight a live block), then removes the idle service, the program folder
+and the PATH entry. **Your data is kept** — setup, history, and the saved
+copy of your browser's DNS setting — so a reinstall picks up where you left
+off. For a truly clean slate add `-PurgeData`.
 
-If you ran from a plain `dist\` folder (Section 1b, no `install.ps1`), there is
-no service registration the uninstaller can key off in Program Files — just
-`sc delete MONKMODE` while idle and delete the `dist\` folder yourself after the
-service and guardian processes have exited.
+If you never ran the installer (you ran straight from a build folder), there
+is nothing in Program Files: once idle, `sc delete MONKMODE` in an
+Administrator window removes the service, and you can delete the folder.
 
 ---
 
-## 10. Gotchas (proven)
+## 13. Reference: every command, every flag
 
-These are real, live-observed footguns — worth internalising before you script
-anything.
+Run `monkmode help` any time for the always-current version of this.
 
-- **Don't pipe or capture `monkmode block` output.** Historically the notifier
-  (`mm_notify`) inherited the CLI's stdout, so redirecting or capturing the
-  output of `monkmode block` (`| tee`, `> log.txt`, `$(...)`, backticks, a
-  captured subprocess) left the calling shell **wedged until the block expires**
-  (live-proven 10/07/2026). Fixed by launching the notifier detached with no
-  handle inheritance, and **live-proven fixed on 14/07/2026** — a deliberately
-  piped arm returned in 0.8 s (CHANGELOG 1.0.0, live-verification). The habit is
-  still worth keeping: a `dist\` built before that fix carries the old behaviour,
-  and the one-time partner code should be read off the screen, not out of a log.
-  Note that "expiry" of a block leaves the service *Stopped but still installed*,
-  not gone.
+### Commands
 
-- **`--for` has a strict >60-second floor.** A block must end at least a minute
-  in the future, so **`--for 1` is refused** ("The block must end at least a
-  minute in the future.") because one minute is exactly 60 s from now. Use
-  `--for 2` or longer. (Bare numbers are minutes.)
+| Command | What it does |
+|---|---|
+| `monkmode setup [options]` | Required once before the first block. Records the partner label and your defaults. Re-run any time (re-state defaults you want to keep). |
+| `monkmode block [what] [when] [dials]` | Starts a **new** block beside any already running (max 8). |
+| `monkmode status` | One row per running block + its exit; schedule state; today's counts. Read-only. |
+| `monkmode stats` | History and streaks. Read-only, counts only. |
+| `monkmode add --sites a.com[,b.com] [--id N]` | Adds sites to a running block (within ~10 s). Growth only. |
+| `monkmode schedule --sites ... [--apps ...] --windows "..."` | Arms the weekly timetable (replaces any previous one; refuses beside a manual block). |
+| `monkmode schedule --show` / `--validate ...` / `--clear` | Inspect / dry-run / stop future windows. |
+| `monkmode unblock [--id N]` | Requests the cooling-off exit (~1 h of machine-on time, then lifts). |
+| `monkmode unblock --cancel` | Cancels a pending cooling-off; stays blocked. |
+| `monkmode unblock --code <CODE>` | Submits the partner code; a correct one lifts its block in ~10 s. |
+| `monkmode unblock --force` | The emergency escape hatch: removes all blocks and the service. |
+| `monkmode version` | Release, build date, install folder. |
+| `monkmode help` | Usage, live preset names, and the troubleshooting list. |
 
-- **Don't arm a block across a binary upgrade.** The enforcement config carries a
-  compile-time schema version as its first MAC-covered line. A block armed under
-  **older** binaries fails the MAC under newer ones and **freezes fail-closed**
-  (it keeps enforcing and won't auto-lift). **Arm blocks *after* upgrading the
-  binaries, not across an upgrade.** If you are rebuilding, let any live block
-  end first, then rebuild `dist\`, then arm.
+### `block` flags
 
-- **Always rebuild `dist\` before a live run.** A stale `dist\` (built before the
-  guardian existed, or missing an exe) produces a half-broken block. See
-  Section 1c.
+| Flag | Takes | Notes |
+|---|---|---|
+| `--sites` | `a.com,b.com` | Mirrors (`www.`/`m.`/`web.`/`mobile.`) covered automatically. |
+| `--preset` | `social,video,news,shopping,adult` | Fail-closed on typos. |
+| `--apps` | `name.exe,other.exe` | Closed on sight while the block runs. |
+| `--app-preset` | `games,chat` | Fail-closed on typos. |
+| `--file` | `list.txt` | One site per line; `#` comments fine. |
+| `--urls` | `"youtube.com/shorts,..."` | **Substring match, no wildcards** (Section 6). Max 32 patterns × 200 chars; no `\|` or `;` inside a pattern. |
+| `--for` | `45` / `90m` / `2h` / `1d12h` | Bare number = minutes. Must exceed 1 minute. |
+| `--until` | `"2026-06-11 18:00"` | Alternative to `--for`. |
+| `--start` | `+90m` / `2h` / `"2026-08-10 07:00"` | Max 30 days ahead. Sites block immediately; **cannot be cancelled** despite what `help` says. |
+| `--commit` | *(bare)* | Disables cooling-off: code or timer only. |
+| `--cooloff` | `2h` | Lengthens *this* block's cooling-off wait (never below ~1 h). |
+| `--all-session-kill` | *(bare)* | App-closing in every logged-in Windows session. |
 
-- **Never hand-edit inside the hosts marker block.** MonkMode's region of
-  `C:\Windows\System32\drivers\etc\hosts` runs from `#### MonkMode Entries ####`
-  to `#### MonkMode End ####`, each marker on its own line. Your own content
-  above or below those lines is preserved byte-for-byte and is safe to edit; an
-  edit *inside* the region is repaired within ~10 s while a block is running, and
-  deleting the end marker while your own lines sit below it means those lines go
-  with the block when it lifts. If you want to annotate your hosts file about
-  MonkMode, do it outside the two markers.
-
-- **Blocks armed by a pre-v1.1 build.** A hosts block written before the end
-  marker existed has no closing line; the first write after upgrading converges
-  it to the new shape in one rewrite. Anything you had appended *below* such a
-  legacy block is lost at that one rewrite — nothing in the file distinguishes
-  your line from ours. Move it above the marker first if it matters.
-
----
-
-## Exit codes (for scripting)
+### Exit codes (for scripting)
 
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
-| 1 | Usage error (bad/missing argument, nothing to block, unknown preset, an ambiguous `unblock` with several blocks running). |
-| 2 | Access denied (not elevated) or an internal error (e.g. DPAPI unavailable). |
-| 3 | A schedule/block conflict, or all eight block slots are in use. |
-| 4 | Setup has not been run yet (run `monkmode setup` first). |
+| 1 | Usage error: bad/missing argument, nothing to block, unknown preset, ambiguous `unblock`/`add` with several blocks running. |
+| 2 | Not elevated, DPAPI unavailable, or an internal error. |
+| 3 | Schedule/block conflict, or all 8 slots in use. |
+| 4 | Setup has not been run yet. |
 
----
+### Where things live
 
-## See also
+Everything MonkMode stores sits beside the program (`monkmode version`
+prints the folder), plus daily counters in `C:\ProgramData\MonkMode`. The
+blocked sites live between the two marker lines `#### MonkMode Entries ####`
+and `#### MonkMode End ####` in the Windows hosts file — MonkMode only ever
+touches its own marked region, never your own entries. No internet, no
+account, nothing sent anywhere, nothing expires.
 
-- `README.md` — the exit model, the honest ceiling, and the engineering notes.
-- `docs/RUNBOOK.md` — the operator's side: diagnosis without arming anything,
-  forced removal, and §5's known limitations for this release.
-- `ARCHITECTURE.md` (working docs, `OneDrive/dev/repos/monk-mode/specs/`) — the
-  full bypass surface B1–B14, ranked by effort, with live-verification evidence.
-- `monkmode help` — the always-current usage text, including the live preset and
-  app-preset category names.
+### See also
+
+- `README.md` — what this project is, the exit model, and the honest ceiling.
+- `docs/RUNBOOK.md` — the operator's manual: diagnosis, forced removal, and
+  the known limitations of this release.
+- `monkmode help` — always current for the build you are on.

@@ -11,12 +11,43 @@ MonkMode is a personal fork of the open-source [Cold Turkey](#upstream--licence)
 blocker (GPLv3): a 2011 VB.NET 2.0 WinForms codebase that no longer built,
 modernised to .NET 10 LTS, converted to a CLI, threat-modelled, tested and hardened.
 
+## Quickstart
+
+**Windows 10/11 only.** Every command runs from an **elevated (Administrator)**
+prompt — from a normal prompt every command silently appears to do nothing (see
+the warning under [Building & running](#building--running)). To build you need
+the free [.NET 10 SDK](https://dotnet.microsoft.com/download); the installed
+copy is self-contained, so the machine needs nothing else.
+
+From an elevated PowerShell prompt in the repo root:
+
+    powershell -ExecutionPolicy Bypass -File tools\install.ps1
+
+That publishes a self-contained `win-x64` build (`tools\build-dist.ps1
+-SelfContained` under the hood, .NET runtime bundled), copies it to
+`C:\Program Files\MonkMode` and puts `monkmode` on the machine PATH. Open a
+**fresh** elevated prompt, then:
+
+    monkmode setup --partner "Alex (alex@example.com)"
+    monkmode block --sites reddit.com --for 2h
+
+Uninstall (refuses while a block is enforcing, keeps your data unless you pass
+`-PurgeData`):
+
+    powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1
+
+**New users: read [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md)** — the complete
+zero-assumed-knowledge guide to every command and behaviour. This program is
+GPLv3 free software with no warranty — see [COPYING](COPYING) and the
+[honest ceiling](#exits--how-a-block-ends-and-what-that-honestly-protects-against)
+before you arm anything long.
+
 ```
 monkmode setup --partner "Alex (alex@example.com)"   # required once, first run
 monkmode block --sites reddit.com,youtube.com --for 2h30m
 monkmode block --preset social,video --apps chrome.exe --until "2026-06-11 18:00"
 monkmode block --file blocklist.txt --for 8h --commit
-monkmode block --urls "*/shorts*" --for 4h          # pages, not whole sites
+monkmode block --urls "youtube.com/shorts" --for 4h # pages, not whole sites
 monkmode block --sites x.com --start +90m --for 2h  # begins in 90 minutes
 monkmode schedule --sites x.com --windows "Mon-Fri 09:00-17:00"
 monkmode status                     # one row per running block, with its id
@@ -39,8 +70,11 @@ the machine down. `--start` delays a block (up to 30 days; `--for` then measures
 from the start, and the service computes the end time when it actually begins).
 `--urls` attaches URL patterns for *pages* rather than whole sites — the notifier
 watches the foreground Chrome/Edge/Brave address bar and nudges a matching page
-back to the site's home. That nudge is best-effort; the hosts block is what
-actually stops a site.
+back to the site's home. Patterns are **plain case-insensitive substrings**
+(`youtube.com/shorts`), with one special form: `host/` with nothing after it
+matches only that site's front page. There are **no wildcards** — a `*` is a
+literal character and a pattern containing one silently never matches. The nudge
+is best-effort; the hosts block is what actually stops a site.
 
 You block **sites** (hosts-level, machine-wide) and **apps** (killed on sight),
 named explicitly, from a `--file` list, or via a named **preset** category —
@@ -104,8 +138,9 @@ out is kept and documented rather than hidden. And an offline / WinRE /
 determined-admin-with-time attack (B10) always wins eventually. MonkMode aims to
 defeat casual-to-determined bypasses; it does **not** claim to be unbreakable,
 and there is deliberately no BitLocker / BIOS-lock / non-admin-account layer in
-this codebase. See the full bypass table (B1–B14) and the honest ceiling in
-`ARCHITECTURE.md`.
+this codebase. The full bypass table (B1–B14) and the honest ceiling live in
+`ARCHITECTURE.md`, the author's working threat-model notes (kept outside this
+repo); the summary above is the accurate short form.
 
 ## How it works
 
@@ -162,8 +197,8 @@ preserved byte-for-byte.
 - **Fail-closed on crash.** An unhandled exception in any long-running enforcement
   process re-asserts its enforcement (re-locks hosts, restores the block) before
   the process dies, so a crash can never leave the block open.
-- **Honest threat model.** `ARCHITECTURE.md` (kept in the project's working docs at
-  `OneDrive/dev/repos/monk-mode/specs/`) catalogues the full bypass surface
+- **Honest threat model.** `ARCHITECTURE.md` (the author's working threat-model
+  notes, kept outside this repo) catalogues the full bypass surface
   (B1–B14), ranked by effort. While the user keeps admin
   rights and physical disk access, an offline edit always wins eventually
   (B10) — the design goal is to defeat casual-to-determined bypasses, and to
@@ -202,7 +237,7 @@ point, not a product:
   handle on the hosts file that stopped the DNS client re-reading it (any
   `ipconfig /flushdns` un-blocked everything), and a notifier that exited
   instantly due to a WinForms entry-point subtlety.
-- **Tested where it counts:** an xunit suite (**2198 tests**) covers the dangerous
+- **Tested where it counts:** an xunit suite (**2225 tests**) covers the dangerous
   string logic (hosts-file marker stripping and repair, culture-safe datetime
   round-trips under de-DE/fr-FR/en-US/en-GB locales, crypto round-trips and
   cross-project ciphertext equivalence, the config-integrity MAC and its
