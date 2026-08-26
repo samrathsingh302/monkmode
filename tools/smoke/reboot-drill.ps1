@@ -75,7 +75,10 @@ function Check($n, $c) { if ($c) { Write-Host "  [PASS] $n" -ForegroundColor Gre
 # read as evidence. An assertion whose premise is absent proves nothing and must say so.
 function Void($n, $why) { Write-Host "  [VOID] $n - $why" -ForegroundColor Yellow; $script:void++ }
 function SvcState     { $s = Get-Service MONKMODE -ErrorAction SilentlyContinue; if ($s) { $s.Status } else { 'gone' } }
-function HostsBlocked { $(try { Get-Content $hosts -Raw } catch { '' }) -match '#### MonkMode Entries ####' }
+# An unreadable hosts file used to read as '' = "not blocked", which every LIFT assertion
+# counts as a pass. Err the OTHER way (still blocked) and say so: a false "still enforcing"
+# fails loudly, while a false "lifted" walks away leaving the machine blocked.
+function HostsBlocked { try { (Get-Content $hosts -Raw -ErrorAction Stop) -match '#### MonkMode Entries ####' } catch { Write-Host '  [WARN] hosts unreadable - treating as STILL BLOCKED' -ForegroundColor Yellow; $true } }
 function Notifiers    { @(Get-Process -Name mm_notify -ErrorAction SilentlyContinue) }
 
 $me = [Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -164,26 +167,52 @@ if ($Watch) {
     # (TimeChangeHoldMaxSeconds), and the tick is 10s. Ending LATE is correct; early is not.
     $deadline = $endsAt.AddSeconds(600)
     Write-Host ("  ends {0}; watching until {1} (late is fine, early is a bug)" -f $endsAt.ToString('HH:mm:ss'), $deadline.ToString('HH:mm:ss'))
-    $liftedEarly = $false
-    while ((Get-Date) -lt $deadline -and (HostsBlocked)) {
-        if ((Get-Date) -lt $endsAt.AddSeconds(-30) -and -not (HostsBlocked)) { $liftedEarly = $true; break }
+    $watchFrom = Get-Date
+    # "Exited" is only meaningful for a process that was seen ALIVE. A notifier that never
+    # spawned also counts 0, and run 1 (25/08) showed how convincing a vacuous pass looks -
+    # so witness them at watch start, and VOID the exit assertions if nothing was there.
+    $notifiersAtWatch = (Notifiers).Count
+    $guardiansAtWatch = @(Get-Process -Name mm_guard -ErrorAction SilentlyContinue).Count
+    # Record WHEN the marker disappeared. The old in-loop early-lift detector re-read
+    # HostsBlocked immediately after the loop condition had just proven it TRUE, so it
+    # could never fire - dead code posing as a witness.
+    $liftedAt = $null
+    while ((Get-Date) -lt $deadline) {
+        if (-not (HostsBlocked)) { $liftedAt = Get-Date; break }
         Start-Sleep -Seconds 15
     }
-    $liftedAt = Get-Date
-    Check "E: the block lifted by itself (hosts marker gone)"       (-not (HostsBlocked))
-    Check "E: it did NOT lift early"                                (-not $liftedEarly -and $liftedAt -ge $endsAt.AddSeconds(-30))
+    $stillBlocked = HostsBlocked
+    if (-not $stillBlocked -and -not $liftedAt) { $liftedAt = Get-Date }
+    Check "E: the block lifted by itself (hosts marker gone)"       (-not $stillBlocked)
+    # "Did not lift early" is only EVIDENCE if this watch was looking during the early
+    # window. Launched at/after endsAt-30s it would pass unwitnessed - VOID instead.
+    if ($watchFrom -ge $endsAt.AddSeconds(-30)) {
+        Void "E: it did NOT lift early" "watch started at/after the early window (end-30s) - an early lift could not have been witnessed"
+    } else {
+        Check "E: it did NOT lift early" (-not ($liftedAt -and $liftedAt -lt $endsAt.AddSeconds(-30)))
+    }
     Check "E: the service stopped itself (Stopped or gone)"         ((SvcState) -in @('Stopped', 'gone'))
     # SETTLE before asserting a process is GONE. Run 1 (25/08) failed this the instant the
     # marker vanished; mm_notify was still showing its expiry toast and had exited moments
     # later. Same trap as asserting a spawned process exists with no settle window, inverted.
     $q = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $q -and (Notifiers).Count -gt 0) { Start-Sleep -Seconds 5 }
-    Check "E: the notifier exited (within a 90s settle window)"     ((Notifiers).Count -eq 0)
-    Check "E: the guardian exited"                                  (@(Get-Process -Name mm_guard -ErrorAction SilentlyContinue).Count -eq 0)
-    Write-Host ("  lifted at {0} (nominal end {1}, {2}s late)" -f $liftedAt.ToString('HH:mm:ss'), $endsAt.ToString('HH:mm:ss'), [math]::Round(($liftedAt - $endsAt).TotalSeconds))
+    if ($notifiersAtWatch -gt 0) { Check "E: the notifier exited (within a 90s settle window)" ((Notifiers).Count -eq 0) }
+    else { Void "E: the notifier exited" "no notifier was alive when the watch began - never spawned, or already gone; 'exited' would be vacuous" }
+    if ($guardiansAtWatch -gt 0) { Check "E: the guardian exited" (@(Get-Process -Name mm_guard -ErrorAction SilentlyContinue).Count -eq 0) }
+    else { Void "E: the guardian exited" "no guardian was alive when the watch began - never spawned, or already gone; 'exited' would be vacuous" }
+    if ($stillBlocked) {
+        # The watch's OWN deadline expiring is not a product event. Run 1 printed it as
+        # "lifted at ..." and claimed a lift that never happened.
+        Write-Host ("  TIMED OUT at {0}: still enforcing (nominal end {1}, watch deadline {2}) - nothing lifted" -f (Get-Date).ToString('HH:mm:ss'), $endsAt.ToString('HH:mm:ss'), $deadline.ToString('HH:mm:ss')) -ForegroundColor Yellow
+    } else {
+        Write-Host ("  lifted at {0} (nominal end {1}, {2}s late)" -f $liftedAt.ToString('HH:mm:ss'), $endsAt.ToString('HH:mm:ss'), [math]::Round(($liftedAt - $endsAt).TotalSeconds))
+    }
     Write-Host "  NOTE: the service staying REGISTERED but Stopped is normal - it is not a leftover block."
     & $monk status
-    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    # Keep the arm marker on a timeout so a later -Watch (or -Check) can still read it;
+    # only a witnessed lift retires it.
+    if (-not $stillBlocked) { Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host "`n================ REBOOT DRILL: $pass passed, $fail failed, $void void ================" -ForegroundColor Cyan

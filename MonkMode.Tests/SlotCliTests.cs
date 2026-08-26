@@ -1161,7 +1161,11 @@ public class VersionCommandTests
         var lines = MonkMode.Program.FormatVersionLines(@"C:\Program Files\MonkMode", built);
         Assert.Contains(lines, l => l.Contains("MonkMode " + MonkMode.Program.AppVersion));
         Assert.Contains(lines, l => l.Contains(@"C:\Program Files\MonkMode"));
-        Assert.Contains(lines, l => l.Contains("22/08/2026"));
+        // The product prints the build stamp in LOCAL time, so the old literal "22/08/2026"
+        // only held west of ~UTC+6 (18:11 UTC crosses midnight from there). Pin the
+        // dd/MM/yyyy rendering of the same conversion, not the test machine's zone.
+        var expectedDate = built.ToLocalTime().ToString("dd/MM/yyyy", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Contains(lines, l => l.Contains(expectedDate));
     }
 
     [Fact]

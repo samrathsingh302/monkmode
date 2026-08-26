@@ -70,7 +70,10 @@ function Check($n, $c)  { if ($c) { Write-Host "  [PASS] $n" -ForegroundColor Gr
 function Void($n, $why) { Write-Host "  [VOID] $n - $why" -ForegroundColor Yellow; $script:void++ }
 
 function SvcState     { $s = Get-Service MONKMODE -ErrorAction SilentlyContinue; if ($s) { $s.Status } else { 'gone' } }
-function HostsBlocked { $(try { Get-Content $hosts -Raw } catch { '' }) -match '#### MonkMode Entries ####' }
+# An unreadable hosts file used to read as '' = "not blocked", which every LIFT assertion
+# counts as a pass. Err the OTHER way (still blocked) and say so: a false "still enforcing"
+# fails loudly at teardown, while a false "lifted" walks away leaving the machine blocked.
+function HostsBlocked { try { (Get-Content $hosts -Raw -ErrorAction Stop) -match '#### MonkMode Entries ####' } catch { Write-Host '  [WARN] hosts unreadable - treating as STILL BLOCKED' -ForegroundColor Yellow; $true } }
 function TimeChanging { $(try { (Get-Content $cfg -Raw) } catch { '' }) -split "`r?`n" | Where-Object { $_ -like 'TimeChanging=*' } | Select-Object -First 1 }
 function SlotCount    { $l = $(try { (Get-Content $cfg -Raw) } catch { '' }) -split "`r?`n" | Where-Object { $_ -like 'SlotCount=*' } | Select-Object -First 1
                         if ($l) { [int]($l -replace 'SlotCount=', '') } else { 0 } }
@@ -155,7 +158,11 @@ try {
             $sw.Stop()
             Set-Date -Date $anchor.AddSeconds([math]::Round($sw.Elapsed.TotalSeconds)) -ErrorAction SilentlyContinue | Out-Null
         }
-        Check "clock restored after the probe (within 5s of NTP)" ([math]::Abs([double](NtpOffset)) -lt 5)
+        # A $null offset (no network) used to cast to 0.0 and PASS the one assertion that
+        # guards against leaving the machine's clock wrong, with nothing measured. VOID it.
+        $offRestore = NtpOffset
+        if ($null -eq $offRestore) { Void "clock restored after the probe (within 5s of NTP)" "NTP offset unmeasurable (no network?) - restoration UNVERIFIED, check the clock by hand" }
+        else { Check "clock restored after the probe (within 5s of NTP)" ([math]::Abs([double]$offRestore) -lt 5) }
 
         if (-not $held) {
             Void "orphan recovery"  "w32time yanks manual jumps back within 8s - the service cannot observe the change"
@@ -182,7 +189,10 @@ try {
                 $sw.Stop()
                 Set-Date -Date $anchor.AddSeconds([math]::Round($sw.Elapsed.TotalSeconds)) -ErrorAction SilentlyContinue | Out-Null
             }
-            Check "clock restored after the raise (within 5s of NTP)" ([math]::Abs([double](NtpOffset)) -lt 5)
+            # Same null-offset trap as the probe restore above: unmeasurable is VOID, not PASS.
+            $offRaise = NtpOffset
+            if ($null -eq $offRaise) { Void "clock restored after the raise (within 5s of NTP)" "NTP offset unmeasurable (no network?) - restoration UNVERIFIED, check the clock by hand" }
+            else { Check "clock restored after the raise (within 5s of NTP)" ([math]::Abs([double]$offRaise) -lt 5) }
 
             Get-Process -Name mm_notify -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
@@ -214,8 +224,17 @@ try {
                 $endBy = $armed.AddSeconds($nominal * 60 + 400)
                 while ((Get-Date) -lt $endBy -and (HostsBlocked)) { Start-Sleep -Seconds 15 }
                 $lifted = ((Get-Date) - $armed).TotalSeconds
+                # Assert the lift BEFORE ForceDown erases the evidence: a wedge after the
+                # flag released used to score all-green here, and the timeout below printed
+                # as "lifted at" (the same lie reboot-drill's -Watch told on 25/08).
+                $actuallyLifted = -not (HostsBlocked)
+                Check "orphan: the block ACTUALLY lifted on its own (hosts marker gone before ForceDown)" $actuallyLifted
                 Check "orphan: block did NOT lift early (>= its nominal $nominal min)" ($lifted -ge ($nominal * 60))
-                Write-Host ("  lifted at ~{0}s vs nominal {1}s (over-run {2}s, bound 300s)" -f [math]::Round($lifted), ($nominal * 60), [math]::Round($lifted - $nominal * 60))
+                if ($actuallyLifted) {
+                    Write-Host ("  lifted at ~{0}s vs nominal {1}s (over-run {2}s, bound 300s)" -f [math]::Round($lifted), ($nominal * 60), [math]::Round($lifted - $nominal * 60))
+                } else {
+                    Write-Host ("  TIMED OUT at ~{0}s: still enforcing past nominal {1}s + 400s grace - nothing lifted" -f [math]::Round($lifted), ($nominal * 60)) -ForegroundColor Yellow
+                }
             }
             ForceDown
         }
