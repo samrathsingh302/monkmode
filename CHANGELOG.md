@@ -43,7 +43,9 @@ Three defects found on and just after tag day, all outside enforcement, plus one
 
   The time probe runs in the background and is read by a later tick, so the 10-second
   enforcement beat never waits on a network; a boot that lands after a block's real end
-  therefore lifts within a tick or two rather than instantly. Honest residual: someone who
+  therefore lifts a minute or two after the network comes up rather than instantly — the
+  probe fired at start-up races the boot's own network stack, and if it loses it retries
+  a minute later. Honest residual: someone who
   installs a trusted root certificate and intercepts *every* witness could manufacture credit —
   an administrative attack on the machine's own trust store, in the same family as the offline
   disk edit that has always been out of scope.

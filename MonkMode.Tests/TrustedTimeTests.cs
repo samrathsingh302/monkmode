@@ -77,18 +77,6 @@ public class TrustedTimeTests
     private static string Anchor => U(2026, 8, 27, 23, 0);
     private static string Until2Am => L(2026, 8, 28, 2, 0);
 
-    // The test-owned config lives in the test bin directory (Blocker.IniPath()), never
-    // the installed one - the project's hard fence. Cleared either side of the one test
-    // that writes a real armed config.
-    private static void WipeTestConfig()
-    {
-        foreach (var p in new[]
-                 { MonkMode.Blocker.IniPath(), MonkMode.Blocker.IniBackupPath(), MonkMode.Blocker.SnapshotPath() })
-        {
-            if (File.Exists(p)) File.Delete(p);
-        }
-    }
-
     // ------------------------------- the quorum -------------------------------
 
     [Fact]
@@ -329,26 +317,11 @@ public class TrustedTimeTests
         // The fix is that an armed config carries NO anchor and the service seeds it from
         // a corroborated reading. Pinned two ways: the arm writes an empty anchor, and an
         // empty anchor provably credits nothing even when a reading is in hand.
-        // (1) The REAL arm path, through the real writer, into the test-owned config -
-        // this is the half with teeth against a CLI regression: if anyone reinstates a
-        // DateTime.UtcNow seed in Blocker.vb, this fails.
-        try
-        {
-            WipeTestConfig();
-            var armed = MonkMode.Blocker.ArmSlot(
-                new[] { "example.com" }, Array.Empty<string>(), "", null,
-                new DateTime(2027, 3, 1, 12, 0, 0), false);
-            Assert.True(armed.Ok);
-
-            var ini = new monkmode.IniFile();
-            ini.Load(MonkMode.Blocker.IniPath());
-            Assert.Equal("", ini.GetKeyValue("Time", "TrustedUtc"));
-            // ...while the mark beside it IS seeded, so this is "no anchor", not "no F77".
-            Assert.NotEqual("", ini.GetKeyValue("Time", "HighWater"));
-        }
-        finally { WipeTestConfig(); }
-
-        // (2) The back-dated arm, replayed: a 1h block whose anchor is 10h stale-if-seeded.
+        // (The other half - that the REAL arm writer leaves the anchor empty - needs the
+        // shared test config, so it lives in TrustedTimeArmedConfigTests below, inside the
+        // CliIniWriters collection that serialises every test touching that file.)
+        //
+        // The back-dated arm, replayed: a 1h block whose anchor is 10h stale-if-seeded.
         // With no anchor, the honest reading seeds and credits nothing, so the block
         // still has its full hour to run.
         var armedHw = L(2026, 8, 28, 0, 0);          // machine said midnight while arming
@@ -423,5 +396,55 @@ public class TrustedTimeTests
         // ...and they must be distinct, or "two witnesses" is really one.
         Assert.Equal(monkmode.TrustedTime.WitnessUrls.Length,
                      monkmode.TrustedTime.WitnessUrls.Distinct().Count());
+    }
+}
+
+// The one F77 test that writes a REAL armed config. It shares Blocker.IniPath() with
+// the other live-config tests, so it joins the same collection - xUnit runs classes in
+// parallel by default, and two classes wiping and arming the same file race each other
+// (which is exactly what this test did before it was moved here).
+[Collection("CliIniWriters")]
+public class TrustedTimeArmedConfigTests
+{
+    // The test-owned config lives in the test bin directory, never the installed one -
+    // the project's hard fence.
+    private static void Wipe()
+    {
+        foreach (var p in new[]
+                 { MonkMode.Blocker.IniPath(), MonkMode.Blocker.IniBackupPath(), MonkMode.Blocker.SnapshotPath() })
+        {
+            if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    [Fact]
+    public void AnArmedConfig_CarriesNoAnchor_SoABackDatedArmCannotManufactureCredit()
+    {
+        // THE BYPASS THIS CLOSES (found reviewing F77's own first cut, 28/08/2026, and
+        // independently by the fresh-eyes verifier). If the CLI seeded the anchor from
+        // the ARMING machine's DateTime.UtcNow, then: wind the clock back 10h -> `block
+        // --for 1h` (Until and HighWater are self-consistent in the wrong frame, so the
+        // arm looks completely normal, but the anchor is now 10h behind reality) ->
+        // correct the clock -> the first probe computes trustedNow - anchor = 10h of
+        // "downtime" and the 1h block lifts in about a minute.
+        //
+        // The fix is that an armed config carries NO anchor and the service seeds it from
+        // a corroborated reading. This is the half with teeth against a CLI regression:
+        // reinstate a DateTime.UtcNow seed in Blocker.vb and this fails.
+        Wipe();
+        try
+        {
+            var armed = MonkMode.Blocker.ArmSlot(
+                new[] { "example.com" }, Array.Empty<string>(), "", null,
+                new DateTime(2027, 3, 1, 12, 0, 0), false);
+            Assert.True(armed.Ok);
+
+            var ini = new monkmode.IniFile();
+            ini.Load(MonkMode.Blocker.IniPath());
+            Assert.Equal("", ini.GetKeyValue("Time", "TrustedUtc"));
+            // ...while the mark beside it IS seeded, so this pins "no anchor", not "no F77".
+            Assert.NotEqual("", ini.GetKeyValue("Time", "HighWater"));
+        }
+        finally { Wipe(); }
     }
 }

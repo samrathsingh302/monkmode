@@ -401,6 +401,61 @@ public class WriterRaceLiveTests
     }
 
     [Fact]
+    public void HeartbeatRestamp_PersistsTheAnchorInTheSameSaveAsTheMark()
+    {
+        // F77. The mark and its UTC anchor are ONE value in two coordinate systems, and
+        // the invariant whose violation is an EARLY LIFT is that they persist TOGETHER.
+        // If a save ever dropped the anchor - wrong key, wrong section, wrong crypt, a
+        // write that silently no-ops - the stored anchor would start lagging the stored
+        // mark, and every later probe would re-credit time the ticks had already
+        // credited, walking the mark ahead of real time until the block lifted early.
+        // Inspection says the write is right (one save, one restamp); this says it too,
+        // and keeps saying it. The pure-layer tests in TrustedTimeTests cannot see this
+        // at all - they never touch persistence.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var svc = Svc();
+            const string hw = "2026-08-19 12:00:00";
+            const string anchor = "2026-08-19 11:00:00";
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), hw, anchor, false));
+
+            var after = Reload();
+            var crypt = new monkmode.Simple3Des("mm_textbox");
+            Assert.Equal(hw, crypt.DecryptData(after.GetKeyValue("Time", "HighWater")));
+            Assert.Equal(anchor, crypt.DecryptData(after.GetKeyValue("Time", "TrustedUtc")));
+            // ...and the ONE MAC restamp covered both, so the config is still valid.
+            // PersistSlotFieldAt refuses outright on an invalid MAC, so a successful
+            // write here is the proof the stamp is good over the new anchor.
+            Assert.True(svc.PersistSlotFieldAt(MonkMode.Blocker.IniPath(), "1", "PartnerUnlockedAt", "", false));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void HeartbeatRestamp_NeverBlanksAGoodAnchor_WhenTheTickResolvedNone()
+    {
+        // The anchor's twin of the never-blank-a-good-HighWater rule below. A tick that
+        // resolved no anchor (no reading, none stored) passes "", and "" must leave a
+        // stored anchor ALONE rather than erasing it - erasing it would silently switch
+        // downtime credit off until some later probe re-seeded it.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var svc = Svc();
+            const string anchor = "2026-08-19 11:00:00";
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:00", anchor, false));
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:10", "", false));
+
+            Assert.Equal(anchor,
+                new monkmode.Simple3Des("mm_textbox").DecryptData(Reload().GetKeyValue("Time", "TrustedUtc")));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
     public void HeartbeatRestamp_NeverBlanksAGoodHighWater_WhenTheTickCouldNotReadOne()
     {
         Wipe();
