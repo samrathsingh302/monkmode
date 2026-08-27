@@ -1873,6 +1873,22 @@ Module Blocker
             ' rolling the clock forward past a slot's Until can't lift it early. MAC-covered
             ' by StampFreshMac below, so it can't be forged past Until either.
             ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
+            ' F77: the mark's UTC anchor is created EMPTY here, and the SERVICE seeds it
+            ' from a corroborated reading (TrustedTime.ResolveMarkAndAnchor's no-anchor
+            ' branch: seed, credit nothing). The CLI deliberately does NOT seed it from
+            ' DateTime.UtcNow, because the arming machine's clock is exactly what F77
+            ' refuses to trust - and seeding from it is a full bypass:
+            '
+            '   wind the clock BACK 10h -> `block --for 1h` (Until/HighWater are
+            '   self-consistent in the wrong frame, so the arm looks normal, but the
+            '   anchor is now 10h stale) -> correct the clock -> the first probe computes
+            '   trustedNow - anchor = 10h of "downtime" and the 1h block lifts in seconds.
+            '
+            ' An empty anchor costs nothing: crediting downtime needs a corroborated
+            ' READING, which needs the network, and if the network is there the service
+            ' seeds an HONEST anchor within a probe. Until then no credit is possible -
+            ' which is simply today's behaviour, the fail-closed direction.
+            ini.SetKeyValue("Time", "TrustedUtc", "")
             ini.AddSection("CurrentTime")
             ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
             ' The v9 [Partner] mirror belongs to the ONE block this fresh config holds.
@@ -1921,6 +1937,15 @@ Module Blocker
                 Dim reseed As String = DateTime.Now.ToString(CA)
                 ini.SetKeyValue("Time", "HighWater", enc.EncryptData(reseed))
                 ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(reseed))
+                ' F77: CLEARING the anchor here is load-bearing, not tidiness. This branch
+                ' jumps the mark forward to "now"; leaving the old anchor behind would
+                ' desynchronise the pair, and the next probe would credit the gap the
+                ' reseed just created as if it were downtime - shortening a block nobody
+                ' asked to shorten. Clearing makes the service re-seed it honestly from
+                ' the next corroborated reading (no credit for that first one). Re-seeding
+                ' it from DateTime.UtcNow instead would reopen the back-dated-clock bypass
+                ' documented at the fresh-arm seed above.
+                ini.SetKeyValue("Time", "TrustedUtc", "")
             End If
         End If
 
@@ -2040,6 +2065,16 @@ Module Blocker
         Dim globalScheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
         Dim globalScheduleActivePlain As String = If(globalScheduleActiveEnc = "", "", crypt.DecryptData(globalScheduleActiveEnc))
 
+        ' F77 (v12): the GLOBAL [Time] TrustedUtc anchor - the UTC instant at which
+        ' [Time] HighWater was last known correct. ENCRYPTED like the datetimes above, but
+        ' stored in INVARIANT UTC (ConfigIntegrity.TrustedUtcFormat) rather than en-CA LOCAL,
+        ' so a timezone change moves neither it nor the credit derived from it. MAC-covered
+        ' because back-dating it is an early-lift primitive (the next probe would credit the
+        ' difference). Absent reads "" and passes as "" - an unseeded anchor simply earns no
+        ' downtime credit, which is the fail-closed direction.
+        Dim trustedUtcEnc As String = ini.GetKeyValue("Time", "TrustedUtc")
+        Dim trustedUtcPlain As String = If(trustedUtcEnc = "", "", crypt.DecryptData(trustedUtcEnc))
+
         ' The CLAMPED count is BOTH the header value and the loop bound, so a forged
         ' SlotCount can only ever build a canonical nothing can match -> freeze.
         Dim slotCount As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
@@ -2081,6 +2116,7 @@ Module Blocker
                                              ini.GetKeyValue("Guard", "ArmedCount"),
                                              globalScheduleSpec,
                                              globalScheduleActivePlain,
+                                             trustedUtcPlain,
                                              slots.ToString())
     End Function
 
@@ -2574,6 +2610,12 @@ Module Blocker
             ini.SetKeyValue("Time", "Until", enc.EncryptData(ScheduleOnlyExpiredUntil))
             ini.SetKeyValue("Time", "TimeChanging", "no")
             ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
+            ' F77: the schedule-only config carries the anchor key too (its open windows
+            ' close on the same monotonic mark, so it earns downtime credit by the same
+            ' rule) - and, like the manual arm above, it is created EMPTY for the service
+            ' to seed from a corroborated reading. See the fresh-arm seed for why seeding
+            ' from the arming machine's own clock is a bypass.
+            ini.SetKeyValue("Time", "TrustedUtc", "")
 
             ini.AddSection("CurrentTime")
             ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))

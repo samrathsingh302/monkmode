@@ -214,6 +214,10 @@ public class CanonicalParityTests
             // GlobalSchedule_AllFourWrappers_AgreeAndDecryptOnlyTheDeadline below.
             "ScheduleSpec=\n" +
             "ScheduleActiveUntil=\n" +
+            // F77 (v12): the TrustedUtc anchor - "" here, because WriteSlot1 seeds no
+            // anchor. An absent anchor must pass through as "" (never as a fabricated
+            // "now"), which is what makes an un-anchored config earn no downtime credit.
+            "TrustedUtc=\n" +
             "Slot1.Id=" + OneSlot.Id + "\n" +
             "Slot1.StartAt=\n" +
             "Slot1.DurationSeconds=\n" +
@@ -271,7 +275,8 @@ public class CanonicalParityTests
             "GuardHoldUntil=\n" +
             "GuardArmedCount=1\n" +
             "ScheduleSpec=" + ScheduleSpecPlain + "\n" +
-            "ScheduleActiveUntil=" + ScheduleActiveUntilPlain + "\n",
+            "ScheduleActiveUntil=" + ScheduleActiveUntilPlain + "\n" +
+            "TrustedUtc=\n",
             cli);
         Assert.Equal(cli, MonkMode.Tests.TestSvc.New().CanonicalFromIni(srvIni));
         Assert.Equal(cli, mm_guard.Program.CanonicalFromIni(guardIni));
@@ -294,11 +299,11 @@ public class CanonicalParityTests
         // wrapper that left the ciphertext in the canonical (or that decrypted the Spec,
         // which is stored plaintext) diverges from every other party. Pin both directions.
         var correct = MonkMode.ConfigIntegrity.BuildCanonical(Ver, HighWaterPlain, NowPlain, "", 0, "", "1",
-            ScheduleSpecPlain, ScheduleActiveUntilPlain, "");
+            ScheduleSpecPlain, ScheduleActiveUntilPlain, "", "");
         var buggyDeadline = MonkMode.ConfigIntegrity.BuildCanonical(Ver, HighWaterPlain, NowPlain, "", 0, "", "1",
-            ScheduleSpecPlain, ScheduleActiveUntilEnc, "");
+            ScheduleSpecPlain, ScheduleActiveUntilEnc, "", "");
         var buggySpec = MonkMode.ConfigIntegrity.BuildCanonical(Ver, HighWaterPlain, NowPlain, "", 0, "", "1",
-            new MonkMode.Simple3Des(Passphrase).EncryptData(ScheduleSpecPlain), ScheduleActiveUntilPlain, "");
+            new MonkMode.Simple3Des(Passphrase).EncryptData(ScheduleSpecPlain), ScheduleActiveUntilPlain, "", "");
 
         Assert.NotEqual(correct, buggyDeadline);
         Assert.NotEqual(correct, buggySpec);

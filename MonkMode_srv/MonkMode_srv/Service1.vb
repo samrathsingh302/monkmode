@@ -209,6 +209,19 @@ Public Class Service1
                 ' is never credited and OnStart expiry is decided off the STORED
                 ' mark; live ticks advance it, bounded by real elapsed.
                 lastMonoMs = Environment.TickCount64
+                ' F77: kick the trusted-time probe the moment we start, because a boot is
+                ' exactly when a downtime credit is owed. It runs in the BACKGROUND and is
+                ' not read here: OnStart deliberately keeps deciding off the STORED mark,
+                ' unchanged, and the first live tick that finds a reading folds the credit
+                ' in and lifts. Two reasons for that split. (1) SCM: OnStart has a start
+                ' timeout, and three sequential HTTPS HEADs could eat it - a service that
+                ' fails to start is a far worse outcome than lifting ~10s later. (2) Risk:
+                ' the OnStart exit decision is the most delicate code in the service, and
+                ' this change does not need to touch it. Cost of the split is one tick.
+                ' anchorMissing:=True unconditionally: this is the first probe of the
+                ' instance, so the cadence flag cannot make it any sooner, and OnStart has
+                ' no reason to decrypt the anchor just to answer it.
+                trustedProbe.RequestIfDue(lastMonoMs, True)
                 ' C5b (b2): seed the wall-clock jump-OVER anchor together with the monotonic
                 ' one, so the first LIVE tick after this (re)start measures wallDelta from
                 ' boot - not from the stale pre-reboot [CurrentTime] Now - and a window that
@@ -402,6 +415,12 @@ Public Class Service1
         ' the same shape as a CLI-armed block. Unstamped, so macValid stays False
         ' and the block holds regardless; this just keeps the ini uniform.
         iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
+        ' F77: the mark's UTC anchor, EMPTY - same shape as a CLI-armed block, and empty
+        ' for the same reason: an anchor derived from this machine's own clock is exactly
+        ' what F77 refuses to trust (see Blocker.vb's fresh-arm seed). The service seeds
+        ' it from a corroborated reading. Unstamped like everything else here, so macValid
+        ' stays False and the block holds regardless.
+        iniFile.SetKeyValue("Time", "TrustedUtc", "")
         iniFile.AddSection("CurrentTime")
         iniFile.SetKeyValue("CurrentTime", "Now", encryptionW.EncryptData(DateTime.Now.ToString(culture)))
         iniFile.AddSection("Process")
@@ -1100,7 +1119,7 @@ Public Class Service1
     ' landed since our reload (a CLI arm) abandons this save. Skipping a heartbeat costs one
     ' tick of HighWater advance, which OVER-blocks by 10s and converges on the next tick.
     ' Returns True iff the config was rewritten. NEVER throws (it runs inside the tick).
-    Friend Function RestampHeartbeatAt(ByVal iniPath As String, ByVal newHw As String, ByVal clearOrphanedTimeChanging As Boolean) As Boolean
+    Friend Function RestampHeartbeatAt(ByVal iniPath As String, ByVal newHw As String, ByVal newTrustedUtc As String, ByVal clearOrphanedTimeChanging As Boolean) As Boolean
         Try
             Dim iniFile = New IniFile
             iniFile.Load(iniPath)
@@ -1115,6 +1134,14 @@ Public Class Service1
             ' good value).
             If newHw <> "" Then
                 iniFile.SetKeyValue("Time", "HighWater", encryptionW.EncryptData(newHw))
+            End If
+            ' F77: the mark's UTC anchor rides the SAME save as the mark. It has to: the
+            ' two are one value in two coordinate systems, and persisting either without
+            ' the other leaves the pair inconsistent - an anchor that lagged its mark
+            ' would make the next probe re-credit time the ticks already credited.
+            ' Skipped on "" by the same rule as newHw (never blank a good value).
+            If newTrustedUtc <> "" Then
+                iniFile.SetKeyValue("Time", "TrustedUtc", encryptionW.EncryptData(newTrustedUtc))
             End If
             ' The heartbeat just rewrote [CurrentTime] Now AND [Time] HighWater, both
             ' MAC-covered fields, so re-stamp [Integrity] Mac over the new canonical with the
@@ -1692,6 +1719,12 @@ Public Class Service1
     ' real time. Seeded at OnStart; 0 = not yet seeded (=> credit 0 that tick).
     Private lastMonoMs As Long = 0
 
+    ' F77: the background trusted-time probe. One per service instance, deliberately
+    ' NOT static - it holds nothing worth surviving a restart, and a fresh instance at
+    ' every OnStart means a reboot always probes immediately (which is exactly the
+    ' moment a downtime credit is owed).
+    Private ReadOnly trustedProbe As New TrustedTimeProbe()
+
     ' C5b (b2): the WALL-CLOCK sibling of lastMonoMs - the previous tick's DateTime.Now,
     ' held in memory and seeded at OnStart alongside lastMonoMs. The schedule jump-OVER
     ' detector needs wallDelta and monoElapsed measured over the SAME (previous-live-tick ->
@@ -1788,6 +1821,10 @@ Public Class Service1
         ' "nothing to persist this tick".
         Dim newHw As String = ""
         Dim newHwAsOf As DateTime = DateTime.MinValue
+        ' F77: the mark's UTC anchor to persist alongside newHw this tick. "" means
+        ' "nothing to persist" by the same rule as newHw - a tick that couldn't read the
+        ' config never blanks a good anchor.
+        Dim newTrustedUtc As String = ""
 
         Try
             Dim iniFile = New IniFile
@@ -1852,6 +1889,11 @@ Public Class Service1
             ' whole B4 fix. The new value is persisted in the heartbeat save
             ' below (one save) so it advances each live tick.
             Dim storedHw As String = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "HighWater"))
+            ' F77: the mark's stored UTC anchor. "" (absent, or a decrypt that returns ""
+            ' on bad Base64) means no anchor => no downtime credit is computable this
+            ' tick, only a re-seed if a reading happens to be in hand - fail-closed.
+            Dim storedTrustedUtcEnc As String = iniFile.GetKeyValue("Time", "TrustedUtc")
+            Dim storedTrustedUtc As String = If(storedTrustedUtcEnc = "", "", encryptionW.DecryptData(storedTrustedUtcEnc))
             ' B4 creep fix: NextHighWater gives the candidate (wall 'now' on a Trusted
             ' tick, else the stored value unchanged), then CapHighWaterAdvance bounds
             ' the ACTUAL advance to the REAL monotonic elapsed (Environment.TickCount64,
@@ -1887,6 +1929,25 @@ Public Class Service1
             ' the block ends at its real duration - the P2 fix). A Trusted tick is
             ' byte-identical to the old NextHighWater+CapHighWaterAdvance composition.
             newHw = AdvanceHighWater(storedHw, DateTime.Now.ToString(culture), monoElapsedSeconds, HighWaterJumpCeilingSeconds)
+            ' F77: fold in machine-OFF/asleep downtime, measured against an EXTERNALLY
+            ' corroborated clock (never DateTime.Now - see TrustedTime.vb's header for why
+            ' the obvious version of this is a B4 bypass). The probe is asked here and
+            ' ANSWERED on some later tick: RequestIfDue queues a background HTTPS HEAD and
+            ' returns at once, TryTakeReading collects whatever a previous one finished, so
+            ' the 10s enforcement beat never waits on a network. With no reading in hand -
+            ' the common case, since probes are minutes apart - ResolveMarkAndAnchor just
+            ' carries the anchor forward by exactly what the B4 rule above credited, and
+            ' newHw comes back byte-identical to AdvanceHighWater's output.
+            '
+            ' This sits BEFORE the parse into newHwAsOf on purpose: newHwAsOf is the asOf
+            ' every expiry, cooling-off, schedule and slot gate below reads, so the credit
+            ' has to be in the mark by the time it is taken. A boot that lands after a
+            ' block's real end therefore lifts on the FIRST tick that carries a reading.
+            trustedProbe.RequestIfDue(nowMono, storedTrustedUtc = "")
+            TrustedTime.ResolveMarkAndAnchor(storedHw, newHw, storedTrustedUtc,
+                                             trustedProbe.TryTakeReading(),
+                                             TrustedTime.MaxCreditSeconds,
+                                             newHw, newTrustedUtc)
             Dim parsedHw As DateTime
             If DateTime.TryParse(newHw, culture, DateTimeStyles.None, parsedHw) Then
                 newHwAsOf = parsedHw
@@ -2343,7 +2404,7 @@ Public Class Service1
                     ' unit suite can drive the REAL heartbeat write against a test-owned file.
                     ' The orphaned-flag argument is the F7 half: the gate above is open, so a
                     ' still-raised flag here is by definition one that outlived its bound.
-                    RestampHeartbeatAt(Application.StartupPath + "\monkmode_settings.ini", newHw, TimeChangeFlagIsOrphaned())
+                    RestampHeartbeatAt(Application.StartupPath + "\monkmode_settings.ini", newHw, newTrustedUtc, TimeChangeFlagIsOrphaned())
                 Case TickAction.Hold
                     ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
                     ' Fail CLOSED - do NOT re-stamp (that would re-bless the tamper and
@@ -4640,6 +4701,16 @@ Public Class Service1
         Dim globalScheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
         Dim globalScheduleActivePlain As String = If(globalScheduleActiveEnc = "", "", crypt.DecryptData(globalScheduleActiveEnc))
 
+        ' F77 (v12): the GLOBAL [Time] TrustedUtc anchor - the UTC instant at which
+        ' [Time] HighWater was last known correct. ENCRYPTED like the datetimes above, but
+        ' stored in INVARIANT UTC (ConfigIntegrity.TrustedUtcFormat) rather than en-CA LOCAL,
+        ' so a timezone change moves neither it nor the credit derived from it. MAC-covered
+        ' because back-dating it is an early-lift primitive (the next probe would credit the
+        ' difference). Absent reads "" and passes as "" - an unseeded anchor simply earns no
+        ' downtime credit, which is the fail-closed direction.
+        Dim trustedUtcEnc As String = ini.GetKeyValue("Time", "TrustedUtc")
+        Dim trustedUtcPlain As String = If(trustedUtcEnc = "", "", crypt.DecryptData(trustedUtcEnc))
+
         ' The CLAMPED count is BOTH the header value and the loop bound, so a forged
         ' SlotCount can only ever build a canonical nothing can match -> freeze.
         Dim slotCount As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
@@ -4681,6 +4752,7 @@ Public Class Service1
                                              ini.GetKeyValue("Guard", "ArmedCount"),
                                              globalScheduleSpec,
                                              globalScheduleActivePlain,
+                                             trustedUtcPlain,
                                              slots.ToString())
     End Function
 

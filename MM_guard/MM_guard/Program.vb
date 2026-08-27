@@ -389,6 +389,16 @@ Module Program
         Dim globalScheduleActiveEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
         Dim globalScheduleActivePlain As String = If(globalScheduleActiveEnc = "", "", crypt.DecryptData(globalScheduleActiveEnc))
 
+        ' F77 (v12): the GLOBAL [Time] TrustedUtc anchor - the UTC instant at which
+        ' [Time] HighWater was last known correct. ENCRYPTED like the datetimes above, but
+        ' stored in INVARIANT UTC (ConfigIntegrity.TrustedUtcFormat) rather than en-CA LOCAL,
+        ' so a timezone change moves neither it nor the credit derived from it. MAC-covered
+        ' because back-dating it is an early-lift primitive (the next probe would credit the
+        ' difference). Absent reads "" and passes as "" - an unseeded anchor simply earns no
+        ' downtime credit, which is the fail-closed direction.
+        Dim trustedUtcEnc As String = ini.GetKeyValue("Time", "TrustedUtc")
+        Dim trustedUtcPlain As String = If(trustedUtcEnc = "", "", crypt.DecryptData(trustedUtcEnc))
+
         ' The CLAMPED count is BOTH the header value and the loop bound, so a forged
         ' SlotCount can only ever build a canonical nothing can match -> freeze.
         Dim slotCount As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
@@ -430,6 +440,7 @@ Module Program
                                              ini.GetKeyValue("Guard", "ArmedCount"),
                                              globalScheduleSpec,
                                              globalScheduleActivePlain,
+                                             trustedUtcPlain,
                                              slots.ToString())
     End Function
 

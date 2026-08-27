@@ -12,9 +12,45 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 ## [Unreleased]
 
-Three defects found on and just after tag day, all outside enforcement, plus one usability fix.
+Three defects found on and just after tag day, all outside enforcement, plus one usability fix
+— and F77, which changes what a block's end time *means*.
 
 ### Added
+
+- **F77 — a block now ends when it said it would, even if the laptop was off.** Until now the
+  expiry clock only ran while the service did, so a block armed `--until 02:00` that spanned an
+  overnight shutdown did not end at 02:00 — it ended once the machine had been *switched on*
+  that long. Shut down at midnight, boot at ten, and a 02:00 block still had two hours to run.
+  That was deliberate (it is what stops a rolled-forward clock from lifting a block), but it
+  broke the promise the `--until` flag makes, so downtime is now credited.
+
+  The obvious way to do that would hand the bypass straight back: if the boot gap were measured
+  with the machine's own clock, "shut down, wind the clock forward, boot" would lift any block —
+  *easier* than the attack the monotonic mark exists to stop. So downtime is measured against a
+  clock you cannot edit. The config gained one MAC-covered field, `[Time] TrustedUtc` — the UTC
+  instant at which the high-water mark was last known correct — and the credit is the gap
+  between that anchor and an **externally corroborated** UTC now: the `Date` header of several
+  independent HTTPS hosts, where at least two must agree and the **earliest** reading wins.
+  Certificate validation is what makes it trustworthy, so a redirect through the hosts file
+  MonkMode itself writes produces a certificate error rather than a forged time.
+
+  Three things follow, and each is pinned by tests. Changing the machine's **timezone** earns
+  nothing, because the credit is a duration between two UTC instants added to the local mark.
+  Rolling the **clock** forward earns nothing, because neither `DateTime.Now` nor `UtcNow`
+  appears anywhere in the credit path. And with **no network** — or too few witnesses, or
+  witnesses that disagree — nothing is credited at all, which is exactly the behaviour that
+  shipped before: the feature can only ever shorten an over-run, never end a block early.
+
+  The time probe runs in the background and is read by a later tick, so the 10-second
+  enforcement beat never waits on a network; a boot that lands after a block's real end
+  therefore lifts within a tick or two rather than instantly. Honest residual: someone who
+  installs a trusted root certificate and intercepts *every* witness could manufacture credit —
+  an administrative attack on the machine's own trust store, in the same family as the offline
+  disk edit that has always been out of scope.
+
+  **Upgrading:** this is config schema v11 → v12, so a block armed under the old binaries
+  correctly freezes (it holds and cannot lift) until it is re-armed. Install the new build when
+  no block is live.
 
 - **F75 — the binary can now talk you out of a corner on its own.** Every recovery path lived
   only in `docs/RUNBOOK.md`: a developer file, in a source repo, which someone running the

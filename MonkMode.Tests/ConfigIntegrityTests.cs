@@ -215,7 +215,7 @@ public class ConfigIntegrityTests
         // the ascending slot order, is SlotCanonicalTests.V10_ByteLiteral_TwoSlots).
         var c = OneSlot.Canonical("2026-06-25 5:04:33 p.m.", "chrome.exe;brave.exe;", "reddit.com;x.com;", "2026-06-25 12:00:00 p.m.", "2026-06-25 11:00:00 a.m.", "2026-06-25 12:30:00 p.m.", "c2FsdA==", "aGFzaA==", "2026-06-25 1:00:00 p.m.", "yes", "v1;12345:0900-1700;sites=reddit.com;apps=", "2026-06-25 2:00:00 p.m.", "5400", "yes");
         Assert.Equal(
-            "v11\n" +
+            "v12\n" +
             "HighWater=2026-06-25 11:00:00 a.m.\n" +
             "Now=2026-06-25 12:00:00 p.m.\n" +
             "NextSlotId=2\n" +
@@ -227,6 +227,8 @@ public class ConfigIntegrityTests
             // GlobalSchedule_IsMacCovered_* below.
             "ScheduleSpec=\n" +
             "ScheduleActiveUntil=\n" +
+            // F77 (v12): the TrustedUtc anchor, LAST in the header and before the slots.
+            "TrustedUtc=\n" +
             "Slot1.Id=1\n" +
             "Slot1.StartAt=\n" +
             "Slot1.DurationSeconds=\n" +
@@ -261,8 +263,8 @@ public class ConfigIntegrityTests
         // passes straight through - pinned here so nobody reintroduces the special case.
         var c = OneSlot.Canonical("U", "", "", "N", "HW", "", "", "", "", "", "", "", "", "");
         Assert.Equal(
-            "v11\nHighWater=HW\nNow=N\nNextSlotId=2\nSlotCount=1\nGuardHoldUntil=\nGuardArmedCount=1\n" +
-            "ScheduleSpec=\nScheduleActiveUntil=\n" +
+            "v12\nHighWater=HW\nNow=N\nNextSlotId=2\nSlotCount=1\nGuardHoldUntil=\nGuardArmedCount=1\n" +
+            "ScheduleSpec=\nScheduleActiveUntil=\nTrustedUtc=\n" +
             "Slot1.Id=1\nSlot1.StartAt=\nSlot1.DurationSeconds=\nSlot1.Until=U\nSlot1.Sites=\nSlot1.Apps=\n" +
             "Slot1.UrlPatterns=\nSlot1.AllSession=\nSlot1.ScheduleSpec=\nSlot1.ScheduleActiveUntil=\n" +
             "Slot1.CoolOffUntil=\nSlot1.CoolOffDuration=\nSlot1.PartnerSalt=\nSlot1.PartnerHash=\n" +
@@ -330,13 +332,13 @@ public class ConfigIntegrityTests
         // point is that the four byte-identical copies of BOTH v10 functions agree.
         // "GSS"/"GSA" are the v11 GLOBAL [Schedule] Spec/ActiveUntil, distinct from the
         // per-slot "SS"/"SA" so a copy that mixed the two up would diverge visibly.
-        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA",
+        var cli = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA", "TU",
             MonkMode.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
-        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA",
+        var srv = monkmode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA", "TU",
             monkmode.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
-        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA",
+        var guard = mm_guard.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA", "TU",
             mm_guard.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
-        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA",
+        var notify = mm_notify.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "GH", "1", "GSS", "GSA", "TU",
             mm_notify.ConfigIntegrity.BuildSlotCanonical(1, "1", "SA1", "DS", until, "reddit.com;", "chrome.exe;", "UP", "AS", "SS", "SA", "CO", "CD", "PS", "PH", "PU", "CM"));
         Assert.Equal(cli, srv);
         Assert.Equal(cli, guard);
@@ -476,7 +478,7 @@ public class ConfigIntegrityTests
         // What the upgraded readers build from the same stored values, carried into
         // slot 1 of the v10 two-level canonical.
         var currentCanonical = OneSlot.Canonical(until, proc, sites, now, hw, co, psalt, phash, "", "yes", sspec, sactive, cd, "");
-        Assert.Equal("v11", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
+        Assert.Equal("v12", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
         Assert.NotEqual(oldCanonical, currentCanonical);
 
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
@@ -544,8 +546,8 @@ public class ConfigIntegrityTests
         // encrypted globals still decrypt, but there is no [Slots] section, so
         // ParseSlotCount => 0 => zero slot blocks. (v11/FX1: the v9 file HAD a global
         // [Schedule] pair, and the current readers now cover it - here it is empty.)
-        var currentFromAV9File = MonkMode.ConfigIntegrity.BuildCanonical(Ver, hw, now, "", 0, "", "", "", "", "");
-        Assert.Equal("v11\nHighWater=" + hw + "\nNow=" + now + "\nNextSlotId=\nSlotCount=0\nGuardHoldUntil=\nGuardArmedCount=\nScheduleSpec=\nScheduleActiveUntil=\n", currentFromAV9File);
+        var currentFromAV9File = MonkMode.ConfigIntegrity.BuildCanonical(Ver, hw, now, "", 0, "", "", "", "", "", "");
+        Assert.Equal("v12\nHighWater=" + hw + "\nNow=" + now + "\nNextSlotId=\nSlotCount=0\nGuardHoldUntil=\nGuardArmedCount=\nScheduleSpec=\nScheduleActiveUntil=\nTrustedUtc=\n", currentFromAV9File);
         Assert.NotEqual(oldCanonical, currentFromAV9File);
 
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentFromAV9File, oldMac, Key);
@@ -577,7 +579,7 @@ public class ConfigIntegrityTests
     // past [Time] Until sentinel outside the canonical, and the whole armed state living
     // in the two GLOBAL [Schedule] header fields.
     private static string ScheduleOnlyCanonical(string spec, string activeUntil, string hw = "2026-06-25 11:00:00 a.m.") =>
-        MonkMode.ConfigIntegrity.BuildCanonical(Ver, hw, "2026-06-25 12:00:00 p.m.", "", 0, "", "1", spec, activeUntil, "");
+        MonkMode.ConfigIntegrity.BuildCanonical(Ver, hw, "2026-06-25 12:00:00 p.m.", "", 0, "", "1", spec, activeUntil, "", "");
 
     [Fact]
     public void GlobalScheduleSpec_IsMacCovered_BlankingItFreezesInsteadOfTearingDown()
@@ -639,9 +641,9 @@ public class ConfigIntegrityTests
 
         // And the GLOBAL pair is not the PER-SLOT pair: the same two values carried on a
         // slot produce a different canonical, so no reader can confuse the two.
-        var global = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "", "1", "SPEC", "ACTIVE",
+        var global = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "", "1", "SPEC", "ACTIVE", "",
             MonkMode.ConfigIntegrity.BuildSlotCanonical(1, "1", "", "", "U", "", "", "", "", "", "", "", "", "", "", "", ""));
-        var perSlot = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "", "1", "", "",
+        var perSlot = MonkMode.ConfigIntegrity.BuildCanonical(Ver, "HW", "N", "2", 1, "", "1", "", "", "",
             MonkMode.ConfigIntegrity.BuildSlotCanonical(1, "1", "", "", "U", "", "", "", "", "SPEC", "ACTIVE", "", "", "", "", "", ""));
         Assert.NotEqual(global, perSlot);
         Assert.Contains("\nScheduleSpec=SPEC\n", global);
@@ -669,10 +671,56 @@ public class ConfigIntegrityTests
             "GuardArmedCount=1\n";
         var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
 
-        // The v11 reading of the SAME schedule-only file: the version tag moved AND the
-        // two global [Schedule] lines appeared, so the old stamp cannot validate it.
+        // The v12 reading of the SAME schedule-only file: the version tag moved AND the
+        // two global [Schedule] lines appeared (v11) and the TrustedUtc anchor (v12), so
+        // the old stamp cannot validate it.
         var currentCanonical = ScheduleOnlyCanonical(spec, "");
-        Assert.StartsWith("v11\n", currentCanonical);
+        Assert.StartsWith("v12\n", currentCanonical);
+        var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
+        Assert.False(macValid);
+
+        // ...and the freeze that follows: past sentinel + macValid False => Hold, never a
+        // lift. Arm blocks AFTER upgrading the binaries, not across an upgrade.
+        var asOf = new DateTime(2026, 6, 25, 12, 0, 0);
+        Assert.False(monkmode.Service1.EffectiveBlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, asOf, 5, macValid));
+        Assert.False(mm_guard.Guardian.EffectiveBlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, asOf, 5, macValid));
+    }
+
+    [Fact]
+    public void ForwardMigration_V11SchemaMacUnderCurrentCode_FailsClosed_FreezesBlock()
+    {
+        // The F77 instance of the R9 freeze: a block armed under v11 (the canonical WITH
+        // the global [Schedule] pair but WITHOUT the TrustedUtc anchor) running under v12
+        // binaries. Raw literal, never today's BuildCanonical, so it stays an honest
+        // record of the v11 wire format whatever the current one becomes.
+        //
+        // This one matters more than its siblings: v12's whole job is to let downtime
+        // shorten a block's remaining wall time, so a v11 config that somehow validated
+        // under v12 would be a config carrying an UNAUTHENTICATED anchor - and a forged
+        // anchor is an early-lift primitive (back-date it far enough and the first probe
+        // credits the difference). The freeze is what stops the anchor from ever being
+        // optional.
+        const string hw = "2026-06-25 11:00:00 a.m.";
+        const string now = "2026-06-25 12:00:00 p.m.";
+        const string spec = "v1;12345:0900-1700;sites=reddit.com;apps=";
+
+        var oldCanonical =
+            "v11\n" +
+            "HighWater=" + hw + "\n" +
+            "Now=" + now + "\n" +
+            "NextSlotId=\n" +
+            "SlotCount=0\n" +
+            "GuardHoldUntil=\n" +
+            "GuardArmedCount=1\n" +
+            "ScheduleSpec=" + spec + "\n" +
+            "ScheduleActiveUntil=\n";
+        var oldMac = MonkMode.ConfigIntegrity.ComputeConfigMac(oldCanonical, Key);
+
+        // The v12 reading of that same file adds the trailing TrustedUtc line (empty,
+        // because a v11 file has no anchor to read), so the old stamp cannot validate.
+        var currentCanonical = ScheduleOnlyCanonical(spec, "");
+        Assert.EndsWith("\nTrustedUtc=\n", currentCanonical);
+        Assert.NotEqual(oldCanonical, currentCanonical);
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
         Assert.False(macValid);
 

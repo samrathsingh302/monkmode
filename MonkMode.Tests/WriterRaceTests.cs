@@ -367,7 +367,7 @@ public class WriterRaceLiveTests
             var svc = Svc();
 
             monkmode.Service1.RestampSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
-            var wrote = svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:00", false);
+            var wrote = svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:00", "", false);
             monkmode.Service1.RestampSaveHookForTests = null;
 
             Assert.False(wrote);
@@ -391,7 +391,7 @@ public class WriterRaceLiveTests
             Assert.True(Arm("a.com").Ok);
             var svc = Svc();
             const string hw = "2026-08-19 12:00:00";
-            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), hw, false));
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), hw, "", false));
 
             var after = Reload();
             Assert.Equal(hw, new monkmode.Simple3Des("mm_textbox").DecryptData(after.GetKeyValue("Time", "HighWater")));
@@ -408,7 +408,7 @@ public class WriterRaceLiveTests
         {
             Assert.True(Arm("a.com").Ok);
             var before = Reload().GetKeyValue("Time", "HighWater");
-            Assert.True(Svc().RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "", false));
+            Assert.True(Svc().RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "", "", false));
             Assert.Equal(before, Reload().GetKeyValue("Time", "HighWater"));
         }
         finally { Wipe(); }
@@ -429,12 +429,12 @@ public class WriterRaceLiveTests
 
             Assert.True(mm_notify.Form1.SaveSharedConfigKey(MonkMode.Blocker.IniPath(), "Time", "TimeChanging", "yes"));
             // A raise the service still considers LIVE is left strictly alone.
-            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:00", false));
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:00", "", false));
             Assert.Equal("yes", Reload().GetKeyValue("Time", "TimeChanging"));
 
             // An ORPHAN is lowered, and the config stays MAC-valid across the write (the flag
             // is outside the canonical, so lowering it moves no MAC-covered byte).
-            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:10", true));
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-08-19 12:00:10", "", true));
             Assert.Equal("no", Reload().GetKeyValue("Time", "TimeChanging"));
             Assert.True(svc.PersistSlotFieldAt(MonkMode.Blocker.IniPath(), "1", "PartnerUnlockedAt", "", false));
         }

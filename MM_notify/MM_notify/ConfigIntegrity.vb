@@ -85,11 +85,28 @@ Friend Module ConfigIntegrity
     ' outside the canonical, blanking Spec in a text editor left macValid TRUE, the
     ' residual heartbeat saw no armed schedule beside a past-sentinel Until -> Lift ->
     ' TeardownAll: a live schedule block torn down MID-WINDOW. Under v9 the identical
-    ' edit failed the MAC and FROZE the block; v11 restores that).
+    ' edit failed the MAC and FROZE the block; v11 restores that) ->
+    ' v12 (F77: the GLOBAL [Time] TrustedUtc anchor - the UTC instant at which
+    ' [Time] HighWater was last known correct. It is what makes machine-OFF downtime
+    ' creditable WITHOUT handing B4 back: the credit is measured trustedUtcNow -
+    ' TrustedUtc against an EXTERNALLY corroborated clock, never DateTime.Now, so a
+    ' rolled-forward local clock earns nothing. MAC-covered because an editable anchor
+    ' IS an early-lift primitive - back-date it and the next probe credits the
+    ' difference - so it must fail closed exactly like HighWater itself).
     ' The four copies MUST share this value or the parties would stamp/verify
     ' different tags and every block would freeze;
     ' AllFourCopies_ShareTheSameSchemaVersion pins that.
-    Friend Const CurrentSchemaVersion As String = "v11"
+    Friend Const CurrentSchemaVersion As String = "v12"
+
+    ' F77: the storage format of the [Time] TrustedUtc anchor. INVARIANT + UTC, and
+    ' deliberately NOT the en-CA LOCAL format every other datetime in this config uses
+    ' - that difference is the whole point. The anchor's job is to survive a timezone
+    ' change: credit is computed as a DURATION between two UTC instants and then ADDED
+    ' to the local mark, so shifting the machine's timezone moves neither operand. A
+    ' local-format anchor would shift with the timezone and hand out free credit.
+    ' Lives here, in the one file all four assemblies share, so the CLI (which seeds
+    ' the anchor at arm) and the service (which advances it) can never diverge on it.
+    Friend Const TrustedUtcFormat As String = "yyyy-MM-dd HH:mm:ss"
 
     ' The hard ceiling on concurrent blocks (v1.1). Slots live in the ini as the
     ' fixed sections [Slot1]..[Slot8], keyed by POSITION (ids live in the slot's Id
@@ -241,7 +258,7 @@ Friend Module ConfigIntegrity
     ' printed count and the emitted blocks can never disagree. slotBlock stays LAST (it is
     ' the tail, not a line), so v11's two new fields append at the end of the header and
     ' parameter order still IS line order.
-    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal highWater As String, ByVal now As String, ByVal nextSlotId As String, ByVal slotCount As Integer, ByVal guardHoldUntil As String, ByVal guardArmedCount As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal slotBlock As String) As String
+    Friend Function BuildCanonical(ByVal schemaVersion As String, ByVal highWater As String, ByVal now As String, ByVal nextSlotId As String, ByVal slotCount As Integer, ByVal guardHoldUntil As String, ByVal guardArmedCount As String, ByVal scheduleSpec As String, ByVal scheduleActiveUntil As String, ByVal trustedUtc As String, ByVal slotBlock As String) As String
         Return schemaVersion & vbLf &
                "HighWater=" & highWater & vbLf &
                "Now=" & now & vbLf &
@@ -251,6 +268,7 @@ Friend Module ConfigIntegrity
                "GuardArmedCount=" & guardArmedCount & vbLf &
                "ScheduleSpec=" & scheduleSpec & vbLf &
                "ScheduleActiveUntil=" & scheduleActiveUntil & vbLf &
+               "TrustedUtc=" & trustedUtc & vbLf &
                slotBlock
     End Function
 

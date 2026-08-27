@@ -50,7 +50,7 @@ namespace MonkMode.Tests;
 public class SlotCanonicalTests
 {
     [Fact]
-    public void V11_ByteLiteral_TwoSlots()
+    public void V12_ByteLiteral_TwoSlots()
     {
         // The pinned v11 skeleton: a two-slot config - Slot1 ACTIVE (Until set, a
         // configured cool-off, a partner verifier), Slot2 PENDING (StartAt +
@@ -67,13 +67,18 @@ public class SlotCanonicalTests
         // FX1 (v11): the header carries the GLOBAL [Schedule] pair too - here a
         // schedule-only rule armed BESIDE the two slots, so the literal pins that the
         // global fields and the per-slot ones are distinct lines that cannot be confused.
+        // F77 (v12): and the TrustedUtc anchor, LAST in the header. Its value is pinned in
+        // the invariant-UTC format, visibly unlike every en-CA local datetime around it -
+        // that difference is load-bearing (a local-format anchor would move with the
+        // machine's timezone and hand out free downtime credit), so the literal pins it.
         var canonical = MonkMode.ConfigIntegrity.BuildCanonical(
-            "v11", "2026-08-09 3:00:00 p.m.", "2026-08-09 3:00:10 p.m.", "7", 2,
+            "v12", "2026-08-09 3:00:00 p.m.", "2026-08-09 3:00:10 p.m.", "7", 2,
             "2026-08-09 11:59:00 p.m.", "1",
-            "v1;12345:0900-1700;sites=news.com;apps=", "2026-08-09 5:00:00 p.m.", slot1 + slot2);
+            "v1;12345:0900-1700;sites=news.com;apps=", "2026-08-09 5:00:00 p.m.",
+            "2026-08-09 14:00:00", slot1 + slot2);
 
         Assert.Equal(
-            "v11\n" +
+            "v12\n" +
             "HighWater=2026-08-09 3:00:00 p.m.\n" +
             "Now=2026-08-09 3:00:10 p.m.\n" +
             "NextSlotId=7\n" +
@@ -82,6 +87,7 @@ public class SlotCanonicalTests
             "GuardArmedCount=1\n" +
             "ScheduleSpec=v1;12345:0900-1700;sites=news.com;apps=\n" +
             "ScheduleActiveUntil=2026-08-09 5:00:00 p.m.\n" +
+            "TrustedUtc=2026-08-09 14:00:00\n" +
             "Slot1.Id=5\n" +
             "Slot1.StartAt=\n" +
             "Slot1.DurationSeconds=\n" +
@@ -134,7 +140,7 @@ public class SlotCanonicalTests
         Assert.Equal(MonkMode.ConfigIntegrity.MaxSlots, monkmode.ConfigIntegrity.MaxSlots);
         Assert.Equal(MonkMode.ConfigIntegrity.MaxSlots, mm_guard.ConfigIntegrity.MaxSlots);
         Assert.Equal(MonkMode.ConfigIntegrity.MaxSlots, mm_notify.ConfigIntegrity.MaxSlots);
-        Assert.Equal("v11", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
+        Assert.Equal("v12", MonkMode.ConfigIntegrity.CurrentSchemaVersion);
     }
 
     [Theory]
@@ -352,10 +358,12 @@ internal static class OneSlot
         string until, string apps, string sites, string now, string highWater, string coolOffUntil,
         string partnerSalt, string partnerHash, string partnerUnlockedAt, string committed,
         string scheduleSpec, string scheduleActiveUntil, string coolOffDuration, string allSession,
-        string globalScheduleSpec = "", string globalScheduleActiveUntil = "") =>
+        string globalScheduleSpec = "", string globalScheduleActiveUntil = "",
+        string globalTrustedUtc = "") =>
         MonkMode.ConfigIntegrity.BuildCanonical(
             MonkMode.ConfigIntegrity.CurrentSchemaVersion, highWater, now, NextSlotId, 1,
             GuardHoldUntil, GuardArmedCount, globalScheduleSpec, globalScheduleActiveUntil,
+            globalTrustedUtc,
             MonkMode.ConfigIntegrity.BuildSlotCanonical(
                 1, Id, "", "", until, sites, apps, "", allSession,
                 scheduleSpec, scheduleActiveUntil, coolOffUntil, coolOffDuration,
