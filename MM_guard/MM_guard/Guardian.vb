@@ -70,21 +70,17 @@ Friend Module Guardian
         Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
     End Function
 
-    ' ---- Ledger 319 (30/08/2026): the cooling-off arm of the guardian's exit decision is
-    ' PERMANENTLY DISARMED, exactly as in the service ----
+    ' ---- Ledger 319 (30/08/2026) + its follow-up slice: the cooling-off arm of the guardian's
+    ' exit decision is GONE, exactly as in the service ----
     '
-    ' This was the guardian's parity copy of Service1.CoolOffElapsedTime, folded into its
-    ' EffectiveExit so a guardian tick in the stopMe() gap at the end of a cooling-off would
-    ' not read "Until not passed + macValid => still active" and SCM-resurrect the service.
-    ' There is no cooling-off any more - nothing writes a CoolOffUntil, and there is no gap to
-    ' cover - so the honest answer is always NO, returned WITHOUT LOOKING at either argument.
-    ' Both copies must stay byte-identical in BEHAVIOUR (parity-pinned like BlockHasExpired):
-    ' if the guardian still lifted on an elapsed deadline while the service ignored it, the
-    ' guardian would stand down under a block the service is still enforcing. Returning False
-    ' is also the over-blocking direction here - it can only keep the guardian guarding.
-    Friend Function CoolOffElapsedTime(ByVal coolOffUntilText As String, ByVal highWaterText As String) As Boolean
-        Return False
-    End Function
+    ' CoolOffElapsedTime was the guardian's parity copy of Service1.CoolOffElapsedTime, folded
+    ' into its EffectiveExit so a guardian tick in the stopMe() gap at the end of a cooling-off
+    ' would not read "Until not passed + macValid => still active" and SCM-resurrect the
+    ' service. There is no cooling-off any more - nothing writes a CoolOffUntil and there is no
+    ' gap to cover - so F79 hard-wired it False and this slice DELETES it, together with
+    ' EffectiveExit's coolOffUntilText parameter. Both copies stay byte-identical in BEHAVIOUR
+    ' (parity-pinned like BlockHasExpired): the term is absent on BOTH sides, so the guardian
+    ' can neither stand down under a block the service still enforces nor the reverse.
 
     ' C3b: is the block partner-code-unlocked? Byte-for-byte the same as
     ' Service1.PartnerUnlocked (parity-pinned): a non-empty [Partner] UnlockedAt
@@ -97,11 +93,10 @@ Friend Module Guardian
     End Function
 
     ' The ONE exit decision (the guardian's copy of Service1.EffectiveExit): the
-    ' block may end ONLY when the MAC is valid AND (it genuinely expired OR a
-    ' pending cooling-off deadline has been reached OR a partner code has unlocked
-    ' it), the time-based arms measured against the monotonic HighWater. The
-    ' guardian's stand-down gates on this, so it agrees with the service's lift
-    ' within one tick - and never resurrects a cooled-off OR code-unlocked block
+    ' block may end ONLY when the MAC is valid AND (it genuinely expired OR a partner
+    ' code has unlocked it), the time-based arm measured against the monotonic
+    ' HighWater. The guardian's stand-down gates on this, so it agrees with the
+    ' service's lift within one tick - and never resurrects a code-unlocked block
     ' (worst case, one bounce: a restarted service's OnStart immediately re-lifts,
     ' and the guardian's next read stands it down). C5b (SD1): also folds ScheduleActive
     ' in as a HARD HOLD - while a window is open the guardian keeps guarding and never
@@ -114,9 +109,10 @@ Friend Module Guardian
     ' derivation of scheduleArmed differs only in the CALLER (Program.vb uses the cheap
     ' Spec-non-empty over-approximation - no 4th ParseSchedule copy - the fail-SAFE direction:
     ' a garbage non-empty Spec only keeps the guardian watching a little longer, never an early
-    ' stand-down). Param order parity-pinned with Service1.EffectiveExit (until, coolOffUntil,
-    ' unlockedAt, scheduleActiveUntil, highWater, grace, macValid, scheduleArmed).
-    Friend Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleArmed As Boolean) As Boolean
+    ' stand-down). Param order parity-pinned with Service1.EffectiveExit (until, unlockedAt,
+    ' scheduleActiveUntil, highWater, grace, macValid, scheduleArmed) - the slot-2 coolOffUntil
+    ' parameter was deleted from BOTH copies in the ledger 319 follow-up.
+    Friend Function EffectiveExit(ByVal untilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleArmed As Boolean) As Boolean
         If Not macValid Then Return False
         ' C5b (SD1): an open scheduled window is a HARD HOLD - nothing lifts while it is open.
         If ScheduleActive(scheduleActiveUntilText, highWaterText) Then Return False
@@ -125,13 +121,13 @@ Friend Module Guardian
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
-        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText) OrElse PartnerUnlocked(unlockedAtText)
+        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse PartnerUnlocked(unlockedAtText)
     End Function
 
     ' ---- C5b: schedules (the guardian's half of the hold decision) ----
     '
     ' Byte-for-byte the same semantics as Service1.ScheduleElapsed / ScheduleActive
-    ' (parity-pinned, like CoolOffElapsedTime). LOAD-BEARING for the guardian in C5b
+    ' (parity-pinned, like BlockHasExpired). LOAD-BEARING for the guardian in C5b
     ' sub-slice (b): its stand-down gate must fold ScheduleActive in, or at a window's
     ' start it could stand down (Until passed + no cooling-off/code => "exited") and
     ' NOT restart a killed service mid-window, and at a window's close it could

@@ -992,11 +992,12 @@ public class ScheduleTickDecisionEndToEndTests
     }
 
     [Fact]
-    public void SD1_OpenWindow_HoldsThroughExpiredManual_ElapsedCoolOff_AndUnlockedCode()
+    public void SD1_OpenWindow_HoldsThroughExpiredManual_AndUnlockedCode()
     {
         // SD1 proven end-to-end through the b2 decision: with a window open, EffectiveExit
-        // HOLDS even though the manual block expired, cooling-off elapsed, and a code
-        // unlocked - the open window out-ranks all three lift triggers (design §6.2). Service
+        // HOLDS even though the manual block expired and a code unlocked - the open window
+        // out-ranks both lift triggers (design §6.2; the cooling-off third went with the
+        // ledger 319 follow-up's parameter removal). Service
         // and guardian agree (parity); removing the window LIFTS (the control).
         var t0 = T0();
         string hw = t0.ToString(EnCa);
@@ -1006,13 +1007,12 @@ public class ScheduleTickDecisionEndToEndTests
         Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
 
         string pastUntil = t0.AddHours(-1).ToString(EnCa);
-        string elapsedCoolOff = t0.AddHours(-1).ToString(EnCa);
         string unlockedCode = t0.AddMinutes(-5).ToString(EnCa);
 
-        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, activeUntil, hw, 5, macValid: true, scheduleArmed: false));
-        // Control: no window -> the same expired/elapsed/unlocked state LIFTS.
-        Assert.True(monkmode.Service1.EffectiveExit(pastUntil, elapsedCoolOff, unlockedCode, "", hw, 5, macValid: true, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, unlockedCode, activeUntil, hw, 5, macValid: true, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, unlockedCode, activeUntil, hw, 5, macValid: true, scheduleArmed: false));
+        // Control: no window -> the same expired/unlocked state LIFTS.
+        Assert.True(monkmode.Service1.EffectiveExit(pastUntil, unlockedCode, "", hw, 5, macValid: true, scheduleArmed: false));
     }
 }
 
@@ -1886,21 +1886,21 @@ public class ScheduleArmedLifecycleTests
         Assert.True(armed);
         Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
             monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: expiredSentinel,
-                coolOffElapsed: false, codeUnlocked: false,
+                codeUnlocked: false,
                 scheduleActive: monkmode.Service1.ScheduleActive("", hw), scheduleArmed: armed));
         // OnStart / guardian HOLD it alive (EffectiveExit False) - service and guardian agree.
-        Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: armed));
-        Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: armed));
+        Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", hw, 5, macValid: true, scheduleArmed: armed));
+        Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", hw, 5, macValid: true, scheduleArmed: armed));
 
         // schedule --clear -> Spec="" -> NOT armed -> the SAME state now tears down (Lift -> stopMe).
         bool clearedArmed = monkmode.Service1.ScheduleArmed(true, "");
         Assert.False(clearedArmed);
         Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
             monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: expiredSentinel,
-                coolOffElapsed: false, codeUnlocked: false,
+                codeUnlocked: false,
                 scheduleActive: monkmode.Service1.ScheduleActive("", hw), scheduleArmed: clearedArmed));
-        Assert.True(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: clearedArmed));
-        Assert.True(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: true, scheduleArmed: clearedArmed));
+        Assert.True(monkmode.Service1.EffectiveExit(Sentinel, "", "", hw, 5, macValid: true, scheduleArmed: clearedArmed));
+        Assert.True(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", hw, 5, macValid: true, scheduleArmed: clearedArmed));
     }
 
     // §4C OnStart trap: a schedule armed at 08:00 (past-Until sentinel, Spec present, the 09:00
@@ -1915,10 +1915,10 @@ public class ScheduleArmedLifecycleTests
         bool armed = monkmode.Service1.ScheduleArmed(true, LiveSpec);
         Assert.True(armed);
         // Held alive (grace 0, the stricter OnStart grace) despite the expired sentinel + no open window.
-        Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", storedHw, 0, macValid: true, scheduleArmed: armed));
-        Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", storedHw, 0, macValid: true, scheduleArmed: armed));
+        Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", storedHw, 0, macValid: true, scheduleArmed: armed));
+        Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", storedHw, 0, macValid: true, scheduleArmed: armed));
         // Control: the SAME boot state with NO schedule (not armed) WOULD stopMe (the sentinel is expired).
-        Assert.True(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", storedHw, 0, macValid: true, scheduleArmed: false));
+        Assert.True(monkmode.Service1.EffectiveExit(Sentinel, "", "", storedHw, 0, macValid: true, scheduleArmed: false));
     }
 
     // Regression: a plain MANUAL block has no Spec, so scheduleArmed is always False and behaviour
@@ -1931,8 +1931,8 @@ public class ScheduleArmedLifecycleTests
         string hw = now.ToString(EnCa);
         bool armed = monkmode.Service1.ScheduleArmed(true, "");   // no Spec -> not armed
         Assert.False(armed);
-        Assert.False(monkmode.Service1.EffectiveExit(now.AddHours(3).ToString(EnCa), "", "", "", hw, 5, macValid: true, scheduleArmed: armed));  // future Until holds
-        Assert.True(monkmode.Service1.EffectiveExit(now.AddHours(-1).ToString(EnCa), "", "", "", hw, 5, macValid: true, scheduleArmed: armed));  // past Until lifts
+        Assert.False(monkmode.Service1.EffectiveExit(now.AddHours(3).ToString(EnCa), "", "", hw, 5, macValid: true, scheduleArmed: armed));  // future Until holds
+        Assert.True(monkmode.Service1.EffectiveExit(now.AddHours(-1).ToString(EnCa), "", "", hw, 5, macValid: true, scheduleArmed: armed));  // past Until lifts
     }
 
     // A tampered/frozen config (macValid False) never reads as armed and never lifts regardless of
@@ -1944,11 +1944,11 @@ public class ScheduleArmedLifecycleTests
         string hw = now.ToString(EnCa);
         foreach (var armed in new[] { true, false })
         {
-            Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: false, scheduleArmed: armed));
-            Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", "", hw, 5, macValid: false, scheduleArmed: armed));
+            Assert.False(monkmode.Service1.EffectiveExit(Sentinel, "", "", hw, 5, macValid: false, scheduleArmed: armed));
+            Assert.False(mm_guard.Guardian.EffectiveExit(Sentinel, "", "", hw, 5, macValid: false, scheduleArmed: armed));
             Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
                 monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: true,
-                    coolOffElapsed: false, codeUnlocked: false, scheduleActive: false, scheduleArmed: armed));
+                    codeUnlocked: false, scheduleActive: false, scheduleArmed: armed));
         }
     }
 }

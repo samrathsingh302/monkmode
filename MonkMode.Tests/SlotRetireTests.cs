@@ -1052,7 +1052,8 @@ public class SlotRetireLiveTests
             var until = enc.DecryptData(after.GetKeyValue("Time", "Until"));
             Assert.Equal(MonkMode.Blocker.ScheduleOnlyExpiredUntil, until);
             var residual = monkmode.Service1.ClassifyHeartbeat(
-                true, monkmode.Service1.BlockHasExpired(until, DateTime.Now, 5), false, false, false, false);
+                macValid: true, blockExpired: monkmode.Service1.BlockHasExpired(until, DateTime.Now, 5),
+                codeUnlocked: false, scheduleActive: false, scheduleArmed: false);
             Assert.Equal(monkmode.Service1.TickAction.TeardownAll,
                 monkmode.Service1.ClassifyTick(true, 0, residual));
         }
@@ -1152,7 +1153,8 @@ public class SlotRetireLiveTests
             var until = new MonkMode.Simple3Des("mm_textbox").DecryptData(after.GetKeyValue("Time", "Until"));
             Assert.Equal(MonkMode.Blocker.ScheduleOnlyExpiredUntil, until);
             var residual = monkmode.Service1.ClassifyHeartbeat(
-                true, monkmode.Service1.BlockHasExpired(until, DateTime.Now, 5), false, false, false, false);
+                macValid: true, blockExpired: monkmode.Service1.BlockHasExpired(until, DateTime.Now, 5),
+                codeUnlocked: false, scheduleActive: false, scheduleArmed: false);
             Assert.Equal(monkmode.Service1.HeartbeatAction.Lift, residual);
             Assert.Equal(monkmode.Service1.TickAction.TeardownAll,
                 monkmode.Service1.ClassifyTick(true, SlotCount(after), residual));
@@ -1588,8 +1590,8 @@ public class SlotRetireLiveTests
             Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));
             Assert.True(monkmode.Service1.ScheduleArmed(true, after.GetKeyValue("Schedule", "Spec")));
             var residual = monkmode.Service1.ClassifyHeartbeat(
-                true, monkmode.Service1.BlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 5),
-                false, false, monkmode.Service1.ScheduleActive(activeUntil, hw), true);
+                macValid: true, blockExpired: monkmode.Service1.BlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 5),
+                codeUnlocked: false, scheduleActive: monkmode.Service1.ScheduleActive(activeUntil, hw), scheduleArmed: true);
             Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp, residual);
             Assert.Equal(monkmode.Service1.TickAction.Restamp,
                 monkmode.Service1.ClassifyTick(true, SlotCount(after), residual));

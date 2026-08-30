@@ -484,22 +484,21 @@ public class ConfigIntegrityTests
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(currentCanonical, oldMac, Key);
         Assert.False(macValid);
 
-        // End-to-end through the REAL exit gates: even with a genuinely past Until,
-        // an elapsed cooling-off deadline AND a (forged) code-unlock, macValid False
-        // keeps the block standing on the heartbeat, the shared exit decision and
-        // the guardian's stand-down - the freeze, never an early lift.
+        // End-to-end through the REAL exit gates: even with a genuinely past Until AND a
+        // (forged) code-unlock, macValid False keeps the block standing on the heartbeat,
+        // the shared exit decision and the guardian's stand-down - the freeze, never an
+        // early lift. (The elapsed cooling-off deadline this row used to carry as a third
+        // trigger went with the parameter in the ledger 319 follow-up.)
         var pastUntil = new DateTime(2020, 1, 1, 12, 0, 0).ToString(new CultureInfo("en-CA"));
-        var pastCoolOff = new DateTime(2020, 1, 2, 12, 0, 0).ToString(new CultureInfo("en-CA"));
         var forgedUnlock = new DateTime(2020, 1, 3, 12, 0, 0).ToString(new CultureInfo("en-CA"));
         var storedHw = new DateTime(2030, 1, 1, 12, 0, 0).ToString(new CultureInfo("en-CA"));
         Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
             monkmode.Service1.ClassifyHeartbeat(macValid,
                 monkmode.Service1.BlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5),
-                monkmode.Service1.CoolOffElapsedTime(pastCoolOff, storedHw),
                 monkmode.Service1.PartnerUnlocked(forgedUnlock),
                 monkmode.Service1.ScheduleActive("", storedHw), scheduleArmed: false));
-        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, pastCoolOff, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(pastUntil, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(pastUntil, forgedUnlock, "", storedHw, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -565,7 +564,6 @@ public class ConfigIntegrityTests
         Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
             monkmode.Service1.ClassifyHeartbeat(macValid,
                 monkmode.Service1.BlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5),
-                monkmode.Service1.CoolOffElapsedTime("", storedHw),
                 monkmode.Service1.PartnerUnlocked(""),
                 monkmode.Service1.ScheduleActive("", storedHw), scheduleArmed: false));
         Assert.False(monkmode.Service1.EffectiveBlockHasExpired(pastUntil, new DateTime(2030, 1, 1, 12, 0, 0), 5, macValid));
@@ -609,7 +607,7 @@ public class ConfigIntegrityTests
         var hw = asOf.ToString(new CultureInfo("en-CA"));
         var frozen = monkmode.Service1.ClassifyHeartbeat(macValid,
             monkmode.Service1.BlockHasExpired(pastSentinel, asOf, 5),
-            monkmode.Service1.CoolOffElapsedTime("", hw), monkmode.Service1.PartnerUnlocked(""),
+            monkmode.Service1.PartnerUnlocked(""),
             monkmode.Service1.ScheduleActive("", hw), monkmode.Service1.ScheduleArmed(macValid, ""));
         Assert.Equal(monkmode.Service1.HeartbeatAction.Hold, frozen);
         Assert.Equal(monkmode.Service1.TickAction.Hold, monkmode.Service1.ClassifyTick(macValid, 0, frozen));
@@ -618,7 +616,7 @@ public class ConfigIntegrityTests
         // valid, the identical state would have LIFTED and torn everything down.
         var v10Style = monkmode.Service1.ClassifyHeartbeat(true,
             monkmode.Service1.BlockHasExpired(pastSentinel, asOf, 5),
-            monkmode.Service1.CoolOffElapsedTime("", hw), monkmode.Service1.PartnerUnlocked(""),
+            monkmode.Service1.PartnerUnlocked(""),
             monkmode.Service1.ScheduleActive("", hw), monkmode.Service1.ScheduleArmed(true, ""));
         Assert.Equal(monkmode.Service1.HeartbeatAction.Lift, v10Style);
         Assert.Equal(monkmode.Service1.TickAction.TeardownAll, monkmode.Service1.ClassifyTick(true, 0, v10Style));

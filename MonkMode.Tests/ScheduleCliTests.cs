@@ -267,10 +267,10 @@ public class ScheduleWriteConfigTests
             Assert.True(monkmode.Service1.BlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 0));
             var hw = DateTime.Now.ToString(EnCa);
             Assert.False(monkmode.Service1.EffectiveExit(
-                MonkMode.Blocker.ScheduleOnlyExpiredUntil, "", "", "", hw, 0, macValid: true, scheduleArmed: true));
+                MonkMode.Blocker.ScheduleOnlyExpiredUntil, "", "", hw, 0, macValid: true, scheduleArmed: true));
             // Control: the SAME state with NO schedule (not armed) WOULD stopMe (sentinel is expired).
             Assert.True(monkmode.Service1.EffectiveExit(
-                MonkMode.Blocker.ScheduleOnlyExpiredUntil, "", "", "", hw, 0, macValid: true, scheduleArmed: false));
+                MonkMode.Blocker.ScheduleOnlyExpiredUntil, "", "", hw, 0, macValid: true, scheduleArmed: false));
         }
         finally { Wipe(iniPath, backupPath); }
     }
@@ -327,7 +327,7 @@ public class ScheduleWriteConfigTests
             Assert.True(CliMacValid(iniPath));
             Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
                 monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: true,
-                    coolOffElapsed: false, codeUnlocked: false, scheduleActive: false,
+                    codeUnlocked: false, scheduleActive: false,
                     scheduleArmed: monkmode.Service1.ScheduleArmed(true, "")));
         }
         finally { Wipe(iniPath, backupPath); }
@@ -365,7 +365,7 @@ public class ScheduleWriteConfigTests
             var hw = DateTime.Now.ToString(EnCa);
             var frozen = monkmode.Service1.ClassifyHeartbeat(macValid: false,
                 blockExpired: monkmode.Service1.BlockHasExpired(MonkMode.Blocker.ScheduleOnlyExpiredUntil, DateTime.Now, 5),
-                coolOffElapsed: false, codeUnlocked: false, scheduleActive: false,
+                codeUnlocked: false, scheduleActive: false,
                 scheduleArmed: monkmode.Service1.ScheduleArmed(false, ""));
             Assert.Equal(monkmode.Service1.HeartbeatAction.Hold, frozen);
             Assert.Equal(monkmode.Service1.TickAction.Hold, monkmode.Service1.ClassifyTick(false, 0, frozen));

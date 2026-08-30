@@ -360,14 +360,14 @@ public class GuardianServiceSlotParityTests
         // BETWEEN windows (ActiveUntil = ""): both halves now say "not held".
         Assert.False(monkmode.Service1.BlockHeld(sentinel, AsOf, Grace, true, "", Hw)
                      || monkmode.Service1.AnyBlockHeld(noSlots, AsOf, Grace, true, Hw));
-        Assert.True(mm_guard.Guardian.EffectiveExit(sentinel, "", "", "", Hw, Grace, true, false));
+        Assert.True(mm_guard.Guardian.EffectiveExit(sentinel, "", "", Hw, Grace, true, false));
         Assert.False(mm_guard.Guardian.AnyBlockHeld("", "", false, Hw, true));
 
         // INSIDE a window (ActiveUntil in the future): both still HOLD, unchanged by S4 - the
         // open window is a hard hold on the guardian's side and enforcementHeld on the
         // service's, which is the case that actually matters.
         Assert.True(monkmode.Service1.BlockHeld(sentinel, AsOf, Grace, true, Future, Hw));
-        Assert.False(mm_guard.Guardian.EffectiveExit(sentinel, "", "", Future, Hw, Grace, true, false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(sentinel, "", Future, Hw, Grace, true, false));
 
         // And a SLOT-borne schedule is untouched either way: its rule lives in the slot, so
         // the raw floor holds the guardian between windows exactly as before.

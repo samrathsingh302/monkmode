@@ -230,16 +230,11 @@ Public Class Service1
                 Dim newHw As String = storedHw
 
                 Dim macValidAtStart As Boolean = ConfigMacIsValidForIni(iniFile)
-                ' C2b: read the cooling-off deadline too - OnStart's one lift path
-                ' now goes through the shared EffectiveExit (expiry OR cooling-off
-                ' elapsed, both MAC-gated, both measured against the STORED
-                ' HighWater - OnStart never advances the mark). A reboot mid-
-                ' cooling-off therefore resumes the countdown off the persisted
-                ' mark: downtime is never credited (B4 semantic) = an over-wait,
-                ' never an early lift. An unreadable/absent CoolOffUntil reads
-                ' not-elapsed; a tampered one fails the MAC (freeze).
-                Dim coolOffEncAtStart As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
-                Dim coolOffAtStart As String = If(coolOffEncAtStart = "", "", encryptionW.DecryptData(coolOffEncAtStart))
+                ' Ledger 319 follow-up: OnStart no longer reads [Time] CoolOffUntil. Its one
+                ' lift path goes through the shared EffectiveExit, which stopped taking a
+                ' cooling-off term at F79, so reading and decrypting the field here bought
+                ' nothing. OnStart still never advances the mark: every exit it can reach is
+                ' measured against the STORED HighWater, so downtime is never credited.
                 ' C3b: read the MAC-covered [Partner] UnlockedAt (plaintext, as-stored)
                 ' so OnStart's one lift path also re-lifts a code-unlocked block. This
                 ' is the LOAD-BEARING re-lift: if the service was resurrected in the
@@ -303,7 +298,7 @@ Public Class Service1
                 ' matching OnStart's deliberately stricter expiry.
                 Dim slotsHoldAtStart As Boolean = AnyBlockHeld(slotsAtStart, storedHwAsOf, 0, macValidAtStart, storedHw)
 
-                If Not slotsHoldAtStart AndAlso EffectiveExit(encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), coolOffAtStart, unlockedAtStart, scheduleActiveAtStart, storedHw, 0, macValidAtStart, scheduleArmedAtStart) Then
+                If Not slotsHoldAtStart AndAlso EffectiveExit(untilText:=encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until")), unlockedAtText:=unlockedAtStart, scheduleActiveUntilText:=scheduleActiveAtStart, highWaterText:=storedHw, graceSeconds:=0, macValid:=macValidAtStart, scheduleArmed:=scheduleArmedAtStart) Then
                     ' The ONLY OnStart path that may tear the machine down, and it is now the
                     ' boot twin of ClassifyTick: NO slot may be holding (which folds in every
                     ' slot's own MAC-covered end, cooling-off, code and window) AND the v9
@@ -501,9 +496,10 @@ Public Class Service1
     '     CanonicalFromIni wrappers that feed them. Removing a MAC-covered field means a
     '     schema bump and a four-copy parity edit, and v12 (F77) is about to deploy - so the
     '     fields stay, written empty by the CLI, and mean nothing.
-    '   * CoolOffElapsedTime, hard-wired to False in both its copies (see its own comment).
-    '     It is still called from EffectiveExit, so even a config carrying a forged, elapsed
-    '     CoolOffUntil cannot lift: the reader ignores the value rather than trusting it.
+    '     (Ledger 319 follow-up: CoolOffElapsedTime, hard-wired to False in both copies, is
+    '     now DELETED along with the coolOffElapsed / coolOffUntilText parameters it fed. A
+    '     forged, elapsed CoolOffUntil still cannot lift - no exit gate reads the field at
+    '     all now, which is strictly stronger than a reader that ignores it.)
     '   * CoolOffRequestPrefix / CoolOffCancelPrefix, so the enumeration glob still finds a
     '     stale trigger from an older dist and PurgeUnaddressedTriggers can delete it.
 
@@ -890,10 +886,12 @@ Public Class Service1
             Dim schedEnc As String = ini.GetKeyValue(sec, "ScheduleActiveUntil")
             ' v1.1 S3b: the per-slot cooling-off deadline, decrypted with the same
             ' decrypt-BEFORE-macValid discipline as the other three datetimes - a garbled
-            ' ciphertext must THROW into the tick's Catch (fail-closed), never read as ""
-            ' (which would silently drop a pending cooling-off and, with it, nothing at all -
-            ' but the same read is what the RETIRE decision now consumes, so a silent "" is
-            ' the wrong kind of quiet).
+            ' ciphertext must THROW into the tick's Catch (fail-closed), never read as "".
+            ' Ledger 319 follow-up: the RETIRE decision no longer consumes it (SlotExitDue /
+            ' SlotEffectiveExit dropped the cool-off term), so s.CoolOffUntil is now carried
+            ' for the slot record only. The read and its decrypt STAY: SlotN.CoolOffUntil is
+            ' a MAC-covered canonical field, and a garbled ciphertext on a MAC-covered field
+            ' must still land in the fail-closed Catch rather than being quietly skipped.
             Dim coolOffEnc As String = ini.GetKeyValue(sec, "CoolOffUntil")
             s.StartAt = If(startEnc = "", "", encryptionW.DecryptData(startEnc))
             s.UntilText = If(untilEnc = "", "", encryptionW.DecryptData(untilEnc))
@@ -1678,10 +1676,6 @@ Public Class Service1
         Dim notifyFound As Boolean = False
         Dim iniProcessList As String = ""
         Dim iniUntil As String = ""
-        ' C2b: the decrypted [Time] CoolOffUntil for THIS tick ("" = no cooling-
-        ' off pending, also the fail-closed default when the read fails - an
-        ' unreadable deadline can never lift the block, only hold it).
-        Dim iniCoolOffUntil As String = ""
         ' C3b: the [Partner] UnlockedAt exit flag for THIS tick ("" = not code-
         ' unlocked, the fail-closed default - a tick that couldn't read it holds
         ' the block). Plaintext-as-stored (MAC-covered), not decrypted.
@@ -1760,10 +1754,9 @@ Public Class Service1
             End If
             iniUntil = encryptionW.DecryptData(iniFile.GetKeyValue("Time", "Until"))
             iniTimeChanging = iniFile.GetKeyValue("Time", "TimeChanging")
-            ' C2b: read the cooling-off deadline alongside Until (encrypted like
-            ' the other [Time] datetimes; absent/empty = none pending).
-            Dim coolOffEnc As String = iniFile.GetKeyValue("Time", "CoolOffUntil")
-            iniCoolOffUntil = If(coolOffEnc = "", "", encryptionW.DecryptData(coolOffEnc))
+            ' Ledger 319 follow-up: the tick no longer reads [Time] CoolOffUntil. It fed only
+            ' the cool-off term of ClassifyHeartbeat, which F79 disarmed and this slice
+            ' deleted. The field itself stays on disk (an UNCOVERED v9 residual - outside the v10+ canonical - written empty, read by nothing).
             ' C3b: read the [Partner] UnlockedAt exit flag (plaintext, as-stored -
             ' MAC-covered, not decrypted). Absent/"" = not code-unlocked.
             iniPartnerUnlockedAt = iniFile.GetKeyValue("Partner", "UnlockedAt")
@@ -2273,16 +2266,13 @@ Public Class Service1
             ' are MAC-covered, so a legit config must be re-stamped or it'd go stale);
             ' otherwise HOLD - never re-stamp over an invalid MAC. B4 unchanged:
             ' expiry is still decided off newHwAsOf (the trusted high-water mark).
-            ' C2b: cooling-off elapsed (against the SAME trusted HighWater) is the
-            ' second Lift trigger - a completed cooling-off converges on the same
-            ' stopMe() as natural expiry. Folded inside ClassifyHeartbeat's
-            ' macValid gate, so a tampered config can never cool off its way out.
             ' C3b: PartnerUnlocked (over the post-verify [Partner] UnlockedAt) is the
-            ' THIRD lift trigger, folded inside ClassifyHeartbeat's macValid gate - a
+            ' SECOND lift trigger, folded inside ClassifyHeartbeat's macValid gate - a
             ' tampered config can never code-unlock its way out (a raw-edited UnlockedAt
-            ' fails the MAC => Hold). Natural expiry, cooling-off and partner-code all
-            ' converge on the one Lift => stopMe().
-            ' C5b (SD1): an OPEN scheduled window OUT-RANKS all three lift triggers -
+            ' fails the MAC => Hold). Natural expiry and partner-code both converge on
+            ' the one Lift => stopMe(). (Ledger 319 removed cooling-off as a third; the
+            ' follow-up slice removed its parameter too.)
+            ' C5b (SD1): an OPEN scheduled window OUT-RANKS both lift triggers -
             ' ClassifyHeartbeat's scheduleActive arm Restamps (keeps HighWater advancing
             ' so the window counts down), never lifting, until the window's own monotonic
             ' close. C5b (c2): scheduleArmedNow (macValid AndAlso the Spec parses to >=1
@@ -2308,7 +2298,7 @@ Public Class Service1
             ' and with none armed it only withdraws a hold the empty slot set had already
             ' withdrawn. Its Restamp/Hold arms still HOLD - which is what keeps the v9
             ' schedule-only shape (SlotCount = 0, an armed [Schedule] Spec) working unchanged.
-            Dim residual As HeartbeatAction = ClassifyHeartbeat(macValid, BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), CoolOffElapsedTime(iniCoolOffUntil, newHw), PartnerUnlocked(iniPartnerUnlockedAt), ScheduleActive(iniScheduleActiveUntil, newHw), scheduleArmedNow)
+            Dim residual As HeartbeatAction = ClassifyHeartbeat(macValid:=macValid, blockExpired:=BlockHasExpired(iniUntil, newHwAsOf, ExpiryGraceSeconds), codeUnlocked:=PartnerUnlocked(iniPartnerUnlockedAt), scheduleActive:=ScheduleActive(iniScheduleActiveUntil, newHw), scheduleArmed:=scheduleArmedNow)
             Select Case ClassifyTick(macValid, slots.Count, residual)
                 Case TickAction.TeardownAll
                     ' P39: nothing is armed any more - config first, then the snapshot, then
@@ -2486,25 +2476,25 @@ Public Class Service1
     ' = Hold (the old code would have re-stamped here). Pure + Shared so the
     ' guardian-parity-style unit tests can pin it.
     '
-    ' C2b: coolOffElapsed (CoolOffElapsedTime against the SAME trusted HighWater)
-    ' is the SECOND lift trigger - natural expiry and a completed cooling-off
-    ' converge on the one Lift => stopMe() teardown. It is folded INSIDE the
-    ' macValid gate, so a tampered config can never cool off its way out
-    ' (macValid=False => Hold regardless of coolOffElapsed) - the lift condition
-    ' is exactly EffectiveExit, pinned by a test.
+    ' Ledger 319 follow-up (30/08/2026): the coolOffElapsed PARAMETER is gone. C2b added it
+    ' as a second lift trigger; F79 removed cooling-off as an exit and hard-wired its producer
+    ' to False, leaving an argument every caller had to pass and no caller could make True.
+    ' A permanently-False positional Boolean sitting between blockExpired and codeUnlocked is
+    ' a standing invitation to a silent argument shift, so it is deleted rather than pinned.
+    ' The decision is unchanged for every remaining input.
     '
     ' C3b: codeUnlocked (PartnerUnlocked over the MAC-covered [Partner] UnlockedAt)
-    ' is the THIRD lift trigger - a partner-verified early exit converges on the
+    ' is the SECOND lift trigger - a partner-verified early exit converges on the
     ' SAME stopMe(). Also folded INSIDE the macValid gate: a non-empty UnlockedAt
     ' is only trusted UNDER a valid MAC (forging it by raw edit fails the MAC =>
     ' Hold), so a code-unlock can only ever have come from the service verifying a
-    ' correct code. Lift <=> EffectiveExit still holds (now three OR-ed reasons).
+    ' correct code. Lift <=> EffectiveExit still holds (now two OR-ed reasons).
     '
     ' C5b (SD1): scheduleActive (ScheduleActive over the MAC-covered [Schedule]
     ' ActiveUntil) is a HARD HOLD that OUT-RANKS every lift trigger. While a window
     ' is open, keep RE-STAMPING (that arm is what advances HighWater, so the window
     ' counts down to its OWN monotonic close) and NEVER lift - not on expiry, not on
-    ' a completed cooling-off, not on a code. It mirrors EffectiveExit's
+    ' a code. It mirrors EffectiveExit's
     ' `If ScheduleActive Then Return False`, so Lift <=> EffectiveExit still holds
     ' (both now also gate on NOT scheduleActive). Only the window reaching its
     ' monotonic close (ScheduleElapsed => scheduleActive False) releases it.
@@ -2524,10 +2514,10 @@ Public Class Service1
     ' False` guard, so Lift <=> EffectiveExit still holds. INERT on every existing block
     ' until the CLI writes a Spec (c3): scheduleActive=False AND scheduleArmed=False => the
     ' arm is never consulted and behaviour is byte-identical to a manual block.
-    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean, ByVal scheduleArmed As Boolean) As HeartbeatAction
+    Friend Shared Function ClassifyHeartbeat(ByVal macValid As Boolean, ByVal blockExpired As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean, ByVal scheduleArmed As Boolean) As HeartbeatAction
         If Not macValid Then Return HeartbeatAction.Hold
         If scheduleActive Then Return HeartbeatAction.Restamp           ' SD1: an open window is a hard hold
-        If blockExpired OrElse coolOffElapsed OrElse codeUnlocked Then
+        If blockExpired OrElse codeUnlocked Then
             If scheduleArmed Then Return HeartbeatAction.Restamp        ' c2: BETWEEN windows of a live schedule - stay alive, don't tear down
             Return HeartbeatAction.Lift                                 ' torn down: schedule cleared (or none) + a manual exit is due
         End If
@@ -2586,27 +2576,21 @@ Public Class Service1
     ' into a deadline; with no request channel and no writer there is no deadline to compute,
     ' and a compile-time "shortest wait we will grant" describes a wait that no longer exists.
 
-    ' THE COOLING-OFF LIFT ARM, PERMANENTLY DISARMED (ledger 319, 30/08/2026).
+    ' THE COOLING-OFF LIFT ARM IS GONE (ledger 319, 30/08/2026; the plumbing removed in the
+    ' follow-up slice the same day). CoolOffElapsedTime used to answer "has the pending
+    ' cooling-off deadline been reached?" from the stored CoolOffUntil against the trusted B4
+    ' mark, and a True LIFTED the block through EffectiveExit / ClassifyHeartbeat. F79 removed
+    ' cooling-off as an exit and left the function returning False unconditionally; it is now
+    ' DELETED outright, together with the coolOffElapsed / coolOffUntilText parameters it fed
+    ' on EffectiveExit / ClassifyHeartbeat / ClassifySlot and the guardian's parity copy.
     '
-    ' This used to answer "has the pending cooling-off deadline been reached?" from the stored
-    ' CoolOffUntil against the trusted B4 mark, and a True here LIFTED the block through
-    ' EffectiveExit / ClassifyHeartbeat. Cooling-off was removed as an exit, so the honest
-    ' answer is now always NO - and it is returned WITHOUT LOOKING at either argument.
-    '
-    ' Why this shape rather than deleting the function and its parameter:
-    '   * it is the single choke point. Both callers (EffectiveExit here, and the guardian's
-    '     byte-identical copy) get their cool-off term from this one function, so hard-wiring
-    '     it False is what makes a forged, already-elapsed CoolOffUntil in a MAC-valid config
-    '     unable to lift anything. The value is not merely unwritten - it is unread.
-    '   * removing the parameter would mean re-shaping EffectiveExit / ClassifyHeartbeat /
-    '     ClassifySlot across two assemblies and ~130 positional call sites in the test suite.
-    '     Positional booleans shifted by hand is exactly how a lift gate gets silently
-    '     inverted, and the safety gained over "always False" is zero.
-    ' Parity: the guardian's copy carries the same body and the same comment. Pure + Shared.
-    ' Pinned by CoolOffTests (an elapsed deadline never lifts, through the real gates).
-    Friend Shared Function CoolOffElapsedTime(ByVal coolOffUntilText As String, ByVal highWaterText As String) As Boolean
-        Return False
-    End Function
+    ' What replaces the "single choke point" argument: there is no term to choke. A forged,
+    ' already-elapsed CoolOffUntil cannot lift anything because NO exit gate reads that field
+    ' at all - it is not merely answered False, it is not consulted. [Time] CoolOffUntil (an uncovered v9 residual) and
+    ' the per-slot SlotN.CoolOffUntil survive untouched (only the slot field is MAC-covered), written empty
+    ' (the canonical is unchanged, so every armed block keeps validating), and LoadSlots still
+    ' decrypts the per-slot one under the fail-closed decrypt-before-macValid discipline.
+    ' Pinned by CoolOffTests (a forged deadline never lifts, through the real gates).
 
     ' Ledger 319: the CoolOffAction enum and ClassifyCoolOffSignal (the request/cancel/commit/
     ' macValid matrix) are DELETED with the poll that consumed them. There is no trigger left
@@ -2752,12 +2736,14 @@ Public Class Service1
     ' Count > 0), the guardian a cheap over-approximation (Spec non-empty) - the difference is
     ' in the caller, so this function stays byte-parity with the guardian copy.
     '
-    ' C3b/C5b param order (until, coolOffUntil, unlockedAt, scheduleActiveUntil, highWater,
-    ' grace, macValid, scheduleArmed): unlockedAt sits after coolOffUntil (the early-exit
-    ' reasons together); scheduleActiveUntil (a HOLD input that needs highWater) sits just
-    ' before the highWater/grace time frame; scheduleArmed (the c2 HOLD, no time input of its
-    ' own) appends last - the frozen-design order, parity-pinned with the guardian copy.
-    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal coolOffUntilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleArmed As Boolean) As Boolean
+    ' C3b/C5b param order (until, unlockedAt, scheduleActiveUntil, highWater, grace, macValid,
+    ' scheduleArmed): unlockedAt (the one early-exit reason left) sits after until;
+    ' scheduleActiveUntil (a HOLD input that needs highWater) sits just before the
+    ' highWater/grace time frame; scheduleArmed (the c2 HOLD, no time input of its own)
+    ' appends last - parity-pinned with the guardian copy. Ledger 319 follow-up: coolOffUntil
+    ' sat in slot 2 and is DELETED - nothing writes it, no gate read it, and a dead positional
+    ' String between two live ones is how a caller silently shifts an argument.
+    Friend Shared Function EffectiveExit(ByVal untilText As String, ByVal unlockedAtText As String, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleArmed As Boolean) As Boolean
         If Not macValid Then Return False
         ' C5b (SD1): an open scheduled window is a HARD HOLD - nothing lifts while it is open.
         If ScheduleActive(scheduleActiveUntilText, highWaterText) Then Return False
@@ -2766,7 +2752,7 @@ Public Class Service1
         Dim asOf As DateTime = DateTime.MinValue
         Dim parsedHw As DateTime
         If DateTime.TryParse(highWaterText, New CultureInfo("en-CA"), DateTimeStyles.None, parsedHw) Then asOf = parsedHw
-        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse CoolOffElapsedTime(coolOffUntilText, highWaterText) OrElse PartnerUnlocked(unlockedAtText)
+        Return BlockHasExpired(untilText, asOf, graceSeconds) OrElse PartnerUnlocked(unlockedAtText)
     End Function
 
     ' ===== C5b: schedules (recurring wall-clock windows -> monotonic holds) =====
@@ -2786,13 +2772,13 @@ Public Class Service1
     ' enforcement behaviour (the fields read as "" on every existing block).
 
     ' Has the open scheduled window reached its monotonic close? The sibling of
-    ' CoolOffElapsedTime: scheduleActiveUntilText is the decrypted [Schedule] ActiveUntil
+    ' BlockHasExpired: scheduleActiveUntilText is the decrypted [Schedule] ActiveUntil
     ' ("" = no window open); highWaterText is the trusted B4 mark it is measured against
     ' - NEVER DateTime.Now, so a clock-forward can't reach the close early and a reboot
     ' pauses the countdown. Fail-closed on every axis: empty (no window) and any
     ' unparseable input read as NOT elapsed - a corrupted deadline or mark can only ever
     ' HOLD the window, never end it. Pure + Shared; byte-for-byte the same semantics as
-    ' the guardian copy (parity-pinned, like CoolOffElapsedTime).
+    ' the guardian copy (parity-pinned, like BlockHasExpired).
     Friend Shared Function ScheduleElapsed(ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
         If scheduleActiveUntilText = "" Then Return False
         Dim ca As New CultureInfo("en-CA")
@@ -3206,25 +3192,26 @@ Public Class Service1
     ' two gates drift apart. Restamp and Hold both mean "keep this slot"; only Lift retires
     ' it. Pure + Shared; the per-slot Retire <=> SlotEffectiveExit equivalence is pinned by a
     ' test that derives the two INDEPENDENTLY.
-    Friend Shared Function ClassifySlot(ByVal macValid As Boolean, ByVal slotExpired As Boolean, ByVal coolOffElapsed As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean, ByVal scheduleArmed As Boolean) As SlotAction
-        If ClassifyHeartbeat(macValid, slotExpired, coolOffElapsed, codeUnlocked, scheduleActive, scheduleArmed) = HeartbeatAction.Lift Then
+    Friend Shared Function ClassifySlot(ByVal macValid As Boolean, ByVal slotExpired As Boolean, ByVal codeUnlocked As Boolean, ByVal scheduleActive As Boolean, ByVal scheduleArmed As Boolean) As SlotAction
+        If ClassifyHeartbeat(macValid, slotExpired, codeUnlocked, scheduleActive, scheduleArmed) = HeartbeatAction.Lift Then
             Return SlotAction.Retire
         End If
         Return SlotAction.Hold
     End Function
 
-    ' The per-slot twin of EffectiveExit: may THIS slot end? Threads the slot's own four
+    ' The per-slot twin of EffectiveExit: may THIS slot end? Threads the slot's own three
     ' MAC-covered exit fields through the SHARED EffectiveExit body (so the service, the
     ' guardian's parity copy and OnStart still cannot drift), with the slot's own Spec
     ' driving the between-windows hold. Fail-closed on every axis by inheritance: an invalid
-    ' MAC, an unparseable Until, an unparseable cooling-off deadline and an open window all
-    ' read as "does not exit". A PENDING slot (Until = "") likewise never exits on time - but
-    ' it CAN exit on a verified partner code or a completed cooling-off, which is correct: a
-    ' block you scheduled for tomorrow must still be cancellable by the authorised exits.
+    ' MAC, an unparseable Until and an open window all read as "does not exit". A PENDING slot
+    ' (Until = "") likewise never exits on time - but it CAN exit on a verified partner code,
+    ' which is correct: a block you scheduled for tomorrow must still be cancellable by the
+    ' one authorised exit. Ledger 319 follow-up: slot.CoolOffUntil is no longer passed - the
+    ' fourth exit field stopped being an exit at F79.
     ' Pure + Shared.
     Friend Shared Function SlotEffectiveExit(ByVal slot As SlotState, ByVal highWaterText As String, ByVal graceSeconds As Long, ByVal macValid As Boolean) As Boolean
         If slot Is Nothing Then Return False
-        Return EffectiveExit(slot.UntilText, slot.CoolOffUntil, slot.PartnerUnlockedAt,
+        Return EffectiveExit(slot.UntilText, slot.PartnerUnlockedAt,
                              slot.ScheduleActiveUntil, highWaterText, graceSeconds, macValid,
                              ScheduleArmed(macValid, slot.ScheduleSpec))
     End Function
@@ -3235,7 +3222,6 @@ Public Class Service1
         If slot Is Nothing Then Return SlotAction.Hold
         Return ClassifySlot(macValid,
                             SlotExpired(slot, asOf, graceSeconds),
-                            CoolOffElapsedTime(slot.CoolOffUntil, highWaterText),
                             PartnerUnlocked(slot.PartnerUnlockedAt),
                             ScheduleActive(slot.ScheduleActiveUntil, highWaterText),
                             ScheduleArmed(macValid, slot.ScheduleSpec))

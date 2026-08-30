@@ -20,13 +20,14 @@
 //
 // SlotFoldTests, SlotRetireTests, SlotCanonicalTests, OvernightWindowTests and SlotCliTests
 // each pin their slice's chosen cases. This file pins the same functions by EXHAUSTION, on the
-// argument that a lift decision is not a place to sample: ClassifySlot has six boolean inputs
-// (64 states) and ClassifyTick three axes, so "all of them" is cheap and "the six we thought
+// argument that a lift decision is not a place to sample: ClassifySlot has five boolean inputs
+// (32 states, down from 64 since the ledger 319 follow-up deleted coolOffElapsed) and
+// ClassifyTick three axes, so "all of them" is cheap and "the five we thought
 // of" is not. Where exhaustion is impossible the pin is an ALGEBRAIC property - monotonicity,
 // subset inclusion, agreement between two independently-derived answers.
 //
 // WHAT THIS PINS (each with the failure it prevents):
-//   - ClassifySlot over all 64 states, against an independently written predicate. A drift
+//   - ClassifySlot over all 32 states, against an independently written predicate. A drift
 //     between the classifier and its stated rule is a wrong retire, i.e. a lift nobody asked
 //     for. The same for ClassifyTick over its whole grid, INCLUDING a negative slot count
 //     (unreachable today, but "> 0" is the guard, so 0 and -1 must both be shown safe).
@@ -144,21 +145,22 @@ public class SlotEdgeCaseTests
     // ---------------------------------------------------------------------------------
 
     [Fact]
-    public void ClassifySlot_AllSixtyFourStates_MatchTheStatedRule()
+    public void ClassifySlot_AllThirtyTwoStates_MatchTheStatedRule()
     {
         // The rule, written out independently of the implementation (which routes through
         // ClassifyHeartbeat): retire only when the MAC is valid, no window is open, an exit is
         // genuinely due, and no schedule is armed to keep the slot alive for tomorrow.
-        for (var bits = 0; bits < 64; bits++)
+        // (32 states, down from 64: the ledger 319 follow-up deleted the coolOffElapsed input.)
+        for (var bits = 0; bits < 32; bits++)
         {
-            bool macValid = (bits & 1) != 0, expired = (bits & 2) != 0, coolOff = (bits & 4) != 0,
-                 code = (bits & 8) != 0, windowOpen = (bits & 16) != 0, armed = (bits & 32) != 0;
+            bool macValid = (bits & 1) != 0, expired = (bits & 2) != 0,
+                 code = (bits & 4) != 0, windowOpen = (bits & 8) != 0, armed = (bits & 16) != 0;
 
-            var expected = macValid && !windowOpen && (expired || coolOff || code) && !armed
+            var expected = macValid && !windowOpen && (expired || code) && !armed
                 ? monkmode.Service1.SlotAction.Retire
                 : monkmode.Service1.SlotAction.Hold;
 
-            Assert.Equal(expected, monkmode.Service1.ClassifySlot(macValid, expired, coolOff, code, windowOpen, armed));
+            Assert.Equal(expected, monkmode.Service1.ClassifySlot(macValid, expired, code, windowOpen, armed));
         }
     }
 
@@ -167,19 +169,19 @@ public class SlotEdgeCaseTests
     {
         // Restated as three standalone sweeps because each is a separate fail-closed promise
         // and a truth table can go green while one of them is only accidentally satisfied.
-        for (var bits = 0; bits < 64; bits++)
+        for (var bits = 0; bits < 16; bits++)
         {
-            bool expired = (bits & 2) != 0, coolOff = (bits & 4) != 0, code = (bits & 8) != 0,
-                 windowOpen = (bits & 16) != 0, armed = (bits & 32) != 0;
+            bool expired = (bits & 1) != 0, code = (bits & 2) != 0,
+                 windowOpen = (bits & 4) != 0, armed = (bits & 8) != 0;
             // (a) an invalid MAC freezes, whatever else is true.
             Assert.Equal(monkmode.Service1.SlotAction.Hold,
-                         monkmode.Service1.ClassifySlot(false, expired, coolOff, code, windowOpen, armed));
+                         monkmode.Service1.ClassifySlot(false, expired, code, windowOpen, armed));
             // (b) an OPEN window outranks every exit reason (SD1).
             Assert.Equal(monkmode.Service1.SlotAction.Hold,
-                         monkmode.Service1.ClassifySlot(true, expired, coolOff, code, true, armed));
+                         monkmode.Service1.ClassifySlot(true, expired, code, true, armed));
             // (c) BETWEEN windows of an armed schedule, an otherwise-due exit still holds (c2).
             Assert.Equal(monkmode.Service1.SlotAction.Hold,
-                         monkmode.Service1.ClassifySlot(true, expired, coolOff, code, false, true));
+                         monkmode.Service1.ClassifySlot(true, expired, code, false, true));
         }
     }
 
@@ -247,6 +249,9 @@ public class SlotEdgeCaseTests
         // computed down DIFFERENT paths (ClassifyHeartbeat vs EffectiveExit), so a divergence
         // is exactly the "two gates drift apart" failure the split was designed to avoid, and
         // it would show up as a slot that reports it may not exit and is retired anyway.
+        // The coolOffs axis is KEPT even though no gate reads slot.CoolOffUntil any more: the
+        // field is still on the slot record, so the matrix now also pins that its value cannot
+        // move either decision.
         var untils = new[] { "", Past, Future, "not-a-date", monkmode.Service1.ScheduleOnlyExpiredUntil };
         var coolOffs = new[] { "", Past, Future, "garbage" };
         var unlockeds = new[] { "", "2026-08-12 11:00:00", "   " };

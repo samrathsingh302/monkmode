@@ -90,7 +90,7 @@ public class CommitBlockEndToEndTests
         var unlocked = CommittedCanonical(unlockedAt, "yes");
         var unlockedMacValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlocked, MonkMode.ConfigIntegrity.ComputeConfigMac(unlocked, Key), Key);
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, unlockedMacValid, scheduleArmed: false));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, unlockedAt, "", HwText, 5, unlockedMacValid, scheduleArmed: false));
     }
 
     // LEDGER 319: the C4 asymmetry is GONE because the weaker half of it is gone. There used to
@@ -108,11 +108,19 @@ public class CommitBlockEndToEndTests
         Assert.True(macValid);
         Assert.False(monkmode.Service1.IsCommitted("no"));
 
-        // A long-elapsed cooling-off deadline, a valid MAC, an unexpired block: no exit.
+        // A valid MAC, an unexpired block, an uncommitted flag: no exit. The follow-up slice
+        // removed the cool-off argument from both gates, so the deadline that used to be fed
+        // in here cannot even be offered; it is fed to the per-slot gate instead, which is the
+        // only one that still accepts it (CoolOffTests.APerSlotElapsedDeadline_...).
         var elapsedCoolOff = Hw.AddHours(-5).ToString(EnCa);
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(elapsedCoolOff, HwText));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, elapsedCoolOff, "", "", HwText, 5, macValid, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, elapsedCoolOff, "", "", HwText, 5, macValid, scheduleArmed: false));
+        var slot = new monkmode.Service1.SlotState
+        {
+            Id = "1", UntilText = FutureUntil, CoolOffUntil = elapsedCoolOff, Committed = "no",
+        };
+        Assert.Equal(monkmode.Service1.SlotAction.Hold,
+            monkmode.Service1.SlotExitDue(slot, Hw, 5, macValid, HwText));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -130,7 +138,7 @@ public class CommitBlockEndToEndTests
         Assert.False(macValid);   // the un-commit broke the MAC
 
         // No exit gate lifts it (frozen, not lifted).
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]

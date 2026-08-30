@@ -26,6 +26,14 @@ replacements; git hid it (`core.autocrlf=true` normalises the diff), so the tell
 `grep -vc $'\r'` (under Git Bash that reported 0 on a file that was entirely LF, 30/08/2026):
 `python -c "b=open(F,'rb').read(); print(b.count(b'\n')-b.count(b'\r\n'))"`.
 
+The Python shape has a **second, independent trap that `newline=''` does not cover**: the
+codec. On 30/08/2026 (ledger 319 follow-up) a two-site replace on `MM_guard/Program.vb` used
+`newline=''` correctly — endings survived — but `encoding='utf-8-sig'` on the **write**, which
+ADDS `efbbbf` to a file that had no BOM. It showed as a phantom first-line change in
+`git diff` (`-'    Copyright` / `+﻿'    Copyright`). `utf-8-sig` is only safe to *read*
+with; write back with plain `utf-8`. Simpler rule: do not script source edits at all — that
+pass should have been two Edit calls.
+
 **CORRECTION (30/08/2026): LF endings are NOT by themselves evidence of corruption in this
 repo.** Its working tree is genuinely MIXED — 64 CRLF vs 27 LF source files with nothing
 touched — and `core.autocrlf=true` normalises every blob to LF, so a whole-file ending flip is

@@ -399,7 +399,7 @@ public class PartnerCodeEndToEndTests
         // 1. Armed: a valid MAC over the [Partner] verifier, UnlockedAt="" => no exit.
         var armedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(ArmedCanonical(), Key);
         Assert.True(MonkMode.ConfigIntegrity.ConfigMacIsValid(ArmedCanonical(), armedMac, Key));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid: true, scheduleArmed: false));
 
         // 2. The service verifies the correct candidate against the stored verifier.
         Assert.True(MonkMode.ConfigIntegrity.PartnerCodeMatches(Code, SaltB64, HashB64));
@@ -412,16 +412,14 @@ public class PartnerCodeEndToEndTests
         Assert.True(macValid);
 
         // 4. The block now lifts on the heartbeat, the shared exit decision AND the
-        //    guardian - even though Until is far in the future and no cooling-off is
-        //    pending. All three converge on stopMe().
+        //    guardian - even though Until is far in the future. All three converge on stopMe().
         Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
             monkmode.Service1.ClassifyHeartbeat(macValid,
                 monkmode.Service1.BlockHasExpired(FutureUntil, Hw, 5),
-                monkmode.Service1.CoolOffElapsedTime("", HwText),
                 monkmode.Service1.PartnerUnlocked(unlockedAt),
                 monkmode.Service1.ScheduleActive("", HwText), scheduleArmed: false));
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
-        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -434,7 +432,7 @@ public class PartnerCodeEndToEndTests
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlockedCanonical, MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key), Key);
 
-        var blockActive = !mm_guard.Guardian.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, macValid, scheduleArmed: false);
+        var blockActive = !mm_guard.Guardian.EffectiveExit(FutureUntil, unlockedAt, "", HwText, 5, macValid, scheduleArmed: false);
         Assert.False(blockActive);
         Assert.False(mm_guard.Guardian.ShouldRestartService(blockActive, serviceRunning: false));
     }
@@ -445,8 +443,8 @@ public class PartnerCodeEndToEndTests
         // A miss never sets UnlockedAt, so the config stays armed (UnlockedAt="") and
         // the block holds on every gate - fully enforced.
         Assert.False(MonkMode.ConfigIntegrity.PartnerCodeMatches("ZZZZZ-99999", SaltB64, HashB64));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid: true, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
@@ -468,7 +466,7 @@ public class PartnerCodeEndToEndTests
         // exit gate never lifts.
         Assert.Equal(monkmode.Service1.PartnerCodeAction.Ignore,
             monkmode.Service1.ClassifyPartnerCodeSignal(codePresent: true, candidateNonEmpty: true, alreadyUnlocked: false, macValid: macValid));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -481,8 +479,8 @@ public class PartnerCodeEndToEndTests
         var forged = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, Hw.ToString(EnCa), "no", "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(forged, armedMac, Key);
         Assert.False(macValid);
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", Hw.ToString(EnCa), "", HwText, 5, macValid, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, "", Hw.ToString(EnCa), "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, Hw.ToString(EnCa), "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, Hw.ToString(EnCa), "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
@@ -514,7 +512,7 @@ public class PartnerCodeEndToEndTests
         var unlockedCanonical = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, "yes", "", "", "", "");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             unlockedCanonical, MonkMode.ConfigIntegrity.ComputeConfigMac(unlockedCanonical, Key), Key);
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, unlockedAt, "", HwText, 5, macValid, scheduleArmed: false));
     }
 }
 
