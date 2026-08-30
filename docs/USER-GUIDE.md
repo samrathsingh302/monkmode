@@ -391,11 +391,18 @@ monkmode status
 ```
 MonkMode: 3 blocks active
  Id  State     Ends / Starts             Sites Apps URLs  Exit
-  1  ACTIVE    2026-08-26 22:04             11    0    0  code+wait
+  1  ACTIVE    2026-08-26 22:04             11    0    0  code+wait  (~5h 12m of active time left)
      Exit:  run 'monkmode unblock --id 1' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.
-  2  ACTIVE    2026-08-26 16:04              0    1    0  code+wait
+  2  ACTIVE    2026-08-26 16:04              0    1    0  code+wait  (~1h 42m of active time left)
      ...
+  Note: the end time counts machine-ON time only - sleep or shutdown pushes it later by the same amount.
 ```
+
+The **Ends** column is a wall-clock stamp, but a block's timer only runs while
+the computer is on — exactly like the cooling-off wait. So the trailing
+`(~5h 12m of active time left)` is the number that decides when it lifts: shut
+the laptop down for two hours and the block ends two hours later than the stamp
+says. Nothing is lost and nothing is gained by turning the machine off.
 
 When more than one block is running, commands that act on *one* block need
 `--id <number>` (the Id column):

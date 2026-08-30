@@ -597,6 +597,9 @@ Module Program
                 Console.WriteLine(FormatSlotRow(v))
                 Console.WriteLine(SlotExitIndent & FormatSlotExitLine(v))
             Next
+            ' 313(a): one line, under the whole table, for the thing the "Ends" column cannot say
+            ' by itself - those stamps advance on machine-ON time.
+            If AnyActiveSlot(views) Then Console.WriteLine(FormatMonotonicNoteLine())
             ' v1.1 S7b (P48): what the blocks have actually stopped today, from the
             ' display-only sidecars. "" (printed as nothing) on a quiet day or when the
             ' sidecar is absent/corrupt - `status` must never grow a row of zeros, and it
@@ -609,7 +612,7 @@ Module Program
             ' why none of it can be acted on.
             If Not macValid Then
                 Console.WriteLine("")
-                Console.WriteLine("  NOTE: the stored configuration failed its integrity check, so MonkMode is FROZEN: nothing lifts, and the exit lines above cannot be acted on until the blocks end and you re-arm.")
+                Console.WriteLine(ConfigFrozenNoteLine())
             End If
             ' The table is read off the CONFIG, which stays true whether or not the service is
             ' up - so say which half is paused rather than implying either "all fine" or
@@ -617,7 +620,7 @@ Module Program
             ' stops is app-kill, self-repair and the countdown to the next exit.
             If Not Blocker.ServiceIsRunning() Then
                 Console.WriteLine("")
-                Console.WriteLine("  NOTE: the MonkMode service isn't running at the moment, so app-kill and self-repair are paused (the blocked sites stay in your hosts file). It starts itself again automatically.")
+                Console.WriteLine(ServicePausedNoteLine())
             End If
             Return 0
         End If
@@ -640,10 +643,20 @@ Module Program
             Console.WriteLine("  Windows open automatically at their times; run 'monkmode schedule --show' for detail.")
             Return 0
         End If
-        Dim ends As DateTime = Blocker.ActiveBlockEnd()
-        If Blocker.ServiceIsRunning() AndAlso ends > DateTime.Now Then
+        ' 313(a): the v9 fallback used to ask `ends > DateTime.Now`, which is NOT how expiry is
+        ' decided. After a shutdown or a long sleep the wall clock runs past Until while the
+        ' monotonic mark lags behind it, so this branch printed "no active block (service
+        ' installed but idle)" over a block the service was still fully enforcing. Both the
+        ' decision and the remaining now come off the mark (Blocker.LegacyBlockIsActive /
+        ' FormatRemainingParenthetical), so the idle line is reached only when the block is
+        ' genuinely over or none is configured. The old `ServiceIsRunning()` conjunct is gone from
+        ' the DECISION for the same reason it is not in the slot table's: a stopped service does
+        ' not mean nothing is blocked (the hosts entries survive it, and it restarts itself). It
+        ' is reported by the same paused NOTE the table prints, below.
+        Dim legacy As Blocker.LegacyView = Blocker.ReadLegacyView()
+        If Blocker.LegacyBlockIsActive(legacy.MacValid, legacy.Ends, legacy.Mark) Then
             Console.WriteLine("MonkMode: ACTIVE")
-            Console.WriteLine("  Ends:  " & ends.ToString() & " (" & Humanize(ends.Subtract(DateTime.Now)) & " left)")
+            Console.WriteLine("  Ends:  " & legacy.Ends.ToString() & " " & FormatRemainingParenthetical(legacy.Ends, legacy.Mark))
             Dim sites As String = Blocker.BlockedSites()
             Dim apps As String = Blocker.BlockedApps()
             If sites <> "" Then Console.WriteLine("  Sites: " & sites.Replace(";", " "))
@@ -651,6 +664,17 @@ Module Program
             ' D5: the exit story - committed (code-only), cooling-off pending (monotonic remaining), or
             ' the self-serve wait + code. A read-only, MAC-gated, best-effort view (never mutates state).
             Console.WriteLine("  " & FormatCoolOffStatusLine(Blocker.BlockIsCommitted(), Blocker.CoolOffPendingRemaining()))
+            Console.WriteLine(FormatMonotonicNoteLine())
+            ' B7, as in the table above: a frozen config is why the end stamp and the remaining
+            ' cannot be trusted or acted on - it reads as ACTIVE precisely because nothing lifts.
+            If Not legacy.MacValid Then
+                Console.WriteLine("")
+                Console.WriteLine(ConfigFrozenNoteLine())
+            End If
+            If Not Blocker.ServiceIsRunning() Then
+                Console.WriteLine("")
+                Console.WriteLine(ServicePausedNoteLine())
+            End If
         Else
             Console.WriteLine("MonkMode: no active block (service installed but idle).")
         End If
@@ -1540,11 +1564,80 @@ Module Program
 
     Friend Function FormatSlotRow(ByVal v As Blocker.SlotView) As String
         If v Is Nothing Then Return ""
-        Return FormatSlotRowCells(v.Id, v.State, FormatSlotWhenCell(v),
-                                  v.Sites.ToString(CultureInfo.InvariantCulture),
-                                  v.Apps.ToString(CultureInfo.InvariantCulture),
-                                  v.Urls.ToString(CultureInfo.InvariantCulture),
-                                  SlotExitToken(v))
+        Dim row As String = FormatSlotRowCells(v.Id, v.State, FormatSlotWhenCell(v),
+                                               v.Sites.ToString(CultureInfo.InvariantCulture),
+                                               v.Apps.ToString(CultureInfo.InvariantCulture),
+                                               v.Urls.ToString(CultureInfo.InvariantCulture),
+                                               SlotExitToken(v))
+        ' 313(a): the real remaining rides on the END of the row, after the Exit token, so the
+        ' fixed-width columns above it keep lining up (a variable-length cell anywhere earlier
+        ' would push the counts around on every ACTIVE row - the PENDING deviation, but for the
+        ' common case). Empty for every row that has nothing to measure.
+        Dim remaining As String = FormatSlotRemainingCell(v)
+        If remaining = "" Then Return row
+        Return row & SlotColGap & remaining
+    End Function
+
+    ' 313(a): the trailing cell - how much time an ACTIVE block ACTUALLY has left. The "Ends"
+    ' column is a wall-clock moment, and since expiry is decided against the monotonic
+    ' [Time] HighWater (which only advances while the service runs), every hour the machine
+    ' spends off or asleep pushes the real end past that stamp. This is deadline - HighWater:
+    ' the same subtraction the tray notifier already shows, and the one the service enforces.
+    ' Only ACTIVE rows have it: a PENDING block has no end yet and a SCHEDULE window's cell
+    ' already says what it is doing. "" when there is nothing to measure.
+    Friend Function FormatSlotRemainingCell(ByVal v As Blocker.SlotView) As String
+        If v Is Nothing Then Return ""
+        If v.State <> Blocker.SlotStateActive Then Return ""
+        If v.Ends = DateTime.MinValue Then Return ""
+        Return FormatRemainingParenthetical(v.Ends, v.Mark)
+    End Function
+
+    ' The wording itself, shared by the slot table and the v9 fallback line so `status` says the
+    ' remaining ONE way. mark is the MAC-gated [Time] HighWater (MinValue = unreadable or a
+    ' frozen config): a display path must never invent a countdown out of values it could not
+    ' read, so that degrades to a placeholder - never a wrong number and never an exception.
+    ' A remaining that has already run out reads as due to lift rather than "0 minutes": the
+    ' service tears the block down within a tick of that moment.
+    Friend Function FormatRemainingParenthetical(ByVal ends As DateTime, ByVal mark As DateTime) As String
+        If mark = DateTime.MinValue Then Return "(active time left unknown)"
+        Dim remaining As TimeSpan = ends - mark
+        If remaining.TotalSeconds <= 0 Then Return "(due to lift)"
+        Return "(~" & Humanize(remaining) & " of active time left)"
+    End Function
+
+    ' 313(a): the ONE caveat under the table. Printed whenever something is ACTIVE, because the
+    ' "Ends" stamp on those rows is the one number a user acts on and it is NOT a promise about
+    ' the wall clock - a block armed for 2h that spends 8h shut down ends 8h later than it says.
+    Friend Function FormatMonotonicNoteLine() As String
+        Return "  Note: the end time counts machine-ON time only - sleep or shutdown pushes it later by the same amount."
+    End Function
+
+    ' The frozen-config NOTE, one literal for both `status` paths. B7: never render a reassuring
+    ' exit story over a config that failed its integrity check - the countdowns and exit lines
+    ' above it are suppressed (MAC-gated), and this says plainly why none of it can be acted on.
+    Friend Function ConfigFrozenNoteLine() As String
+        Return "  NOTE: the stored configuration failed its integrity check, so MonkMode is FROZEN: nothing lifts, and the exit lines above cannot be acted on until the blocks end and you re-arm."
+    End Function
+
+    ' The stopped-service NOTE, one literal for both `status` paths (the slot table and the v9
+    ' fallback): the table/line is read off the CONFIG, which stays true whether or not the
+    ' service is up, so say which half is paused rather than implying either "all fine" or
+    ' "nothing is blocked". The hosts block itself survives a stopped service; what stops is
+    ' app-kill, self-repair and the countdown to the next exit. The wording is echoed by
+    ' PrintTroubleshooting, so it is Friend + pinned rather than typed twice.
+    Friend Function ServicePausedNoteLine() As String
+        Return "  NOTE: the MonkMode service isn't running at the moment, so app-kill and self-repair are paused (the blocked sites stay in your hosts file). It starts itself again automatically."
+    End Function
+
+    ' Whether that note is owed: only an ACTIVE row has an end stamp it is about (a PENDING
+    ' block has not started and a SCHEDULE window opens and closes on the wall clock). Pure +
+    ' null-safe, so the condition is pinned without an ini.
+    Friend Function AnyActiveSlot(ByVal views As List(Of Blocker.SlotView)) As Boolean
+        If views Is Nothing Then Return False
+        For Each v As Blocker.SlotView In views
+            If v IsNot Nothing AndAlso v.State = Blocker.SlotStateActive Then Return True
+        Next
+        Return False
     End Function
 
     ' The "Ends / Starts" cell. ACTIVE shows its end; PENDING shows when it STARTS plus the

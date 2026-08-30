@@ -5066,15 +5066,37 @@ Public Class Service1
         Return False
     End Function
 
-    Private Sub stopMe()
+    ' 313(b): the hosts half of the genuine-expiry teardown, split out of stopMe() with an
+    ' explicit path so the unit tests can drive it against a temp file (the
+    ' ReassertHostsFailClosed / ProcessAddToHosts pattern; fence: unit tests never touch the
+    ' real hosts). Reached ONLY from stopMe(), i.e. only from ClassifyTick's Lift arm - a
+    ' MAC-valid config whose end time has genuinely passed.
+    '
+    ' THE ONE BEHAVIOUR CHANGE (Samrath, 30/08/2026): after a genuine expiry hosts is left with
+    ' NORMAL attributes, not read-only. The read-only bit is enforcement - the DNS-client lock -
+    ' and once our marker block is gone there is nothing left to enforce; leaving it set made
+    ' every later hosts writer (Tailscale, a DNS tool) fail until a manual `attrib -r`. The CLI
+    ' teardown has always ended this way (Blocker.ClearReadOnly), so this is the service's
+    ' natural expiry matching it. ONLY this path changes: the per-tick B2 self-heal, OnStart and
+    ' the crash backstop still re-assert read-only, because those run while a block STANDS.
+    '
+    ' FAIL-CLOSED ON FAILURE: the attribute is cleared only AFTER the strip has been written.
+    ' If the write throws, hosts still carries the block, so it is re-locked (best-effort) and
+    ' the exception is rethrown exactly as before - a still-blocked, WRITABLE hosts is the one
+    ' state this must never leave behind. The no-marker branch is untouched (there is nothing of
+    ' ours to strip, so today's re-assert stands).
+    '
+    ' Returns True when the marker block was found and stripped - the caller then marks the
+    ' config Done, exactly as before.
+    Friend Shared Function StripHostsBlockAtExpiry(ByVal hostsPath As String) As Boolean
 
         Dim fileReader As String = ""
         Dim original As String = ""
         Dim hostsFileNeedsRemoval As Boolean = False
 
-        If My.Computer.FileSystem.FileExists(hostDirS) Then
-            SetAttr(hostDirS, vbNormal)
-            fileReader = My.Computer.FileSystem.ReadAllText(hostDirS)
+        If My.Computer.FileSystem.FileExists(hostsPath) Then
+            SetAttr(hostsPath, vbNormal)
+            fileReader = My.Computer.FileSystem.ReadAllText(hostsPath)
             If fileReader.Contains("#### MonkMode Entries ####") Then
                 hostsFileNeedsRemoval = True
             End If
@@ -5085,18 +5107,35 @@ Public Class Service1
 
             ' C1: atomic write (temp + rename) so a crash while stripping our block
             ' at expiry can never blank hosts or lose the user's own entries
-            ' (read-only was cleared above). SetAttr below keeps the existing
-            ' expiry behaviour - it is NOT a Try/Finally re-assert (which would
-            ' wrongly lock a clean hosts on the early-return paths).
-            AtomicHosts.WriteAtomic(hostDirS, original)
-            SetAttr(hostDirS, vbReadOnly)
+            ' (read-only was cleared above).
+            Try
+                AtomicHosts.WriteAtomic(hostsPath, original)
+            Catch ex As Exception
+                ' The block is still in hosts and the attribute is currently CLEAR: re-lock
+                ' before letting the failure out, so a failed teardown never degrades the
+                ' enforcement it failed to end.
+                Try
+                    SetAttr(hostsPath, vbReadOnly)
+                Catch ex2 As Exception
+                End Try
+                Throw
+            End Try
+            ' The block is gone: leave hosts as an ordinary file again.
+            SetAttr(hostsPath, vbNormal)
+            Return True
+        End If
 
+        SetAttr(hostsPath, vbReadOnly)
+        Return False
+    End Function
+
+    Private Sub stopMe()
+
+        If StripHostsBlockAtExpiry(hostDirS) Then
             Dim iniFile = New IniFile
             iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
             iniFile.SetKeyValue("User", "Done", "yes")
             iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-        Else
-            SetAttr(hostDirS, vbReadOnly)
         End If
 
         ' The block is over - drop the repair snapshot (best effort) so an

@@ -22,8 +22,19 @@ write emits what it was given). On 19/08/2026 (FX7) a scripted 5-replacement pas
 `AppDomainBackstopTests.cs` converted the whole file to LF while landing only 2 of the
 replacements; git hid it (`core.autocrlf=true` normalises the diff), so the tell was the
 "LF will be replaced by CRLF" warning plus a suspiciously small `--stat`. Recovered with
-`git checkout --` and redone as 5 Edit calls. Verify endings with
-`grep -vc $'\r' <file>` — it must be 0 for every repo source file.
+`git checkout --` and redone as 5 Edit calls. Verify endings by BYTES, not with
+`grep -vc $'\r'` (under Git Bash that reported 0 on a file that was entirely LF, 30/08/2026):
+`python -c "b=open(F,'rb').read(); print(b.count(b'\n')-b.count(b'\r\n'))"`.
+
+**CORRECTION (30/08/2026): LF endings are NOT by themselves evidence of corruption in this
+repo.** Its working tree is genuinely MIXED — 64 CRLF vs 27 LF source files with nothing
+touched — and `core.autocrlf=true` normalises every blob to LF, so a whole-file ending flip is
+invisible to git and harmless to MSBuild. The "LF will be replaced by CRLF" warning is
+therefore a *hint* to look, not a finding: the real tell of a scripted-edit accident is a
+`git diff --stat` line count that does not match the hunks you intended, or a BOM. Do not run a
+CRLF normalisation pass to "fix" the warning (ledger 313 did, on four files that were already
+LF — zero-diff, but it rewrote bytes outside the slice for no gain). Files created with the
+Write tool come out LF-only; that is fine, and matches 27 files already in the tree.
 
 A third shape: **`sed -i` in the Bash tool**. On 20/08/2026 (FX9) a one-line `sed -i`
 mutation-test edit on `MM_notify/BlockPage.vb` flattened the *whole file* CRLF→LF (GNU sed

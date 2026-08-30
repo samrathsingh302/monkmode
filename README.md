@@ -86,9 +86,15 @@ strength as a manual block, including overnight windows such as
 `Mon-Fri 22:30-04:00`), review history with `monkmode stats`, and widen
 app-kill to every logged-in session with `--all-session-kill`. A schedule and a
 manual block deliberately refuse to run together, in either direction — clear
-the schedule first. `monkmode status` shows every running block, time left and
-the current exit path; the notifier keeps a tray icon and raises toasts at block
-start, when a cooling-off begins, and at expiry.
+the schedule first. `monkmode status` shows every running block, the time it
+actually has left and the current exit path; the notifier keeps a tray icon and
+raises toasts at block start, when a cooling-off begins, and at expiry.
+
+That "time left" is **machine-ON time**. A block's end time advances only while
+the service is running, so hours spent shut down or asleep are not served and
+push the end later by the same amount — `status` prints the real remaining
+(`~2h 10m of active time left`) beside the end stamp, and says so under the
+table.
 
 Two smaller comforts: while a block is running the notifier serves a small
 "locked in — Xh left" page on `127.0.0.1:80`, so a plain-HTTP visit to a blocked
@@ -165,7 +171,10 @@ preserved byte-for-byte.
   attribute every 10 s, and if the MonkMode entries are edited or deleted
   (an admin can always clear an attribute) it restores them from a snapshot
   taken at block time. Only the marker block is ever touched — the user's own
-  hosts content is preserved byte-for-byte.
+  hosts content is preserved byte-for-byte. When the block ends the attribute
+  is **cleared** and hosts is left as an ordinary writable file (the same state
+  `monkmode unblock` leaves it in), so nothing else that edits hosts —
+  Tailscale, a DNS tool — is left needing a manual `attrib -r`.
 - **Fail-closed expiry.** A corrupted or unparseable end time keeps the block
   standing rather than lifting it. Failure modes were deliberately audited to
   fail in the *tamper-resistant* direction.

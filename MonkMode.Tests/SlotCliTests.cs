@@ -53,14 +53,18 @@ namespace MonkMode.Tests;
 
 public class SlotTableFormatTests
 {
-    // The authoritative sample from the plan (Part 1 §1.4, P32), copied verbatim.
+    // The authoritative sample from the plan (Part 1 §1.4, P32), copied verbatim - plus, since
+    // ledger 313(a), the TRAILING remaining cell an ACTIVE row now carries. The columns up to
+    // and including Exit are byte-identical to the sample: the new cell rides on the END of the
+    // row precisely so nothing above it moves.
     private const string SampleHeader = " Id  State     Ends / Starts             Sites Apps URLs  Exit";
-    private const string SampleActive = "  2  ACTIVE    2026-08-09 21:00              7    1    0  code+wait";
-    private const string SampleCommitted = "  3  ACTIVE    2026-08-09 23:59              2    0    3  committed";
+    private const string SampleActive = "  2  ACTIVE    2026-08-09 21:00              7    1    0  code+wait  (~2h 10m of active time left)";
+    private const string SampleCommitted = "  3  ACTIVE    2026-08-09 23:59              2    0    3  committed  (~59m of active time left)";
     private const string SampleSchedule = "  6  SCHEDULE  window OPEN until 04:00       3    0    0  window";
 
     private static MonkMode.Blocker.SlotView Active(string id, DateTime ends, int sites, int apps, int urls,
-                                                    bool committed = false, TimeSpan? coolOff = null)
+                                                    bool committed = false, TimeSpan? coolOff = null,
+                                                    DateTime? mark = null)
         => new()
         {
             Id = id,
@@ -71,6 +75,9 @@ public class SlotTableFormatTests
             Urls = urls,
             Committed = committed,
             CoolOffRemaining = coolOff,
+            // 313(a): the monotonic [Time] HighWater the row was read against. Default MinValue
+            // = unreadable/MAC-invalid, which renders the placeholder.
+            Mark = mark ?? DateTime.MinValue,
         };
 
     [Fact]
@@ -83,14 +90,16 @@ public class SlotTableFormatTests
     public void ActiveRow_MatchesTheP32Sample()
     {
         Assert.Equal(SampleActive,
-            MonkMode.Program.FormatSlotRow(Active("2", new DateTime(2026, 8, 9, 21, 0, 0), 7, 1, 0)));
+            MonkMode.Program.FormatSlotRow(Active("2", new DateTime(2026, 8, 9, 21, 0, 0), 7, 1, 0,
+                                                  mark: new DateTime(2026, 8, 9, 18, 50, 0))));
     }
 
     [Fact]
     public void CommittedRow_MatchesTheP32Sample()
     {
         Assert.Equal(SampleCommitted,
-            MonkMode.Program.FormatSlotRow(Active("3", new DateTime(2026, 8, 9, 23, 59, 0), 2, 0, 3, committed: true)));
+            MonkMode.Program.FormatSlotRow(Active("3", new DateTime(2026, 8, 9, 23, 59, 0), 2, 0, 3, committed: true,
+                                                  mark: new DateTime(2026, 8, 9, 23, 0, 0))));
     }
 
     [Fact]
@@ -530,8 +539,77 @@ public class SlotCliLiveTests
             Assert.Single(views);
             Assert.False(views[0].Committed);
             Assert.Null(views[0].CoolOffRemaining);
+            // 313(a): the monotonic mark is MAC-gated for the same reason - a forged HighWater
+            // would otherwise render a countdown, and a frozen config has none (it never lifts
+            // by itself). The row says so rather than showing a number.
+            Assert.Equal(DateTime.MinValue, views[0].Mark);
+            Assert.EndsWith("  (active time left unknown)", MonkMode.Program.FormatSlotRow(views[0]));
         }
         finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ReadSlotViews_CarriesTheMonotonicMark_SoAnActiveRowShowsRealTimeLeft()
+    {
+        // 313(a) wiring: the pure formatters are pinned in MonotonicStatusTests; this proves
+        // the READ actually fills the mark in from [Time] HighWater (a formatter fed MinValue
+        // for ever would print the placeholder and nobody would notice).
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+
+            bool macValid = false;
+            var views = MonkMode.Blocker.ReadSlotViews(ref macValid);
+            Assert.True(macValid);
+            Assert.Single(views);
+
+            // The arm seeds the monotonic frame from the wall clock, so the mark is ~now and
+            // the block ends in 2027: a real, positive, monotonic remaining.
+            Assert.NotEqual(DateTime.MinValue, views[0].Mark);
+            Assert.True(views[0].Mark <= DateTime.Now.AddMinutes(1));
+            Assert.True(views[0].Ends > views[0].Mark);
+            Assert.Contains("of active time left", MonkMode.Program.FormatSlotRow(views[0]));
+            Assert.True(MonkMode.Program.AnyActiveSlot(views));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ReadLegacyView_ReadsTheV9Pair_AndWritesNothing()
+    {
+        // 313(a): `status` falls back to the v9 [Time] pair when no slot is armed, and that
+        // branch now decides off the mark. The read is the same read-only, MAC-gated, fail-soft
+        // shape as ReadSlotViews - pinned here against a real config rather than by literal.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var before = File.ReadAllBytes(MonkMode.Blocker.IniPath());
+            var beforeWrite = File.GetLastWriteTimeUtc(MonkMode.Blocker.IniPath());
+
+            var legacy = MonkMode.Blocker.ReadLegacyView();
+            Assert.True(legacy.MacValid);
+            Assert.Equal(Ends, legacy.Ends);                        // the v9 mirror of the slot
+            Assert.NotEqual(DateTime.MinValue, legacy.Mark);
+            Assert.True(MonkMode.Blocker.LegacyBlockIsActive(legacy.MacValid, legacy.Ends, legacy.Mark));
+
+            Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));
+            Assert.Equal(beforeWrite, File.GetLastWriteTimeUtc(MonkMode.Blocker.IniPath()));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ReadLegacyView_OnNoConfigAtAll_IsIdle_NotActive()
+    {
+        // The other end of the fallback: nothing configured must still read as idle (an
+        // absent/unreadable end time is the ONE case that is allowed to say "no block").
+        Wipe();
+        var legacy = MonkMode.Blocker.ReadLegacyView();
+        Assert.False(legacy.MacValid);
+        Assert.Equal(DateTime.MinValue, legacy.Ends);
+        Assert.False(MonkMode.Blocker.LegacyBlockIsActive(legacy.MacValid, legacy.Ends, legacy.Mark));
     }
 
     [Fact]

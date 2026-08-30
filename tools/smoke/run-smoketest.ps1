@@ -554,6 +554,19 @@ $liftElapsed = if ($liftAt) { [int]($liftAt - $blockStart).TotalSeconds } else {
 Write-Host "    block lifted at +${liftElapsed}s after start (Until ~+300s; a legit lift is >= ~+300s)"
 Check "block did NOT lift EARLY (>= ~Until; no clock-comp shortening)" ($lifted -and ($null -ne $liftAt) -and ($liftAt -ge $blockStart.AddSeconds(285)))
 Check "MonkMode marker removed from hosts"    ($hostsText2 -notmatch '#### MonkMode Entries ####')
+# 313(b): a NATURAL expiry must leave hosts an ordinary WRITABLE file. The read-only
+# attribute is enforcement (the DNS-client lock) and there is nothing left to enforce
+# once our block is gone; leaving it set made every later hosts writer (Tailscale, a
+# DNS tool) fail until a manual `attrib -r`. Unit tests pin the decision
+# (Service1.StripHostsBlockAtExpiry) against a temp file - this is the LIVE proof.
+# Polled, not read once: the strip and the attribute clear are two statements, and the
+# lift loop above can observe the marker gone microseconds before the second one runs.
+$roCleared = $false
+foreach ($i in 1..10) {
+  if (-not ((Get-Item $hosts).Attributes -band [IO.FileAttributes]::ReadOnly)) { $roCleared = $true; break }
+  Start-Sleep -Milliseconds 500
+}
+Check "hosts NOT read-only after expiry (no manual attrib -r owed)" $roCleared
 Check "service no longer running"             (-not ($svc2 -and $svc2.Status -eq 'Running'))
 Check "snapshot deleted after lift"           (-not (Test-Path $snap))
 # B3: stopMe() must remove both SafeBoot keys at a genuine expiry — a lifted

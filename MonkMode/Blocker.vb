@@ -420,6 +420,13 @@ Module Blocker
         Public Urls As Integer
         Public Committed As Boolean
         Public CoolOffRemaining As TimeSpan?     ' Nothing = none pending
+        ' 313(a): the monotonic [Time] HighWater mark this row was read against - the SAME
+        ' timeline expiry is decided on (Ends <= Mark => the block is over). Held as the raw
+        ' moment, not a formatted remaining, because every string belongs to Program.vb's pure
+        ' formatters. DateTime.MinValue = unreadable OR MAC-invalid: the mark is MAC-GATED like
+        ' Committed / CoolOffRemaining, so a tampered config can never render a reassuring
+        ' countdown, and the formatters degrade to a placeholder rather than a wrong number.
+        Public Mark As DateTime = DateTime.MinValue
     End Class
 
     Friend Const SlotStateActive As String = "ACTIVE"
@@ -471,6 +478,7 @@ Module Blocker
                 If macValid Then
                     v.Committed = String.Equals(If(ini.GetKeyValue(sec, "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
                     v.CoolOffRemaining = CoolOffRemainingFrom(DecryptOrEmpty(ini.GetKeyValue(sec, "CoolOffUntil")), highWater)
+                    v.Mark = ParseStamp(highWater)
                 End If
                 views.Add(v)
             Next
@@ -503,6 +511,61 @@ Module Blocker
         Catch
             Return ""
         End Try
+    End Function
+
+    ' Parse an en-CA PLAINTEXT stamp (an already-decrypted Until / HighWater) into a moment, or
+    ' DateTime.MinValue when it is empty/unparseable - the same "MinValue = unreadable" contract
+    ' SlotDate hands the display. Never throws.
+    Private Function ParseStamp(ByVal text As String) As DateTime
+        Dim dt As DateTime
+        If DateTime.TryParse(If(text, ""), CA, DateTimeStyles.None, dt) Then Return dt
+        Return DateTime.MinValue
+    End Function
+
+    ' ---- 313(a): the v9 fallback's read model ----
+    '
+    ' `status` falls back to the pre-slot [Time] pair when NO slot is armed (a v9 config, or a
+    ' machine mid-migration). That branch used to decide "is a block running?" off the WALL
+    ' clock (Until > DateTime.Now) while the service decides it off the monotonic mark - so
+    ' after a shutdown or a long sleep, with the wall clock past Until but HighWater still
+    ' behind it, `status` printed "no active block" over a block that was fully enforced.
+    ' These three values are what the SERVICE decides on, read in ONE pass.
+    Friend Class LegacyView
+        Public MacValid As Boolean
+        Public Ends As DateTime = DateTime.MinValue     ' [Time] Until; MinValue = absent/unreadable
+        Public Mark As DateTime = DateTime.MinValue     ' [Time] HighWater, MAC-GATED like SlotView.Mark
+    End Class
+
+    ' READ-ONLY: opens the config and writes NOTHING (no MAC re-stamp, no backup, no trigger),
+    ' exactly like ReadSlotViews - `status` must stay safe to run against a live block. Fail-SOFT
+    ' throughout: anything unreadable degrades to MinValue/False, never an exception.
+    Friend Function ReadLegacyView() As LegacyView
+        Dim v As New LegacyView
+        Try
+            If Not File.Exists(IniPath()) Then Return v
+            Dim ini As New IniFile
+            ini.Load(IniPath())
+            v.MacValid = ConfigMacIsValidForIni(ini)
+            v.Ends = ParseStamp(DecryptOrEmpty(ini.GetKeyValue("Time", "Until")))
+            If v.MacValid Then v.Mark = ParseStamp(DecryptOrEmpty(ini.GetKeyValue("Time", "HighWater")))
+        Catch
+        End Try
+        Return v
+    End Function
+
+    ' 313(a) PURE: does the v9 fallback have a block to REPORT as running? Decided off the
+    ' monotonic mark (Ends > Mark), NOT DateTime.Now - the same rule BlockGenuinelyExpired /
+    ' the service's EffectiveBlockHasExpired enforce, so the line can no longer disagree with
+    ' what is actually blocked. Fail-CLOSED in both unreadable directions: an invalid MAC or an
+    ' unreadable mark (both arrive here as MinValue, the reader MAC-gates the mark) reads as
+    ' RUNNING, because the service holds the block in exactly those cases too. The one thing
+    ' that reads as "nothing running" is an absent/unparseable end time - there is then no
+    ' block configured to report. Display-only: ZERO enforcement authority.
+    Friend Function LegacyBlockIsActive(ByVal macValid As Boolean, ByVal ends As DateTime, ByVal mark As DateTime) As Boolean
+        If ends = DateTime.MinValue Then Return False
+        If Not macValid Then Return True
+        If mark = DateTime.MinValue Then Return True
+        Return ends > mark
     End Function
 
     ' D5 (rich status): the MONOTONIC cooling-off remaining for `status` - CoolOffUntil - HighWater

@@ -17,6 +17,15 @@ Three defects found on and just after tag day, all outside enforcement, plus one
 
 ### Added
 
+- **`status` now shows the time a block actually has left.** Expiry is decided against the
+  monotonic high-water mark, which only advances while the service runs, so the stored end
+  stamp is not a wall-clock promise: an hour spent shut down or asleep pushes the real end an
+  hour later. The table said nothing about that. Every ACTIVE row now carries the real
+  remaining — `(~2h 10m of active time left)`, the same `deadline − high-water` subtraction the
+  tray already showed — and one note under the table says the end time counts machine-ON time
+  only. The remaining rides on the end of the row, after the Exit column, so the fixed-width
+  columns still line up; an unreadable or MAC-frozen mark reads `(active time left unknown)`
+  rather than inventing a number.
 - **F77 — a block now ends when it said it would, even if the laptop was off.** Until now the
   expiry clock only ran while the service did, so a block armed `--until 02:00` that spanned an
   overnight shutdown did not end at 02:00 — it ended once the machine had been *switched on*
@@ -77,6 +86,20 @@ Three defects found on and just after tag day, all outside enforcement, plus one
 
 ### Fixed
 
+- **A block that simply ran out left the hosts file read-only.** The read-only attribute is
+  enforcement — the DNS-client lock the service re-asserts every 10 s — but the expiry path
+  re-asserted it one last time *after* stripping the MonkMode block, so a block that ended on
+  its own timer left hosts locked with nothing left to enforce, and the next writer (Tailscale,
+  a DNS tool) failed until a manual `attrib -r`. A genuine expiry now leaves hosts as an
+  ordinary writable file, exactly as `monkmode unblock` always has. Only that one path changed:
+  the per-tick self-heal, `OnStart` and the crash backstop still lock hosts while a block
+  stands, and a strip that *fails* still ends read-only — the block is still in the file.
+- **`status` could report "no active block" over a block it was fully enforcing.** On a machine
+  with no slots armed (a pre-v10 config), the fallback line asked whether the stored end was in
+  the wall-clock past. After an overnight shutdown it always was, while the mark the service
+  actually decides on still lagged behind it — so the one command a user runs to check said
+  everything was clear while the sites stayed blocked. It decides on the mark now, and the idle
+  line is printed only when the block is genuinely over or nothing is configured.
 - **F71 — a full arm/teardown cycle dropped the hosts file's trailing newline.** The
   CLI's writer normalised the user's tail (`StripOurBlock` trims every trailing
   CR/LF/space/tab) and then re-appended one CRLF as its block separator — so on a
