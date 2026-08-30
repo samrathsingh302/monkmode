@@ -114,17 +114,36 @@ public class ExpiryHostsAttributeTests
     }
 
     [Fact]
-    public void NothingOfOursInHosts_KeepsTodaysBehaviour()
+    public void NothingOfOursInHosts_AlsoLeavesHostsWritable()
     {
-        // Unchanged branch, pinned so the 313(b) edit is provably confined to the strip path:
-        // with no marker there is nothing to strip, the caller is told so (False => the config
-        // is not marked Done), and the attribute assert stands exactly as it did.
+        // FLIPPED by ledger 319 (the F78 residual). 313(b) made the STRIPPED branch end
+        // vbNormal but left this one re-asserting read-only, so an expiry that found nothing of
+        // ours to remove still handed back a read-only hosts file - and with no block anywhere,
+        // nothing would ever clear it again. Both exit branches now leave hosts an ordinary
+        // file. The caller is still told False (nothing stripped => the config is not marked
+        // Done), which is unchanged.
         var path = TempHosts(UserContent, readOnly: false);
         try
         {
             Assert.False(monkmode.Service1.StripHostsBlockAtExpiry(path));
             Assert.Equal(UserContent, File.ReadAllText(path));
-            Assert.True(IsReadOnly(path));
+            Assert.False(IsReadOnly(path));
+        }
+        finally { Cleanup(path); }
+    }
+
+    [Fact]
+    public void NothingOfOursInHosts_ClearsAnExistingReadOnlyAttribute()
+    {
+        // The state the old behaviour actually produced, run through the fixed code: hosts
+        // arrives READ-ONLY (a previous expiry, or the tick's own SetAttr) with nothing of ours
+        // in it. The expiry strip must hand it back writable rather than re-locking it.
+        var path = TempHosts(UserContent, readOnly: true);
+        try
+        {
+            Assert.False(monkmode.Service1.StripHostsBlockAtExpiry(path));
+            Assert.Equal(UserContent, File.ReadAllText(path));
+            Assert.False(IsReadOnly(path));
         }
         finally { Cleanup(path); }
     }

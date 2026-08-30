@@ -178,7 +178,10 @@ public class SlotArmTests
             Assert.Contains("Slot1.Sites=reddit.com;\n", cli);
             Assert.Contains("Slot2.Sites=x.com;\n", cli);
             Assert.Equal(after.GetKeyValue("Integrity", "Key"), before.GetKeyValue("Integrity", "Key"));
-            Assert.False(MonkMode.Blocker.BlockIsCommitted());   // MAC-gated reader agrees the MAC is valid
+            // Ledger 319 deleted Blocker.BlockIsCommitted, the MAC-gated reader this used to
+            // lean on to say "and the MAC still validates". ConfigIsMacValid is the surviving
+            // MAC-gated reader and says the same thing more directly.
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
 
             // (e) the v9 mirror is the OVER-blocking union/max, never a replacement: both
             //     slots' sites, and the LATER of the two ends.
@@ -512,7 +515,7 @@ public class SlotArmTests
             Assert.Equal("a.com;b.com;", ini.GetKeyValue("User", "CustomSites"));
             // "committed" as soon as ANY slot is: the strictest slot sets the exit policy.
             Assert.Equal("yes", ini.GetKeyValue("Commit", "Committed"));
-            Assert.True(MonkMode.Blocker.BlockIsCommitted());
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());   // ...and the union is MAC-covered
             // The LONGEST configured cooling-off wins (the wait may only ever be extended).
             Assert.Equal("7200", ini.GetKeyValue("CoolOff", "Duration"));
             // Widen-only all-session kill.

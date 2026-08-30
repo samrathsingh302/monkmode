@@ -151,13 +151,11 @@ public class NotificationsTests
             "MonkMode is active - Your block blocked until 2026-07-08 17:00.",
             mm_notify.Notifications.BlockActiveMessage(0, 0, Until, false, null));
 
-    // ---- The remaining three toasts, pinned by literal ----
-
-    [Fact]
-    public void CoolOffStartedMessage_StatesTheWaitAndTheCancel()
-        => Assert.Equal(
-            "Cooling-off started - the block lifts in about 1h of active machine time. Run 'monkmode unblock --cancel' to stay blocked.",
-            mm_notify.Notifications.CoolOffStartedMessage(TimeSpan.FromHours(1)));
+    // ---- The remaining toasts, pinned by literal ----
+    //
+    // Ledger 319 deleted CoolOffStartedMessage ("Cooling-off started - the block lifts in
+    // about N ... Run 'monkmode unblock --cancel' to stay blocked") along with the exit it
+    // announced. Nothing writes a CoolOffUntil, so the toast could never fire again.
 
     [Fact]
     public void BlockActiveReminderMessage_IsTheGentleNudge()

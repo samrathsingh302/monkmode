@@ -51,12 +51,33 @@ if (-not $Dist) {
 }
 $monk  = Join-Path $Dist 'monkmode.exe'
 $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
-$cleanup = Join-Path $PSScriptRoot 'cleanup.ps1'
+# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
 $pass = 0; $fail = 0
 function Check($n,$c){ if($c){Write-Host "  [PASS] $n" -ForegroundColor Green;$script:pass++}else{Write-Host "  [FAIL] $n" -ForegroundColor Red;$script:fail++} }
 function SvcState { $s=Get-Service MONKMODE -ErrorAction SilentlyContinue; if($s){$s.Status}else{'gone'} }
 function HostsBlocked { $(try{Get-Content $hosts -Raw}catch{''}) -match '#### MonkMode Entries ####' }
-function ForceDown { & $monk unblock --force 2>&1|Out-Null; $u=(Get-Date).AddSeconds(25); while((Get-Date)-lt $u -and (SvcState)-ne 'gone'){Start-Sleep -Milliseconds 500}; if((SvcState)-ne 'gone'){& powershell -ExecutionPolicy Bypass -File $cleanup -Dist $Dist 2>&1|Out-Null} }
+# ############################################################################
+# # BROKEN BY 319:  THIS DRILL'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
+# #
+# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
+# # tools\smoke\cleanup.ps1. A running block now ends on exactly two events - its
+# # own end time, or a service-verified partner code - so there is no forced
+# # teardown to fall back on and no rescue script behind it.
+# #
+# # WHAT IT NEEDS (a live, elevated sitting; it cannot be verified from a bench):
+# #   * capture each arm's output and parse the one-time code off the line after
+# #     "Emergency unlock code" (cv-d-smoke.ps1's ParseCode is the pattern), then
+# #     tear down with `unblock --code <CODE>`, wait for Stopped-or-gone
+# #     (RUNBOOK E9 - never poll for 'gone' after a lift), and `sc.exe delete
+# #     MONKMODE` to reach 'gone' for the next section's precondition;
+# #   * or, where a code cannot be threaded through, use a --for short enough that
+# #     natural expiry IS the teardown and say so in the header. `--for 1` is
+# #     always refused, so one minute is the floor.
+# #   * an aborted run now leaves the armed block standing until its timer runs
+# #     out. That is the design, not a bug - say it in the header rather than
+# #     implying a rescue exists.
+# ############################################################################
+function ForceDown { throw 'BROKEN BY 319: ForceDown needs rewriting as a partner-code lift (see the header).' }
 # True clock offset (seconds) vs an external HTTP Date header, WITHOUT setting
 # the clock. $null if unreachable. NB: uses an 8s-bounded HTTP HEAD, NOT
 # 'w32tm /stripchart' or '/resync' - those can BLOCK indefinitely on a slow NTP
@@ -74,7 +95,7 @@ function NtpOffset {
 $me=[Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){Write-Host 'Run ELEVATED.' -ForegroundColor Red;exit 1}
 if(-not (Test-Path $monk)){Write-Host "monkmode.exe not at $monk." -ForegroundColor Red;exit 1}
-if(Get-Service MONKMODE -ErrorAction SilentlyContinue){Write-Host 'MONKMODE exists - cleanup first.' -ForegroundColor Yellow;exit 1}
+if(Get-Service MONKMODE -ErrorAction SilentlyContinue){Write-Host 'MONKMODE exists - let any block end, then sc.exe delete MONKMODE while idle.' -ForegroundColor Yellow;exit 1}
 & $monk setup --partner 'Smoke Tester (smoke@test.local)' 2>&1|Out-Null
 $off0 = NtpOffset
 Write-Host ("Pre-drill NTP offset: {0}s" -f $off0)
@@ -132,7 +153,7 @@ try {
       # wait on REAL monotonic time (immune to the wall roll) up to ~160s; the
       # block's real duration is 120s, so a correct fix lifts by ~120-140s real.
       # Lift signal: on GENUINE expiry the service goes Stopped but stays INSTALLED
-      # (it is only deleted by unblock --force / teardown - observed live 2026-07-10),
+      # (it is only deleted by the service's own genuine-expiry teardown - observed live 2026-07-10),
       # and the hosts marker block is removed. 'gone' would never fire here.
       while ($sw.Elapsed.TotalSeconds -lt 160) {
         if ((SvcState) -ne 'Running' -or -not (HostsBlocked)) { $liftedAt = [int]$sw.Elapsed.TotalSeconds; break }

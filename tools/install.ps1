@@ -44,8 +44,9 @@
 #   - It does NOT uninstall anything. Removal is the sibling tools\uninstall.ps1 (slice
 #     H2), which is fail-closed and refuses while a block is enforcing (never an escape
 #     hatch). Or remove by hand per docs\RUNBOOK.md section 3 (Full-uninstall how-to):
-#     remove the service first (`sc delete MONKMODE` while idle, or `monkmode unblock
-#     --force`), THEN delete C:\Program Files\MonkMode\.
+#     remove the service first (`sc delete MONKMODE` while idle - ledger 319 removed
+#     `monkmode unblock --force`, so an idle machine is the only time it can go),
+#     THEN delete C:\Program Files\MonkMode\.
 #
 # WHY PROGRAM FILES:
 #   C:\Program Files is protected by admin-only write ACLs, so a standard (non-elevated)
@@ -130,7 +131,7 @@ $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Host "The $serviceName service is present (status: $($existing.Status))." -ForegroundColor Yellow
     throw ("Refusing to install over an existing $serviceName service (never upgrade across a block - R9 forward-migration freeze). " +
-           "Let any live block end, then remove the service (docs\RUNBOOK.md section 3: 'sc delete $serviceName' while idle, or 'monkmode unblock --force'), then re-run this installer.")
+           "Let any live block end - at its own end time, or with its partner code - then remove the service ('sc delete $serviceName' while idle; docs\RUNBOOK.md section 3), then re-run this installer. Ledger 319 removed 'monkmode unblock --force': there is no forced teardown.")
 }
 
 # ---- 3. Resolve the payload (publish, or use a pre-built folder) -------------

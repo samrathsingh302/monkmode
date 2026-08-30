@@ -61,7 +61,7 @@ if (-not $Dist) {
 $monk    = Join-Path $Dist 'monkmode.exe'
 $cfg     = Join-Path $Dist 'monkmode_settings.ini'
 $hosts   = "$env:SystemRoot\System32\drivers\etc\hosts"
-$cleanup = Join-Path $PSScriptRoot 'cleanup.ps1'
+# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
 
 $pass = 0; $fail = 0; $void = 0
 function Check($n, $c)  { if ($c) { Write-Host "  [PASS] $n" -ForegroundColor Green; $script:pass++ } else { Write-Host "  [FAIL] $n" -ForegroundColor Red; $script:fail++ } }
@@ -80,9 +80,30 @@ function SlotCount    { $l = $(try { (Get-Content $cfg -Raw) } catch { '' }) -sp
 function Notifiers    { @(Get-Process -Name mm_notify -ErrorAction SilentlyContinue).Count }
 
 # Teardown that always works, in the documented order (the service is CanStop=False and
-# self-restarting, so --force first, cleanup.ps1 as the backstop).
+# self-restarting).
+# ############################################################################
+# # BROKEN BY 319:  THIS DRILL'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
+# #
+# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
+# # tools\smoke\cleanup.ps1. A running block now ends on exactly two events - its
+# # own end time, or a service-verified partner code - so there is no forced
+# # teardown to fall back on and no rescue script behind it.
+# #
+# # WHAT IT NEEDS (a live, elevated sitting; it cannot be verified from a bench):
+# #   * capture each arm's output and parse the one-time code off the line after
+# #     "Emergency unlock code" (cv-d-smoke.ps1's ParseCode is the pattern), then
+# #     tear down with `unblock --code <CODE>`, wait for Stopped-or-gone
+# #     (RUNBOOK E9 - never poll for 'gone' after a lift), and `sc.exe delete
+# #     MONKMODE` to reach 'gone' for the next section's precondition;
+# #   * or, where a code cannot be threaded through, use a --for short enough that
+# #     natural expiry IS the teardown and say so in the header. `--for 1` is
+# #     always refused, so one minute is the floor.
+# #   * an aborted run now leaves the armed block standing until its timer runs
+# #     out. That is the design, not a bug - say it in the header rather than
+# #     implying a rescue exists.
+# ############################################################################
 function ForceDown {
-    & $monk unblock --force 2>&1 | Out-Null
+    throw 'BROKEN BY 319: ForceDown needs rewriting as a partner-code lift (see the header).'
     $u = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $u -and (SvcState) -ne 'gone') { Start-Sleep -Milliseconds 500 }
     if ((SvcState) -ne 'gone') { & powershell -ExecutionPolicy Bypass -File $cleanup -Dist $Dist 2>&1 | Out-Null }
@@ -102,7 +123,7 @@ function NtpOffset {
 $me = [Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Host 'Run ELEVATED.' -ForegroundColor Red; exit 1 }
 if (-not (Test-Path $monk)) { Write-Host "monkmode.exe not at $monk - build dist first." -ForegroundColor Red; exit 1 }
-if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host 'MONKMODE service exists - tear it down first (unblock --force).' -ForegroundColor Yellow; exit 1 }
+if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host 'MONKMODE service exists - let any block end, then sc.exe delete MONKMODE while idle.' -ForegroundColor Yellow; exit 1 }
 if (HostsBlocked) { Write-Host 'hosts already carries a MonkMode marker - clean up first.' -ForegroundColor Yellow; exit 1 }
 
 Write-Host ("FX6 drill - dist build {0}" -f (Get-Item $monk).LastWriteTime.ToString('dd/MM HH:mm:ss')) -ForegroundColor Cyan

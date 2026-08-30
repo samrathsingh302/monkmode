@@ -32,7 +32,7 @@
 '    copies across the projects - only the RootNamespace differs (MonkMode here,
 '    monkmode in the service). DohPolicyParityTests pins that 2-copy parity
 '    element-for-element: the service WRITES + self-heals these keys and the
-'    `unblock --force` escape hatch RESTORES them, so a drift would mean the two
+'    service RESTORES them at a genuine expiry, so a drift would mean the two
 '    disagree on WHICH keys to touch (a stuck policy the hatch can't lift, or the
 '    wrong value restored = data loss). The exes never reference each other (house
 '    rule), so each side uses its own copy.

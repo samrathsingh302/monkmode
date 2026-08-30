@@ -123,7 +123,7 @@ Namespace Global.monkmode
         ' byte-for-byte intact. Removes EVERY matching occurrence, not just the
         ' first: AddDenyDeleteAce never stacks a duplicate, but an attacker can
         ' hand-add a second (D;;SD;;;BA) via `sc sdset` mid-block, and a single
-        ' leftover would keep the object DELETE-denied so the `unblock --force`
+        ' leftover would keep the object DELETE-denied so an idle `sc delete`
         ' escape hatch / expiry teardown could no longer delete the service.
         ' Looping to a fixed point (each pass strips one occurrence, so the SDDL
         ' strictly shrinks and the loop always terminates) guarantees teardown

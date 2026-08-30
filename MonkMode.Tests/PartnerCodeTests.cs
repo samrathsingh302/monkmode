@@ -499,14 +499,12 @@ public class PartnerCodeEndToEndTests
     [Fact]
     public void CommittedBlock_KeepsTheCodeExit_TheC4Seam()
     {
-        // The §6.5 asymmetry that makes "commit = code-only exit" true: a committed
-        // block (C4) has ClassifyCoolOffSignal Ignore the cooling-off request, but the
-        // partner code still lifts. ClassifyPartnerCodeSignal deliberately has NO
+        // What made "commit = code-only exit" true was that ClassifyCoolOffSignal Ignored a
+        // cooling-off request on a committed block while the code channel carried on. Ledger 319
+        // removed the cooling-off half entirely, so what is left to pin is the half that
+        // survived and now carries the whole exit surface: ClassifyPartnerCodeSignal has NO
         // committed axis, so a committed-and-healthy block still Verifies a code, and a
         // code-unlock still EffectiveExits.
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            monkmode.Service1.ClassifyCoolOffSignal(requestPresent: true, cancelPresent: false,
-                coolOffPending: false, committed: true, macValid: true));
         // The code path is unaffected by commitment (there is no committed parameter):
         Assert.Equal(monkmode.Service1.PartnerCodeAction.Verify,
             monkmode.Service1.ClassifyPartnerCodeSignal(codePresent: true, candidateNonEmpty: true, alreadyUnlocked: false, macValid: true));

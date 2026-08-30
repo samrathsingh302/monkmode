@@ -64,6 +64,10 @@ namespace MonkMode.Tests;
 
 public class TriggerJunkTests
 {
+    // Every prefix the enumeration glob still matches. Ledger 319 left the two CoolOff names
+    // in the GLOB (so a stale file from an older dist is found and purged) while removing them
+    // from TriggerAddressesAnyFamily - so this list and AddressedPrefixes below are no longer
+    // the same set, and that difference is the whole disposal mechanism.
     private static readonly string[] Prefixes =
     {
         monkmode.Service1.CoolOffRequestPrefix,
@@ -71,6 +75,27 @@ public class TriggerJunkTests
         monkmode.Service1.PartnerCodePrefix,
         monkmode.Service1.AddRequestPrefix,
     };
+
+    // The prefixes that still ADDRESS a family, i.e. that a poller will read.
+    private static readonly string[] AddressedPrefixes =
+    {
+        monkmode.Service1.PartnerCodePrefix,
+        monkmode.Service1.AddRequestPrefix,
+    };
+
+    [Fact]
+    public void TheCoolOffPrefixes_AreEnumeratedButAddressNoFamily()
+    {
+        // THE ledger 319 disposal contract, in one place. A monkmode_cooloff.request.<id> is
+        // still found by the glob - so it cannot sit on disk for ever - and answers "no family"
+        // - so no poller reads it and PurgeUnaddressedTriggers deletes it. Putting these
+        // prefixes back into TriggerAddressesAnyFamily would resurrect nothing (there is no
+        // cooling-off reader) but WOULD strand the files, permanently occupying the P41 budget.
+        Assert.False(monkmode.Service1.TriggerAddressesAnyFamily(monkmode.Service1.CoolOffRequestPrefix + "1"));
+        Assert.False(monkmode.Service1.TriggerAddressesAnyFamily(monkmode.Service1.CoolOffCancelPrefix + "1"));
+        Assert.True(monkmode.Service1.TriggerAddressesAnyFamily(monkmode.Service1.PartnerCodePrefix + "1"));
+        Assert.True(monkmode.Service1.TriggerAddressesAnyFamily(monkmode.Service1.AddRequestPrefix + "1"));
+    }
 
     [Fact]
     public void TriggerIdFromName_ReadsOnlyItsOwnFamily_AndTakesTheRemainderVerbatim()
@@ -121,7 +146,9 @@ public class TriggerJunkTests
                 Assert.NotNull(id);
                 Assert.Equal(id.Trim(), id);
             }
-            Assert.Equal(Prefixes.Any(p => monkmode.Service1.TriggerIdFromName(name, p) != ""),
+            // AddressedPrefixes, not Prefixes: since ledger 319 a cooling-off name carries a
+            // parseable id but addresses no family (see TheCoolOffPrefixes_... above).
+            Assert.Equal(AddressedPrefixes.Any(p => monkmode.Service1.TriggerIdFromName(name, p) != ""),
                          monkmode.Service1.TriggerAddressesAnyFamily(name));
         }
     }
@@ -340,9 +367,11 @@ public class TriggerJunkLiveTests
     private static List<string> Tick(monkmode.Service1 svc, string dir, bool macValid = true)
     {
         var names = monkmode.Service1.EnumerateTriggerFilesIn(dir);
+        // Ledger 319: the purge is now what disposes of a cooling-off trigger too - the two
+        // CoolOff prefixes address no family any more, so they are deleted here, unread, and
+        // there is no third poller below to run over them.
         monkmode.Service1.PurgeUnaddressedTriggers(dir, names);
         var slots = svc.LoadSlots(Reload());
-        svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), slots, Hw, macValid, names);
         svc.ProcessPartnerCodeSignalAt(dir, MonkMode.Blocker.IniPath(), slots, macValid, names);
         svc.ProcessAddRequestsAt(dir, MonkMode.Blocker.IniPath(), slots, macValid, names);
         return names;
@@ -484,12 +513,13 @@ public class TriggerJunkLiveTests
         finally { Wipe(); Drop(dir); }
     }
 
+    // FLIPPED BY LEDGER 319. This used to pin that a zero-byte cooling-off request was a valid
+    // request (the family was presence-only, and the service computed the deadline itself). A
+    // cooling-off request of ANY content is now inert: one full tick reads nothing from it,
+    // writes no deadline, leaves the block armed, and deletes the file.
     [Fact]
-    public void AZeroByteCoolOffRequest_IsStillARequest_BecauseTheFamilyIsPresenceOnly()
+    public void ACoolOffRequest_IsInert_WhateverItContains()
     {
-        // R2: the two cooling-off triggers carry ZERO timing authority, so their content is
-        // ignored entirely and a zero-byte file is exactly as valid as any other. The deadline
-        // is computed by the service from its own trusted HighWater.
         Wipe();
         var dir = TempDir();
         try
@@ -497,14 +527,14 @@ public class TriggerJunkLiveTests
             var a = Arm("a.com");
             Assert.True(a.Ok);
             var svc = Svc();
+            var before = File.ReadAllBytes(MonkMode.Blocker.IniPath());
             File.WriteAllBytes(Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + a.Id), Array.Empty<byte>());
+            File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffCancelPrefix + a.Id), "anything at all");
             Tick(svc, dir);
 
-            var stored = Reload().GetKeyValue("Slot1", "CoolOffUntil");
-            Assert.NotEqual("", stored);
-            var expected = monkmode.Service1.ComputeCoolOffDeadline(Hw, monkmode.Service1.MinCoolOffFloorSeconds,
-                                                                    monkmode.Service1.MinCoolOffFloorSeconds);
-            Assert.Equal(expected, new MonkMode.Simple3Des("mm_textbox").DecryptData(stored));
+            Assert.Equal("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));
+            Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));   // not one byte written
+            Assert.Empty(Directory.GetFiles(dir, "monkmode_cooloff.*"));           // and swept away
         }
         finally { Wipe(); Drop(dir); }
     }
@@ -514,15 +544,20 @@ public class TriggerJunkLiveTests
     [Fact]
     public void ACapFlood_DefersTheExitTriggerButNeverLosesIt_AndConverges()
     {
-        // THE flood pin. 40 junk `add` files sort ORDINALLY BEFORE the cooling-off request
-        // ("monkmode_add..." < "monkmode_cooloff..."), so they take the whole 16-file budget
-        // and starve the exit trigger for several ticks. Two things must hold, and they pull
-        // in opposite directions:
+        // THE flood pin. 40 junk `add` files sort ORDINALLY BEFORE the exit trigger, so they
+        // take the whole 16-file budget and starve it for several ticks. Two things must hold,
+        // and they pull in opposite directions:
         //   * the deferral is FAIL-CLOSED - the block simply holds ~10s longer per tick, and
-        //     no deadline is written early;
+        //     nothing is written early;
         //   * the trigger is NOT consumed while deferred, and once the flood drains it applies
         //     in full. A channel that dropped starved triggers would silently swallow an exit
         //     the user really did request.
+        //
+        // Ledger 319 changed WHICH trigger this is about. It used to be the cooling-off request
+        // (which sorted after "monkmode_add..."); a cooling-off trigger is now purged unread on
+        // the first tick that sees it, so the starvable exit is the PARTNER CODE - and that is
+        // a stronger version of the same test, because "monkmode_partner..." sorts LAST of all
+        // three families, which is exactly the starvation risk P41 was sized against.
         Wipe();
         var dir = TempDir();
         try
@@ -531,28 +566,28 @@ public class TriggerJunkLiveTests
             Assert.True(a.Ok);
             var svc = Svc();
 
-            var exitTrigger = Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + a.Id);
-            File.WriteAllText(exitTrigger, "");
+            var exitTrigger = Path.Combine(dir, monkmode.Service1.PartnerCodePrefix + a.Id);
+            File.WriteAllText(exitTrigger, a.PartnerCode);
             for (var i = 0; i < 40; i++)
                 File.WriteAllText(Path.Combine(dir, monkmode.Service1.AddRequestPrefix + "z" + i.ToString("000", CultureInfo.InvariantCulture)), "junk.com");
 
             // Tick 1: the budget is spent entirely on the flood.
             var names = Tick(svc, dir);
             Assert.Equal(monkmode.Service1.MaxTriggerFilesPerTick, names.Count);
-            Assert.DoesNotContain(monkmode.Service1.CoolOffRequestPrefix + a.Id, names);
+            Assert.DoesNotContain(monkmode.Service1.PartnerCodePrefix + a.Id, names);
             Assert.True(File.Exists(exitTrigger), "a starved exit trigger was consumed anyway");
-            Assert.Equal("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));      // nothing written early
+            Assert.Equal("", Reload().GetKeyValue("Slot1", "PartnerUnlockedAt"));   // nothing written early
             Assert.Equal(40 - 16 + 1, Directory.GetFiles(dir).Length);
 
-            // Successive ticks drain it; the exit request survives untouched until its turn.
+            // Successive ticks drain it; the code survives untouched until its turn.
             var ticks = 1;
-            while (Reload().GetKeyValue("Slot1", "CoolOffUntil") == "" && ticks < 10)
+            while (Reload().GetKeyValue("Slot1", "PartnerUnlockedAt") == "" && ticks < 10)
             {
                 Tick(svc, dir);
                 ticks++;
             }
             Assert.True(ticks <= 4, $"the flood took {ticks} ticks to drain - the budget is not converging");
-            Assert.NotEqual("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));
+            Assert.NotEqual("", Reload().GetKeyValue("Slot1", "PartnerUnlockedAt"));
             Assert.False(File.Exists(exitTrigger));                               // consumed only once applied
             Assert.DoesNotContain("junk.com", Reload().GetKeyValue("Slot1", "Sites"));   // the flood widened nothing
         }
@@ -577,11 +612,14 @@ public class TriggerJunkLiveTests
 
             var names = monkmode.Service1.EnumerateTriggerFilesIn(dir);
             Assert.Equal(3, names.Count);
-            foreach (var n in names) Assert.True(monkmode.Service1.TriggerAddressesAnyFamily(n));
+            // Ledger 319: these three ARE enumerated (the glob still carries the CoolOff
+            // patterns) but address no family, which is what gets them purged below.
+            foreach (var n in names) Assert.False(monkmode.Service1.TriggerAddressesAnyFamily(n));
 
             // Purging the unaddressed must leave every bystander in place too.
             monkmode.Service1.PurgeUnaddressedTriggers(dir, names);
             foreach (var b in bystanders) Assert.True(File.Exists(Path.Combine(dir, b)), b + " was removed");
+            Assert.Empty(monkmode.Service1.EnumerateTriggerFilesIn(dir));   // ...and the three are gone
         }
         finally { Drop(dir); }
     }
@@ -601,7 +639,7 @@ public class TriggerJunkLiveTests
     }
 
     [Fact]
-    public void TheThreePollers_SurviveNullAndEmptyArguments_WithoutWritingAnything()
+    public void TheTwoPollers_SurviveNullAndEmptyArguments_WithoutWritingAnything()
     {
         Wipe();
         var dir = TempDir();
@@ -613,9 +651,10 @@ public class TriggerJunkLiveTests
             var path = MonkMode.Blocker.IniPath();
             var empty = new List<string>();
 
-            svc.ProcessCoolOffSignalsAt(dir, path, null, Hw, true, empty);
-            svc.ProcessCoolOffSignalsAt(dir, path, svc.LoadSlots(Reload()), Hw, true, null);
-            svc.ProcessCoolOffSignalsAt(dir, path, svc.LoadSlots(Reload()), "", true, empty);
+            // Ledger 319: the cooling-off poller is gone; the purge takes its place and must be
+            // equally total (it runs inside the tick, so a throw here stops enforcement).
+            monkmode.Service1.PurgeUnaddressedTriggers(dir, null);
+            monkmode.Service1.PurgeUnaddressedTriggers(dir, empty);
             svc.ProcessPartnerCodeSignalAt(dir, path, null, true, empty);
             svc.ProcessPartnerCodeSignalAt(dir, path, svc.LoadSlots(Reload()), true, null);
             svc.ProcessAddRequestsAt(dir, path, null, true, empty);

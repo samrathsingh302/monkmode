@@ -19,18 +19,19 @@
 '    MonkMode - CLI entry point
 '
 '    Usage:
-'      monkmode setup  [--partner "Alex (alex@example.com)"] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps a.exe,b.exe] [--default-app-preset games]  (required first-run onboarding)
+'      monkmode setup  [--partner "Alex (alex@example.com)"] [--default-sites a.com,b.com] [--default-preset social] [--default-apps a.exe,b.exe] [--default-app-preset games]  (required first-run onboarding)
 '      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat]
-'                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt] [--commit] [--cooloff 2h]
+'                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt]
 '                      [--urls "*/watch*"] [--start +90m]
 '      monkmode status                     (a row per armed block, with each one's exit)
 '      monkmode stats                      (read-only summary of your block history)
 '      monkmode add    --sites c.com[,d.com] [--id N]
-'      monkmode unblock [--id N]           (request cooling-off — lifts after ~1h active time)
-'      monkmode unblock --cancel           (cancel a pending cooling-off; stay blocked)
 '      monkmode unblock --code <CODE>      (submit the partner code — service verifies + lifts)
-'      monkmode unblock --force            (escape hatch — tears down an active block)
 '      monkmode help
+'
+'    Ledger 319 (30/08/2026): a running block has exactly TWO ends - its own end time,
+'    or the partner code. The `--force` escape hatch and the self-serve cooling-off wait
+'    were both REMOVED; there is no other exit, and no recovery for a lost code.
 '
 '    v1.1: `block` arms a NEW block beside the ones already running (up to 8), so
 '    every verb that addresses one takes --id. A block, once started, cannot be
@@ -103,10 +104,11 @@ Module Program
     ' + default blocklist/presets are deferred (C6b / D1).
     Private Function DoSetup(ByVal args As String()) As Integer
         Dim partner As String = GetOption(args, "--partner").Trim()
-        ' C6c: optional --cooloff sets the ACCOUNT-DEFAULT cooling-off duration that every later
-        ' `block` inherits when it gives no --cooloff of its own (an explicit block --cooloff still
-        ' overrides). Same grammar + 365d cap as block --cooloff; parsed BEFORE the write so a bad
-        ' value fails fast with no partial state. 0 = not given (no account default stored).
+        ' C6c: `setup --cooloff` is still parsed and still stored on the SETUP canonical, so the
+        ' s-schema is untouched and an old invocation keeps working - but ledger 319 made the
+        ' value INERT: no block reads it any more, because no block has a cooling-off. Kept
+        ' rather than removed purely to avoid a setup-schema bump for a dead field; undocumented
+        ' in help. 0 = not given.
         Dim coolOffSeconds As Long
         If Not TryParseCoolOffArg(args, coolOffSeconds) Then Return 1
         ' D1b: optional --default-sites / --default-preset set the ACCOUNT-DEFAULT blocklist that every
@@ -140,18 +142,16 @@ Module Program
         Console.WriteLine("  the start. Relay it to your accountability partner" & If(partner <> "", " (" & partner & ")", "") & " straight away. To end")
         Console.WriteLine("  a block early, they run:  monkmode unblock --code <CODE>  (a fresh code each block).")
         Console.WriteLine("")
-        Console.WriteLine("  Cooling-off - without the code you can still leave, but not instantly: 'monkmode")
-        Console.WriteLine("  unblock' starts a mandatory ~1 hour wait of active machine time; the block stays")
-        Console.WriteLine("  fully enforced until it elapses, then lifts itself ('monkmode unblock --cancel' aborts it).")
-        ' C6c: confirm the account-default cooling-off when set (blocks without their own --cooloff inherit it).
-        If coolOffSeconds > 0 Then Console.WriteLine("  Your account-default cooling-off wait is " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & ", inherited by any block without its own --cooloff (the ~1h minimum still applies).")
+        Console.WriteLine("  There is NO other way out - ledger 319. Without the code a block runs to its end")
+        Console.WriteLine("  time and not a second less. There is no self-serve wait, no escape hatch, no")
+        Console.WriteLine("  override and no recovery: lose the code and you wait. Choose durations you mean.")
         ' D1b: confirm the account-default blocklist when set (a block naming no --sites/--preset/--file inherits it).
         If defaultSites <> "" Then Console.WriteLine("  Your account-default blocklist is: " & defaultSites.Replace(",", ", ") & " - inherited by any block you start without --sites/--preset/--file.")
         ' D2b: confirm the account-default app list when set (a block naming no --apps/--app-preset inherits it).
         If defaultApps <> "" Then Console.WriteLine("  Your account-default app list is: " & defaultApps.Replace(",", ", ") & " - inherited by any block you start without --apps/--app-preset.")
         Console.WriteLine("")
-        Console.WriteLine("  Committed blocks - 'monkmode block --commit' disables even the cooling-off exit, so")
-        Console.WriteLine("  the accountability code is the ONLY early way out. Use it when you mean it.")
+        Console.WriteLine("  Every block is COMMITTED - there is no uncommitted mode any more. The code, or the")
+        Console.WriteLine("  timer. Use durations you mean.")
         Console.WriteLine("")
         Console.WriteLine("  Schedules - 'monkmode schedule' arms recurring wall-clock windows that open/close")
         Console.WriteLine("  automatically; a window can't be ended early once open.")
@@ -283,7 +283,8 @@ Module Program
         ' chokepoint for them (--urls was checked inside TryBuildUrlPatterns above, and ArmSlot
         ' re-checks all three as the writer backstop). One such character would be written verbatim
         ' into the ini, split the line on reload, and freeze this AND every other armed block
-        ' permanently with no cooling-off and no partner-code exit. Refuse the whole arm, name the
+        ' permanently - with no partner-code exit either (ledger 319 removed the escape hatch
+        ' that used to be the answer to this, so it is now unrecoverable). Refuse the whole arm, name the
         ' value, write nothing - never strip or truncate.
         Dim ctrlErr As String = ""
         If Not Blocker.TryRejectControlChars("site", domains, ctrlErr) OrElse
@@ -358,18 +359,15 @@ Module Program
                 Return 1
         End Select
 
-        ' C6b/C6c: optional --cooloff sets THIS block's cooling-off DURATION - how long the
-        ' self-serve `unblock` exit takes to lift. Parsed up front (shared TryParseCoolOffArg:
-        ' grammar + 365d cap) so a bad value fails BEFORE any hosts/service side effects. When
-        ' --cooloff is ABSENT (seconds = 0), inherit the account default set at `setup --cooloff`
-        ' (C6c); still 0 there (no default / setup incomplete / tampered) => the service uses its
-        ' compile-time floor (~1h). SetupIsComplete was already required above, so the setup file
-        ' is present here; SetupDefaultCoolOffSeconds fail-closes to 0 on any read/tamper anyway.
-        ' A configured value below the floor is clamped up by the service, so --cooloff can only
-        ' ever EXTEND the wait, never shorten it.
-        Dim coolOffSeconds As Long
-        If Not TryParseCoolOffArg(args, coolOffSeconds) Then Return 1
-        If coolOffSeconds = 0 Then coolOffSeconds = Blocker.SetupDefaultCoolOffSeconds()
+        ' Ledger 319 (30/08/2026): there is no cooling-off exit any more, so a per-block
+        ' cooling-off DURATION has nothing to configure. `--cooloff` is still ACCEPTED and
+        ' still grammar-checked (an old script or muscle-memory invocation must not start
+        ' failing, and it stays in BlockOptionNames so it draws no "unknown flag" warning),
+        ' but the value is DISCARDED: the slot's MAC-covered CoolOffDuration is always
+        ' written empty, and nothing anywhere reads it to decide a lift. Removed from help.
+        Dim ignoredCoolOffSeconds As Long
+        If Not TryParseCoolOffArg(args, ignoredCoolOffSeconds) Then Return 1
+        Const coolOffSeconds As Long = 0
 
         Dim serviceExe As String = Path.Combine(Blocker.AppDir(), Blocker.ServiceExeName)
         If Not File.Exists(serviceExe) Then
@@ -410,9 +408,12 @@ Module Program
             Return 3
         End If
 
-        ' C4: `--commit` arms a COMMITTED block (self-serve cooling-off disabled = the
-        ' partner code + expiry are the only exits). The flag is MAC-covered from birth.
-        Dim committed As Boolean = HasFlag(args, "--commit")
+        ' Ledger 319 (30/08/2026): EVERY block is committed. The partner code and the end time
+        ' are the only exits there are, which is exactly what `--commit` used to opt into, so
+        ' the flag has nothing left to switch. It stays ACCEPTED (and stays in BlockOptionNames
+        ' + the boolean-flag list, so `--commit` and `--commit=yes` still behave as before)
+        ' purely so existing scripts keep working; the field is written `yes` regardless.
+        Const committed As Boolean = True
         ' D2c: `--all-session-kill` widens app-kill from the current session (+ session 0) to
         ' EVERY logged-in session - the LocalSystem service kills blocked apps in all sessions,
         ' not just session 0. MAC-covered from birth; a widen-only policy (fail-closed: it can
@@ -462,7 +463,7 @@ Module Program
             ' B7: the stored config failed its integrity check. Re-stamping it would
             ' re-bless a tamper, so MonkMode refuses to change anything at all.
             Console.Error.WriteLine("The current MonkMode configuration failed its integrity check, so it is frozen and cannot be added to.")
-            Console.Error.WriteLine("Wait for the running block(s) to end, or use 'monkmode unblock --force' once they have.")
+            Console.Error.WriteLine("Nothing can be armed or added while it is frozen, and a frozen config never lifts by itself - see 'monkmode help'.")
             Return Blocker.ExitArmFailed
         ElseIf Not arm.Ok Then
             Console.Error.WriteLine("Could not arm the block right now (the service was writing). Try again.")
@@ -540,16 +541,13 @@ Module Program
         ' D2c: confirm the all-session widening, but only when there are apps to kill (the flag is a
         ' no-op without a blocklist - never claim an effect that won't happen).
         If allSessionKill AndAlso apps.Count > 0 Then Console.WriteLine("  App-kill: ALL sessions (blocked apps are killed in every logged-in session, not just this one).")
-        ' C6b: confirm a custom cooling-off duration when set (the ~1h floor still applies if shorter).
-        If coolOffSeconds > 0 Then Console.WriteLine("  Cooling-off: " & Humanize(TimeSpan.FromSeconds(coolOffSeconds)) & " (the self-serve 'unblock' wait; a ~1h minimum still applies if this is shorter).")
         Console.WriteLine("Close and reopen your browser to see the block. It cannot be removed until the timer ends.")
 
-        ' C4: committed-block notice - a committed block surrenders the self-serve
-        ' cooling-off wait, so the accountability code below is the ONLY early exit.
-        If committed Then
-            Console.WriteLine("")
-            Console.WriteLine("This block is COMMITTED: self-serve cooling-off is DISABLED. The ONLY early exit is the accountability code below (or waiting for the timer to end).")
-        End If
+        ' Ledger 319: every block is committed, so this notice is unconditional. It is the last
+        ' thing said before the code is printed, because the code is now the ONLY early exit
+        ' that exists - there is no self-serve wait behind it and no escape hatch under it.
+        Console.WriteLine("")
+        Console.WriteLine("This block ends at its end time, or earlier ONLY with the accountability code below. There is no other way out - if you lose the code, you wait.")
 
         ' C3b: show the partner accountability code ONCE - this is the only time it
         ' is ever displayed (it is stored only as a salted one-way hash, never in
@@ -607,9 +605,9 @@ Module Program
             Dim todayLine As String = BlockedTodayStatusLine()
             If todayLine <> "" Then Console.WriteLine(todayLine)
             ' B7: never render a reassuring exit story over a config that failed its integrity
-            ' check. ReadSlotViews already suppresses the committed / cooling-off fields in that
-            ' case (so the Exit column reads code+wait, its most conservative value); say plainly
-            ' why none of it can be acted on.
+            ' check. Ledger 319: the Exit column now reads "code" on every manual row regardless,
+            ' and a frozen config cannot be lifted by the code either - so say plainly why none
+            ' of it can be acted on.
             If Not macValid Then
                 Console.WriteLine("")
                 Console.WriteLine(ConfigFrozenNoteLine())
@@ -661,9 +659,8 @@ Module Program
             Dim apps As String = Blocker.BlockedApps()
             If sites <> "" Then Console.WriteLine("  Sites: " & sites.Replace(";", " "))
             If apps <> "" Then Console.WriteLine("  Apps:  " & apps.Replace(";", " "))
-            ' D5: the exit story - committed (code-only), cooling-off pending (monotonic remaining), or
-            ' the self-serve wait + code. A read-only, MAC-gated, best-effort view (never mutates state).
-            Console.WriteLine("  " & FormatCoolOffStatusLine(Blocker.BlockIsCommitted(), Blocker.CoolOffPendingRemaining()))
+            ' D5: the exit story - ledger 319, one sentence, identical to the slot table's.
+            Console.WriteLine("  " & FormatExitStatusLine())
             Console.WriteLine(FormatMonotonicNoteLine())
             ' B7, as in the table above: a frozen config is why the end stamp and the remaining
             ' cannot be trusted or acted on - it reads as ACTIVE precisely because nothing lifts.
@@ -808,7 +805,7 @@ Module Program
             ' reported as applied. Refuse it here with the same message `block` gives.
             If Not Blocker.ConfigIsMacValid() Then
                 Console.Error.WriteLine("The current MonkMode configuration failed its integrity check, so it is frozen and cannot be added to.")
-                Console.Error.WriteLine("Wait for the running block(s) to end, or use 'monkmode unblock --force' once they have.")
+                Console.Error.WriteLine("Nothing can be armed or added while it is frozen, and a frozen config never lifts by itself - see 'monkmode help'.")
                 Return Blocker.ExitArmFailed
             End If
             ' P40: the service reads a content-bearing trigger only up to TriggerMaxBytes and
@@ -1011,289 +1008,118 @@ Module Program
         Return 0
     End Function
 
-    ' C2b (R1): `unblock` is now a REQUEST, not a teardown. Bare `unblock` drops
-    ' the presence-only cooling-off request trigger; the SERVICE (the sole timing
-    ' authority) starts a floor-long cooling-off on its next tick - the block
-    ' stays fully enforced while a MAC-covered monotonic deadline counts down -
-    ' and then lifts via its own stopMe(). `--cancel` drops the cancel trigger
-    ' (clear the pending cooling-off; stay blocked). Nothing here can shorten the
-    ' wait: the trigger files carry no timing (R2) and the deadline is
-    ' service-computed and floor-clamped.
+    ' LEDGER 319 (30/08/2026) - `unblock` HAS EXACTLY ONE JOB: SUBMIT THE PARTNER CODE.
     '
-    ' C3b (R1): `--code <CODE>` is the FAST partner-relayed exit. It drops the ONE
-    ' content-bearing trigger with the candidate; the SERVICE alone KDF-verifies it
-    ' against the MAC-covered hash and, on a match, lifts via the same stopMe(). The
-    ' CLI has ZERO lift authority - it only submits (an attacker running the CLI
-    ' cannot forge a preimage, swap the MAC-covered verifier, or skip the
-    ' service-side lift). A wrong/blank/tampered code leaves the block standing.
+    ' Before this slice there were two ways out of a running block that needed no code:
+    ' `unblock --force` (an unconditional teardown - service deleted, hosts stripped, config
+    ' zeroed) and a bare `unblock` (the self-serve cooling-off wait, which lifted the block
+    ' after ~1h of active machine time). Samrath's words on 30/08/2026: "i dont like how i
+    ' can force unblock it regardless ... i should only be able to unblock with code." Both
+    ' are GONE - the flag, the teardown, the request/cancel triggers and the service-side
+    ' timing that honoured them. A running block now ends on exactly two events: its own end
+    ' time, or a partner code the SERVICE verifies. Nothing else, at any privilege level the
+    ' CLI has. The honest ceiling is unchanged and now unsoftened: B10 (boot elsewhere and
+    ' edit the disk) still wins, and that is deliberately not a feature of this program.
     '
-    ' `--force` remains the UNCHANGED B6 escape hatch (D2: retained as
-    ' brick-insurance until partner-code exists at C3/C4/H2 to take over that
-    ' role - you cannot remove the only guaranteed exit before its replacement
-    ' exists, or a DPAPI-dead freeze traps the machine). Once B1/B2/B3/B4/B7 are
-    ' all fail-closed, a tampered or corrupted block never auto-lifts, and the
-    ' service resists `sc delete`; this verb is the deliberate, documented way
-    ' out (see vault\dev\monk-mode\specs\ARCHITECTURE.md B6 / the honest
-    ' ceiling). It is UNCONDITIONAL by design but gated behind an explicit
-    ' --force, so it can never be a casual one-word bypass. Every step is
-    ' best-effort and ordered so nothing resurrects the service mid-teardown;
-    ' failures are reported, not fatal. Mirrors the live-verified cleanup.ps1
-    ' emergency teardown.
+    ' THERE IS NO RECOVERY FOR A LOST CODE. That is the design, not an oversight: an escape
+    ' hatch that exists is an escape hatch that gets used at 2am. The cost is real and was
+    ' accepted with it - a config that fails its integrity check (B7 freeze) can be lifted by
+    ' NOTHING, not even the code (ClassifyPartnerCodeSignal requires a valid MAC), so it holds
+    ' until B10. `monkmode help` says so in those words.
+    '
+    ' C3b (R1), UNCHANGED and now the only exit here: `--code <CODE>` drops the ONE
+    ' content-bearing trigger with the candidate; the SERVICE alone KDF-verifies it against
+    ' the MAC-covered hash and, on a match, lifts via its own stopMe(). The CLI has ZERO lift
+    ' authority - it only submits (an attacker running the CLI cannot forge a preimage, swap
+    ' the MAC-covered verifier, or skip the service-side lift). A wrong/blank/tampered code
+    ' leaves every block standing.
     Private Function DoUnblock(ByVal args As String()) As Integer
-        Dim forced As Boolean = HasFlag(args, "--force")
-        If Not forced Then
-            ' v1.1 S3b: the exit surface is SLOT-ADDRESSED (P40), so this needs the ids.
-            ' `--id <N>` (P35's flag name, shared with `add` and `schedule`) targets ONE block.
-            ' Read BEFORE the liveness check so "nothing armed" is decided off the config, not
-            ' off whether the service happens to be up.
-            Dim armedIds As List(Of Integer) = Blocker.ArmedSlotIds()
-            Dim targetArg As String = GetOption(args, "--id")
-            Dim explicitId As Boolean = targetArg <> ""
-            If explicitId Then
-                Dim wanted As Integer
-                If Not Integer.TryParse(targetArg.Trim(), wanted) OrElse Not armedIds.Contains(wanted) Then
-                    Console.Error.WriteLine("No armed block #" & targetArg.Trim() & ". Run 'monkmode status' to see the armed blocks.")
-                    Return 1
-                End If
-                armedIds = New List(Of Integer) From {wanted}
-            End If
-            ' The cooling-off surface (bare request / --cancel). Only meaningful
-            ' against an active block - the service only polls while it runs.
-            If armedIds.Count = 0 AndAlso Not Blocker.BlockIsActive() Then
-                Console.Error.WriteLine("No active block to unblock.")
-                Return 1
-            End If
-            ' v1.1 S3b: every exit trigger is now ADDRESSED at a slot, so with no armed slots
-            ' there is nothing to address. Say so rather than dropping nothing and reporting
-            ' success - the one shape that reaches here is a v9 schedule-only block, which by
-            ' design holds at full strength through its window and has no early exit at all.
-            If armedIds.Count = 0 Then
-                Console.Error.WriteLine("No block slot to address. A scheduled block holds until its window closes and cannot be ended early.")
-                Return 1
-            End If
-            ' C3b: partner-code attempt. Drop the ONE content-bearing trigger with
-            ' the candidate; the SERVICE alone verifies it (KDF + constant-time
-            ' compare against the MAC-covered hash) on its next tick and, on a match,
-            ' lifts via the SAME stopMe() natural expiry and cooling-off use. The CLI
-            ' has ZERO lift authority here - it only submits a candidate. Deliberately
-            ' does NOT reveal correctness synchronously (the service adjudicates); a
-            ' wrong/blank/tampered code just leaves the block standing.
-            If HasFlag(args, "--code") Then
-                Dim code As String = GetOption(args, "--code")
-                If code = "" Then
-                    Console.Error.WriteLine("Provide the code:  monkmode unblock --code <CODE>")
-                    Return 1
-                End If
-                ' BROADCAST, deliberately - and NOT what P33 governs. The partner is handed a
-                ' code, not a block number, so requiring --id here would make the documented
-                ' exit unusable. It is safe because each slot KDF-verifies the candidate
-                ' against its OWN MAC-covered PartnerSalt/PartnerHash: it can match at most
-                ' one - the block that minted it - and every other block stays fully enforced.
-                ' Contrast the bare cooling-off request below, where a broadcast would start a
-                ' real countdown on blocks the user never named.
-                For Each id As Integer In armedIds
-                    Blocker.RequestPartnerCode(id, code)
-                Next
-                Console.WriteLine("Code submitted. If it's correct that block lifts within ~10s; if not, every block stays fully enforced.")
-                Return 0
-            End If
-            If HasFlag(args, "--cancel") Then
-                ' Also a broadcast, and also not P33's business: a cancel puts blocks BACK
-                ' into full enforcement, so addressing more of them than the user meant is
-                ' the over-blocking direction. Refusing it would be the fail-open one.
-                For Each id As Integer In armedIds
-                    Blocker.CancelCoolOff(id)
-                Next
-                Console.WriteLine("Cooling-off cancel requested. Any pending cooling-off is cleared within ~10s; the block continues to its normal end.")
-                Return 0
-            End If
+        ' D5 (friendly validation): warn on unrecognised --flags without failing. This is
+        ' where a habit-typed `--force` now lands: an "unknown flag" note, then the ordinary
+        ' refusal below. It is deliberately a WARNING and not a special-cased error, because
+        ' `--force` should read as a flag that does not exist, not as one being withheld.
+        Dim unknownOpts As List(Of String) = UnknownOptions(args, UnblockOptionNames())
+        If unknownOpts.Count > 0 Then
+            Console.Error.WriteLine("Note: unrecognised option(s) " & String.Join(", ", unknownOpts) & " - ignored.")
+        End If
 
-            ' P33 - THE ONE PATH THAT MUST REFUSE. A bare `unblock` starts a REAL countdown
-            ' that ENDS a block, so it may never be aimed at a block the user did not name.
-            ' The failure this prevents is concrete: with a 1h focus block and a 30d
-            ' commitment armed, habit-typing `unblock` meaning the short one would start the
-            ' ~1h cooling-off on BOTH, and the 30d block would lift within the hour. Refusing
-            ' to begin an exit is also the fail-closed direction, so this costs nothing.
-            ' With exactly one armed slot, bare `unblock` still targets it - v1.0's feel.
-            If BareUnblockIsAmbiguous(explicitId, armedIds.Count) Then
-                Console.Error.WriteLine("More than one block is active. Name the one you mean:  monkmode unblock --id <N>")
-                For Each line As String In Blocker.ArmedSlotLines()
-                    Console.Error.WriteLine(line)
-                Next
+        ' v1.1 S3b: the exit surface is SLOT-ADDRESSED (P40), so this needs the ids.
+        ' `--id <N>` (P35's flag name, shared with `add` and `schedule`) targets ONE block.
+        ' Read BEFORE the liveness check so "nothing armed" is decided off the config, not
+        ' off whether the service happens to be up.
+        Dim armedIds As List(Of Integer) = Blocker.ArmedSlotIds()
+        Dim targetArg As String = GetOption(args, "--id")
+        If targetArg <> "" Then
+            Dim wanted As Integer
+            If Not Integer.TryParse(targetArg.Trim(), wanted) OrElse Not armedIds.Contains(wanted) Then
+                Console.Error.WriteLine("No armed block #" & targetArg.Trim() & ". Run 'monkmode status' to see the armed blocks.")
                 Return 1
             End If
+            armedIds = New List(Of Integer) From {wanted}
+        End If
+        If armedIds.Count = 0 AndAlso Not Blocker.BlockIsActive() Then
+            Console.Error.WriteLine("No active block to unblock.")
+            Return 1
+        End If
+        ' v1.1 S3b: every exit trigger is ADDRESSED at a slot, so with no armed slots there is
+        ' nothing to address. Say so rather than dropping nothing and reporting success - the
+        ' one shape that reaches here is a v9 schedule-only block, which by design holds at
+        ' full strength through its window and has no early exit at all.
+        If armedIds.Count = 0 Then
+            Console.Error.WriteLine("No block slot to address. A scheduled block holds until its window closes and cannot be ended early.")
+            Return 1
+        End If
 
-            ' C4: a committed block has NO self-serve cooling-off - refuse the request
-            ' with an actionable message instead of dropping a trigger the service would
-            ' just Ignore. The partner code (verified service-side) is the intended exit.
-            ' v1.1 S3b: read the ADDRESSED slot's own flag, never the machine-wide v9 latch.
-            ' The latch is "yes if ANY slot is", so gating one block's exit on it locks the
-            ' survivor out of an exit it is entitled to for as long as it runs.
-            If Blocker.SlotIsCommitted(armedIds(0)) Then
-                Console.Error.WriteLine("This block is COMMITTED: self-serve cooling-off is disabled. The only early exit is the accountability code:  monkmode unblock --code <CODE>")
+        If HasFlag(args, "--code") Then
+            Dim code As String = GetOption(args, "--code")
+            If code = "" Then
+                Console.Error.WriteLine("Provide the code:  monkmode unblock --code <CODE>")
                 Return 1
             End If
+            ' BROADCAST, deliberately. The partner is handed a code, not a block number, so
+            ' requiring --id here would make the only exit unusable. It is safe because each
+            ' slot KDF-verifies the candidate against its OWN MAC-covered PartnerSalt/
+            ' PartnerHash: it can match at most one - the block that minted it - and every
+            ' other block stays fully enforced.
             For Each id As Integer In armedIds
-                Blocker.RequestCoolOff(id)
+                Blocker.RequestPartnerCode(id, code)
             Next
-            Console.WriteLine("Cooling-off requested. The block stays FULLY enforced while the service counts down ~1 hour of active machine time; it then lifts itself.")
-            Console.WriteLine("Changed your mind? Run:  monkmode unblock --cancel")
+            Console.WriteLine("Code submitted. If it's correct that block lifts within ~10s; if not, every block stays fully enforced.")
             Return 0
         End If
 
-        Console.WriteLine("Forcing MonkMode down (escape hatch). This removes the active block.")
-
-        ' 1. Stop the SCM from auto-restarting the service the moment we kill it
-        '    (B1 layer 1), so the kills in step 2 actually stick.
-        Step_("Disabling service recovery policy", Sub() ServiceTools.ServiceInstaller.DisableRecovery(Blocker.ServiceName))
-
-        ' 2. Kill the watchdog pair (guardian first, then service) so neither
-        '    re-asserts the deny-DELETE ACE nor re-enforces hosts, plus the
-        '    notifier. Retries until both stay down (recovery is already off).
-        Step_("Stopping the watchdog pair and notifier", Sub() Blocker.KillWatchdogProcesses())
-
-        ' 3+4. With nothing alive to re-deny, remove the deny-DELETE ACE so the
-        '    service object can be opened for DELETE (the CLI runs as BA), then
-        '    delete the service registration itself (the `sc delete` we
-        '    normally refuse during a block). Audit #9: while the deny ACE is
-        '    still on the SD the SCM is GUARANTEED to refuse the delete, so a
-        '    hard-failed SD restore is retried once and a still-failed restore
-        '    SKIPS the delete with an actionable message, instead of burying
-        '    the real cause under a misleading AccessDenied "skipped" from
-        '    step 4. Steps 5+ run either way (best-effort teardown continues).
-        RunSdRestoreThenDelete(
-            Function(attempt As Integer) Step_(
-                If(attempt = 1, "Removing the service deny-DELETE protection", "Retrying the deny-DELETE removal"),
-                Sub() ServiceTools.ServiceInstaller.RestoreDefaultServiceSd(Blocker.ServiceName)),
-            Function() Step_("Deleting the MonkMode service", Sub() ServiceTools.ServiceInstaller.DeleteServiceByName(Blocker.ServiceName)),
-            Sub(msg) Console.WriteLine(msg))
-
-        ' 5. Unlock hosts and strip ONLY the MonkMode marker block (user content
-        '    preserved byte-for-byte — the same data-loss-safe strip the service
-        '    uses at expiry).
-        Step_("Restoring the hosts file", Sub() Blocker.RestoreHostsFromStrip())
-
-        ' 6-8. Remove the B2 snapshot, the B3 SafeBoot leaf keys, and the HKCU
-        '    autorun, so a future install can't self-heal the old block back.
-        Step_("Removing the hosts snapshot", Sub() Blocker.DeleteSnapshot())
-        ' C1b: remove the config shadow backup so a future install can't restore the
-        ' old config from it (mirrors the hosts-snapshot removal + stopMe's delete).
-        Step_("Removing the config backup", Sub() Blocker.DeleteBackup())
-        ' C2b/C3b: remove any cooling-off + partner-code trigger files (mirrors
-        ' stopMe's deletes) so a stale request can't auto-start a cooling-off, and no
-        ' stale candidate lingers, on the NEXT armed block. Cleanup only - the
-        ' teardown above is unchanged (D2 keeps --force as-is through C3b).
-        Step_("Removing cooling-off and partner-code triggers", Sub()
-                                                   Try
-                                                       File.Delete(Path.Combine(Blocker.AppDir(), Blocker.CoolOffRequestFileName))
-                                                   Catch
-                                                   End Try
-                                                   Try
-                                                       File.Delete(Path.Combine(Blocker.AppDir(), Blocker.CoolOffCancelFileName))
-                                                   Catch
-                                                   End Try
-                                                   Try
-                                                       File.Delete(Path.Combine(Blocker.AppDir(), Blocker.PartnerCodeFileName))
-                                                   Catch
-                                                   End Try
-                                                   ' v1.1 S3b: and every SLOT-ADDRESSED trigger (P40) - the
-                                                   ' three unsuffixed deletes above only clear a legacy file
-                                                   ' an older build left. A surviving <prefix><id> would be
-                                                   ' inherited by whatever block next takes that id.
-                                                   Try
-                                                       For Each pattern As String In New String() {Blocker.CoolOffRequestPrefix & "*", Blocker.CoolOffCancelPrefix & "*", Blocker.PartnerCodePrefix & "*", Blocker.AddRequestPrefix & "*"}
-                                                           For Each stale As String In Directory.GetFiles(Blocker.AppDir(), pattern)
-                                                               Try
-                                                                   File.Delete(stale)
-                                                               Catch
-                                                               End Try
-                                                           Next
-                                                       Next
-                                                   Catch
-                                                   End Try
-                                               End Sub)
-        Step_("Removing the Safe Mode registration", Sub() Blocker.RemoveSafeBootKeys())
-        ' B5a: restore the user's prior browser DoH policy (or remove our lingering
-        ' "off") from the snapshot, then consume it - no data loss, so a reinstall
-        ' can't re-restore a stale prior.
-        Step_("Restoring browser DoH policy", Sub() Blocker.RemoveDohPolicy())
-        Step_("Clearing the notifier autorun", Sub() Blocker.ClearNotifierAutorun())
-        ' F70, and LAST on purpose. Everything above removed the ENFORCEMENT; the config file
-        ' itself survives (it carries NextSlotId, which P17 says never restarts), and until this
-        ' step it still SAID a block was armed. Two guards read only that file - AnySlotArmed()
-        ' below in DoSchedule, and Get-BuildRefusals in tools\build-dist.ps1 - so a torn-down
-        ' machine refused both `monkmode schedule` (exit 3) and any rebuild/install of the dist,
-        ' with nothing enforcing anywhere. This is the step the service's own genuine-expiry
-        ' teardown has always had (Service1.PersistZeroSlotConfigAt, P39) and the escape hatch
-        ' did not. Last, so a crash anywhere above leaves the config still armed - the safe side,
-        ' cleared by re-running the same command. See Blocker.PersistZeroSlotConfig.
-        Step_("Clearing the armed state from the config", Sub() Blocker.PersistZeroSlotConfig())
-
-        Console.WriteLine("Done. MonkMode has been removed. If your browser still shows a block, flush DNS / reopen it.")
-        Return 0
+        ' THE REFUSAL. Reached by a bare `unblock`, by `unblock --id N`, and by every retired
+        ' flag (`--force`, `--cancel`) now that they are merely unknown options. Exit code 1:
+        ' this is a usage refusal, and no state was touched.
+        Console.Error.WriteLine("A running block ends only at its end time or with the partner code. Run:  monkmode unblock --code <CODE>")
+        Console.Error.WriteLine("If the code is lost, you wait. There is no cooling-off wait, no escape hatch and no recovery - that is the point.")
+        Return 1
     End Function
 
     ' ---------- helpers ----------
 
-    ' P33 (PURE): must a bare `unblock` (no --id) refuse rather than start a cooling-off?
-    ' Yes as soon as more than one block is armed. A cooling-off request starts a REAL
-    ' countdown that ENDS a block, so it may never be aimed at a block the user did not name:
-    ' with a 1h focus block and a 30d commitment armed, habit-typing `unblock` meaning the
-    ' short one would otherwise start the ~1h clock on BOTH and the 30d block would lift
-    ' within the hour. With exactly one armed slot it targets that one, so a single-block
-    ' machine feels exactly like v1.0. Refusing to BEGIN an exit is the fail-closed direction,
-    ' so the refusal costs nothing in safety. Pure + Friend so the rule is unit-pinned rather
-    ' than only reachable through the console path.
-    Friend Function BareUnblockIsAmbiguous(ByVal explicitId As Boolean, ByVal armedCount As Integer) As Boolean
-        Return Not explicitId AndAlso armedCount > 1
-    End Function
+    ' Ledger 319: P33's BareUnblockIsAmbiguous is GONE with the cooling-off it guarded. It
+    ' existed because a bare `unblock` started a real countdown that ENDED a block, so it
+    ' could not be aimed at blocks the user had not named. A bare `unblock` now starts
+    ' nothing at all - it refuses - so there is no ambiguity left to arbitrate, and the
+    ' broadcast `--code` is safe by construction (each slot verifies against its own hash).
 
     ' C6a: the shared "run setup first" refusal for the arm paths (block/schedule). A
     ' distinct exit code (4) so a script can tell "not set up" apart from a usage error (1)
     ' or an already-active block (3).
     Private Function SetupRequired() As Integer
-        Console.Error.WriteLine("MonkMode isn't set up yet. Run 'monkmode setup' once first - it takes a minute and explains how to end a block (the accountability code + cooling-off).")
+        Console.Error.WriteLine("MonkMode isn't set up yet. Run 'monkmode setup' once first - it takes a minute and explains the accountability code, which is the only way to end a block early.")
         Return 4
     End Function
 
-    ' Run one best-effort teardown step: print what it does, swallow + report any
-    ' failure so the escape hatch always continues to the next step. Returns
-    ' whether the step succeeded so a dependent step can be gated on it (audit
-    ' #9); callers stay free to ignore the result.
-    Private Function Step_(ByVal label As String, ByVal action As Action) As Boolean
-        Console.Write("  " & label & " ... ")
-        Try
-            action()
-            Console.WriteLine("ok")
-            Return True
-        Catch ex As Exception
-            Console.WriteLine("skipped (" & ex.Message & ")")
-            Return False
-        End Try
-    End Function
+    ' Ledger 319: Step_ and RunSdRestoreThenDelete are GONE with the teardown they sequenced.
+    ' Both existed only for `unblock --force` - Step_ printed and swallowed one best-effort
+    ' teardown step, and RunSdRestoreThenDelete encoded audit #9's rule that the service
+    ' delete must not be attempted while the deny-DELETE ACE is still on the SD. There is no
+    ' CLI teardown left to sequence: the SERVICE tears itself down at a genuine exit, and the
+    ' service object's deny-DELETE ACE is now never removed by anything the CLI can run.
 
-    ' Audit #9 teardown policy: the service delete (step 4) is refused by the
-    ' SCM for as long as the deny-DELETE ACE is still on the service SD, so a
-    ' hard-failed SD restore (step 3) makes the delete attempt pure noise - a
-    ' misleading AccessDenied "skipped". Policy: retry the restore once (covers
-    ' a transient SCM hiccup), attempt the delete ONLY after a restore attempt
-    ' succeeded, otherwise report an actionable skip. Friend + delegate params
-    ' so the unit tests drive the policy without touching the real SCM (hard
-    ' fence); production wires the delegates through Step_, so they never
-    ' throw. Returns whether the delete ran and succeeded.
-    Friend Function RunSdRestoreThenDelete(ByVal tryRestoreSd As Func(Of Integer, Boolean),
-                                           ByVal tryDeleteService As Func(Of Boolean),
-                                           ByVal reportSkip As Action(Of String)) As Boolean
-        Dim sdRestored As Boolean = tryRestoreSd(1)
-        If Not sdRestored Then sdRestored = tryRestoreSd(2)
-        If Not sdRestored Then
-            reportSkip("  Deleting the MonkMode service ... skipped (the deny-DELETE removal failed twice, so the SCM would refuse the delete; re-run 'monkmode unblock --force' to retry)")
-            Return False
-        End If
-        Return tryDeleteService()
-    End Function
-
-    ' True if a bare flag (e.g. --force) is present anywhere in args.
+    ' True if a bare flag (e.g. --code) is present anywhere in args.
     Private Function HasFlag(ByVal args As String(), ByVal name As String) As Boolean
         For Each a As String In args
             If String.Equals(a, name, StringComparison.OrdinalIgnoreCase) Then Return True
@@ -1477,7 +1303,7 @@ Module Program
         End If
         seconds = CLng(Math.Round(span.TotalSeconds))
         If seconds > Blocker.MaxCoolOffSeconds Then
-            Console.Error.WriteLine("--cooloff is too long (max ~365d). Cooling-off is a short wait before the self-serve exit, not a second timer.")
+            Console.Error.WriteLine("--cooloff is too long (max ~365d). Note that since ledger 319 --cooloff is accepted but has no effect at all: there is no cooling-off exit.")
             seconds = 0
             Return False
         End If
@@ -1494,28 +1320,20 @@ Module Program
         Return String.Join(" ", parts)
     End Function
 
-    ' D5 (rich status, pure): the exit/cooling-off line for an ACTIVE manual block. A committed block
-    ' shows the code-only exit; a pending cooling-off shows the monotonic remaining + the cancel;
-    ' otherwise the self-serve wait + the code are offered. Always returns a non-empty line (an
-    ' active block always has SOME exit story). Friend so it is unit-tested by literal - the branch
-    ' selection is display logic worth pinning. coolOffRemaining is Blocker.CoolOffPendingRemaining()
-    ' (Nothing = none pending); a committed block ignores it (self-serve cooling-off is disabled).
-    ' v1.1 S5 (P31): reused VERBATIM per slot, gaining only "--id <N>" inside the two command
-    ' hints (slotId = "" keeps the pre-v1.1 single-block wording, which is what the v9
-    ' fallback branch of `status` still prints). The three literal texts are load-bearing for
-    ' tools\smoke\cv-d-smoke.ps1 - "committed block" (:141) and "cooling-off pending" (:165)
-    ' are matched by the live smoke, so they must survive any edit here verbatim.
-    Friend Function FormatCoolOffStatusLine(ByVal committed As Boolean, ByVal coolOffRemaining As TimeSpan?, Optional ByVal slotId As String = "") As String
+    ' Ledger 319: ONE sentence, no branches. Every armed block now has the same two exits and
+    ' only those two, so the three-way branch this function used to carry (committed /
+    ' cooling-off pending / self-serve) described a choice that no longer exists. Kept as a
+    ' function (rather than inlined) because both `status` renderers print it - the v1.1 slot
+    ' table and the v9 single-block fallback - and one literal is how they are kept identical.
+    ' The parameters are gone with the branches; slotId survives only so the hint can name the
+    ' block. Friend so the literal is unit-pinned. Renamed from FormatCoolOffStatusLine, and
+    ' tools\smoke\cv-d-smoke.ps1's "committed block" / "cooling-off pending" matches were
+    ' retired with it.
+    Friend Function FormatExitStatusLine(Optional ByVal slotId As String = "") As String
         ' "?" is ArmedSlotLines'/ReadSlotViews' unreadable-id placeholder: never build a
         ' command hint the user cannot type.
         Dim target As String = If(slotId Is Nothing OrElse slotId = "" OrElse slotId = "?", "", " --id " & slotId)
-        If committed Then
-            Return "Exit:  committed block - the accountability code (shown at block start) is the only early exit, or wait for the timer."
-        End If
-        If coolOffRemaining IsNot Nothing Then
-            Return "Exit:  cooling-off pending - lifts in about " & Humanize(coolOffRemaining.Value) & " of active time. Run 'monkmode unblock" & target & " --cancel' to stay blocked."
-        End If
-        Return "Exit:  run 'monkmode unblock" & target & "' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now."
+        Return "Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock" & target & " --code <CODE>'. There is no other way out."
     End Function
 
     ' ---- P32 (v1.1 S5): the `status` slot table - pure, fixed-width, pinned by literal ----
@@ -1616,7 +1434,7 @@ Module Program
     ' exit story over a config that failed its integrity check - the countdowns and exit lines
     ' above it are suppressed (MAC-gated), and this says plainly why none of it can be acted on.
     Friend Function ConfigFrozenNoteLine() As String
-        Return "  NOTE: the stored configuration failed its integrity check, so MonkMode is FROZEN: nothing lifts, and the exit lines above cannot be acted on until the blocks end and you re-arm."
+        Return "  NOTE: the stored configuration failed its integrity check, so MonkMode is FROZEN: nothing lifts it - not the end time, and not the partner code either - and the exit lines above cannot be acted on at all."
     End Function
 
     ' The stopped-service NOTE, one literal for both `status` paths (the slot table and the v9
@@ -1659,24 +1477,26 @@ Module Program
         Return "?"
     End Function
 
-    ' The one-word Exit column. Committed is checked BEFORE cooling-off, matching
-    ' FormatCoolOffStatusLine: a committed block has no self-serve cooling-off at all, so a
-    ' deadline stored against one could only be stale.
+    ' The one-word Exit column. Ledger 319: a manual block - ACTIVE or PENDING - has exactly
+    ' one early exit, so both read "code". The old "committed" / "cooling-off" / "code+wait"
+    ' trichotomy went with the cooling-off, and PENDING's "cancel" went with `--cancel`.
     Friend Function SlotExitToken(ByVal v As Blocker.SlotView) As String
         If v Is Nothing Then Return ""
         If v.State = Blocker.SlotStateSchedule Then Return "window"
-        If v.State = Blocker.SlotStatePending Then Return "cancel"
-        If v.Committed Then Return "committed"
-        If v.CoolOffRemaining IsNot Nothing Then Return "cooling-off"
-        Return "code+wait"
+        Return "code"
     End Function
 
     ' The full-sentence Exit line printed under each row.
     Friend Function FormatSlotExitLine(ByVal v As Blocker.SlotView) As String
         If v Is Nothing Then Return ""
         If v.State = Blocker.SlotStateSchedule Then Return "Exit:  an open window can't be ended early; it closes on its own."
-        If v.State = Blocker.SlotStatePending Then Return "Exit:  not started yet - 'monkmode unblock --id " & v.Id & " --cancel' cancels it freely until it starts."
-        Return FormatCoolOffStatusLine(v.Committed, v.CoolOffRemaining, v.Id)
+        ' Ledger 319: a PENDING block used to advertise `--cancel` as a free way out "until it
+        ' starts". That was never true - `--cancel` only ever cleared a pending cooling-off
+        ' deadline, and a PENDING slot has none, so the cancel did nothing and the block
+        ' started anyway (docs\USER-GUIDE.md recorded the lie). The flag is gone; a pending
+        ' block gets the same honest sentence as a running one, minus the tense.
+        If v.State = Blocker.SlotStatePending Then Return "Exit:  not started yet, and it cannot be cancelled. Once it starts it ends at its end time, or earlier with the partner code."
+        Return FormatExitStatusLine(v.Id)
     End Function
 
     ' D5 (friendly validation, pure): the "--flags" in args NOT in the known set (case-insensitive) -
@@ -1707,9 +1527,20 @@ Module Program
     End Function
 
     ' D5: the flags `block` accepts (for the UnknownOptions typo warning). One list, so a new block
-    ' flag is added in exactly one place alongside its DoBlock handling.
+    ' flag is added in exactly one place alongside its DoBlock handling. Ledger 319 keeps
+    ' `--commit` and `--cooloff` in this list although both are now inert: they are ACCEPTED
+    ' (every block is committed and no block has a cooling-off), and an accepted flag must not
+    ' also be reported as unrecognised.
     Friend Function BlockOptionNames() As String()
         Return New String() {"--sites", "--preset", "--apps", "--app-preset", "--for", "--until", "--file", "--commit", "--cooloff", "--all-session-kill", "--urls", "--start"}
+    End Function
+
+    ' Ledger 319: the flags `unblock` accepts - the whole exit surface, in one line. `--force`
+    ' and `--cancel` are deliberately ABSENT rather than accepted-and-ignored: they used to DO
+    ' something, so a silent no-op would be the dangerous shape (a user believing the block is
+    ' coming down). Landing in UnknownOptions makes the CLI say the flag does not exist.
+    Friend Function UnblockOptionNames() As String()
+        Return New String() {"--id", "--code"}
     End Function
 
     ' D5 follow-up (pure): the BOOLEAN "--flag=value" tokens in args - an on/off flag (--commit,
@@ -1740,8 +1571,8 @@ Module Program
         Console.WriteLine("MonkMode - tamper-resistant self-control blocker")
         Console.WriteLine("")
         Console.WriteLine("Usage:")
-        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--cooloff 2h] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
-        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--commit] [--cooloff 2h] [--all-session-kill] [--urls ""*/watch*""] [--start +90m]")
+        Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
+        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--all-session-kill] [--urls ""*/watch*""] [--start +90m]")
         Console.WriteLine("  monkmode status  (one row per armed block - time left, what it covers, and how to exit each one)")
         Console.WriteLine("  monkmode stats   (read-only summary of your block history: counts, total focus time, longest block)")
         Console.WriteLine("  monkmode add --sites c.com [--id N]   (adds sites to ONE block; --id is required when more than one is running)")
@@ -1749,32 +1580,26 @@ Module Program
         Console.WriteLine("  monkmode schedule --clear   (stop future windows; an open window still runs to its end)")
         Console.WriteLine("  monkmode schedule --show    (print the armed schedule; read-only)")
         Console.WriteLine("  monkmode schedule --validate --sites a.com --windows ""Mon-Fri 09:00-17:00""  (check a schedule without arming it)")
-        Console.WriteLine("  monkmode unblock [--id N]  (request cooling-off: the block lifts after ~1h of active machine time; --id is required when more than one block is running)")
-        Console.WriteLine("  monkmode unblock --cancel  (cancel a pending cooling-off; stay blocked)")
-        Console.WriteLine("  monkmode unblock --code <CODE>  (submit the partner accountability code; the service verifies it and lifts within ~10s)")
-        Console.WriteLine("  monkmode unblock --force   (escape hatch: tears down an active block + removes the service)")
+        Console.WriteLine("  monkmode unblock --code <CODE>  (the ONLY early exit: submit the partner accountability code; the service verifies it and lifts within ~10s)")
         Console.WriteLine("  monkmode version  (which release and which build this machine is running)")
         Console.WriteLine("  monkmode help")
         Console.WriteLine("")
         Console.WriteLine("Notes:")
-        ' F75: the timer was the ONE exit the help never named. Cooling-off, --code and
-        ' --force were all spelled out above, but "it just ends" was only inferable from the
-        ' --for grammar note - and it is the exit that needs no action, so it belongs first.
+        ' F75: the timer was the ONE exit the help never named, and since ledger 319 it is one
+        ' of only two - so it still belongs first. It is the exit that needs no action.
         Console.WriteLine("  - A block ENDS BY ITSELF when its timer runs out. You do not have to do anything; the sites come back within about 10 seconds of the end time.")
-        Console.WriteLine("  - Run 'monkmode setup' once before your first block; it explains the accountability code + cooling-off and is required to arm.")
+        Console.WriteLine("  - A running block has exactly TWO ends: its end time, or the accountability code shown once at block start. There is no self-serve wait, no escape hatch and no override - if you lose the code, you wait.")
+        Console.WriteLine("  - Run 'monkmode setup' once before your first block; it explains the accountability code and is required to arm.")
         Console.WriteLine("  - Run as Administrator (needed to edit the hosts file and install the service).")
-        Console.WriteLine("  - Once a block starts it cannot be shortened; 'unblock' starts a mandatory cooling-off wait.")
-        Console.WriteLine("  - --commit arms a COMMITTED block: self-serve cooling-off is disabled, so the only early exit is the accountability code shown at block start (or the timer).")
+        Console.WriteLine("  - Once a block starts it cannot be shortened, paused or cancelled.")
         Console.WriteLine("  - --all-session-kill kills blocked apps in EVERY logged-in Windows session, not just the one you ran 'block' in (useful if you fast-user-switch to a second account to dodge the kill). No effect unless you block apps.")
         Console.WriteLine("  - schedule = recurring wall-clock windows (--windows uses days Mon-Sun + 24-hour HH:MM; an end BEFORE the start means overnight (e.g. ""Mon-Fri 22:30-04:00"" covers Tue-Sat 00:00-04:00)). An open window holds at manual strength until it closes; a schedule and a manual block can't both be armed at once.")
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
         Console.WriteLine("  - You can run up to " & MonkMode.ConfigIntegrity.MaxSlots & " blocks at once: 'monkmode block' starts a NEW one beside the others, and 'monkmode status' lists them with their ids. Use --id <N> to add to, or exit, a particular one.")
-        Console.WriteLine("  - --start delays a block: '--start +90m' / '--start 2h' / '--start ""2026-08-10 07:00""'. --for then measures from the START (so '--start +90m --for 2h' blocks for 2h, beginning in 90 minutes), it can be at most " & MaxStartDelayDays & " days ahead, and until it starts you can cancel it freely with 'monkmode unblock --id <N> --cancel'.")
+        Console.WriteLine("  - --start delays a block: '--start +90m' / '--start 2h' / '--start ""2026-08-10 07:00""'. --for then measures from the START (so '--start +90m --for 2h' blocks for 2h, beginning in 90 minutes), and it can be at most " & MaxStartDelayDays & " days ahead. A delayed block CANNOT be cancelled while it waits - its sites are already blocked and it starts on schedule.")
         Console.WriteLine("  - --urls attaches URL patterns to a block (e.g. --urls ""*/watch*,*reddit.com/r/*""), for pages rather than whole sites.")
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")
         Console.WriteLine("  - --app-preset kills a whole category of well-known apps at once (comma-separate several): " & String.Join(", ", Blocker.KnownAppPresetNames()) & ". Combine it with --apps to add your own.")
-        Console.WriteLine("  - --cooloff sets THIS block's cooling-off wait (how long 'unblock' takes to lift), e.g. --cooloff 2h. A ~1h minimum applies, so a shorter value still waits that; a larger value makes leaving early harder. Same forms as --for.")
-        Console.WriteLine("  - 'monkmode setup --cooloff 2h' sets an ACCOUNT DEFAULT cooling-off wait that every block without its own --cooloff inherits; a block's own --cooloff always overrides it. The ~1h minimum still applies.")
         Console.WriteLine("  - 'monkmode setup --default-sites a.com,b.com [--default-preset social]' sets an ACCOUNT DEFAULT blocklist that 'monkmode block' inherits when you give it no --sites/--preset/--file; naming any of those overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
         Console.WriteLine("  - 'monkmode setup --default-apps chrome.exe,foo.exe [--default-app-preset games]' sets an ACCOUNT DEFAULT app-kill list that 'monkmode block' inherits when you give it no --apps/--app-preset; naming either overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")
         PrintTroubleshooting()
@@ -1796,12 +1621,17 @@ Module Program
         Console.WriteLine("  - 'the MonkMode service isn't running at the moment' is also normal: the blocked sites stay")
         Console.WriteLine("    in your hosts file regardless, and the service restarts itself.")
         Console.WriteLine("  - 'the stored configuration failed its integrity check' means MonkMode is FROZEN: it keeps")
-        Console.WriteLine("    blocking and will NOT lift by itself. That is deliberate (it never fails open). Use --force below.")
+        Console.WriteLine("    blocking and will NOT lift by itself. That is deliberate (it never fails open). See below.")
         Console.WriteLine("")
-        Console.WriteLine("  THE WAY OUT THAT ALWAYS WORKS:  monkmode unblock --force")
-        Console.WriteLine("    From an Administrator prompt. No code, no waiting, no working config needed. It tears down")
-        Console.WriteLine("    the block, removes the service and restores your hosts file. It is the deliberate escape")
-        Console.WriteLine("    hatch: nothing MonkMode can get into stops it working. Your setup and history survive it.")
+        Console.WriteLine("  THE WAY OUT, AND THERE IS ONLY ONE:  monkmode unblock --code <CODE>")
+        Console.WriteLine("    The accountability code is shown ONCE, at block start. Relay it to your partner then.")
+        Console.WriteLine("    A block you have no code for runs to its end time and not a second less. There is no")
+        Console.WriteLine("    escape hatch, no override, no admin bypass and no recovery - the old 'unblock --force'")
+        Console.WriteLine("    and the self-serve cooling-off wait were both REMOVED on purpose. Do not go looking.")
+        Console.WriteLine("    One honest exception, stated so it is not a surprise: a FROZEN config (above) cannot be")
+        Console.WriteLine("    lifted by the code either, because the code is checked against a config that failed its")
+        Console.WriteLine("    integrity check - so a frozen block holds indefinitely, past its end time. Freezing needs")
+        Console.WriteLine("    someone to have edited or corrupted the stored config; do not do that.")
         Console.WriteLine("")
         Console.WriteLine("  Everything MonkMode stores lives beside this program (run 'monkmode version' for the path),")
         Console.WriteLine("  plus block counters in %ProgramData%\MonkMode. It needs no internet, no account and no licence,")

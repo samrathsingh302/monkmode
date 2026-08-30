@@ -37,8 +37,31 @@
 #       changes. (Under the bug, if Until were also past, it would then lift.)
 #   So "the MAC value is unchanged after 2 ticks" == the fix is live.
 #
-# Exits via 'monkmode unblock --force' (also exercises the B6 escape hatch);
-# falls back to cleanup.ps1 if anything is left behind.
+# ############################################################################
+# # BROKEN BY 319:  THIS DRILL'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
+# #
+# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
+# # tools\smoke\cleanup.ps1. A running block now ends on exactly two events - its
+# # own end time, or a service-verified partner code - so there is no forced
+# # teardown to fall back on and no rescue script behind it.
+# #
+# # WHAT IT NEEDS (a live, elevated sitting; it cannot be verified from a bench):
+# #   * capture each arm's output and parse the one-time code off the line after
+# #     "Emergency unlock code" (cv-d-smoke.ps1's ParseCode is the pattern), then
+# #     tear down with `unblock --code <CODE>`, wait for Stopped-or-gone
+# #     (RUNBOOK E9 - never poll for 'gone' after a lift), and `sc.exe delete
+# #     MONKMODE` to reach 'gone' for the next section's precondition;
+# #   * or, where a code cannot be threaded through, use a --for short enough that
+# #     natural expiry IS the teardown and say so in the header. `--for 1` is
+# #     always refused, so one minute is the floor.
+# #   * an aborted run now leaves the armed block standing until its timer runs
+# #     out. That is the design, not a bug - say it in the header rather than
+# #     implying a rescue exists.
+# ############################################################################
+#
+# (It used to exit via 'monkmode unblock --force', which also exercised the B6
+# escape hatch, falling back to cleanup.ps1 if anything was left behind. B6 is no
+# longer a feature: the CLI has no teardown at all.)
 #
 # Usage (ELEVATED):
 #   powershell -ExecutionPolicy Bypass -File C:\Users\samra\monkmode-smoketest\b7-failclosed-test.ps1
@@ -59,7 +82,7 @@ $ini    = Join-Path $dist 'monkmode_settings.ini'
 $setupIni = Join-Path $dist 'monkmode_setup.ini'   # absent on a fresh dist -> arms refuse exit 4
 $hosts  = "$env:SystemRoot\System32\drivers\etc\hosts"
 $backup = 'C:\Users\samra\monkmode-smoketest\hosts.backup.txt'
-$cleanup = 'C:\Users\samra\monkmode-smoketest\cleanup.ps1'
+# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
 $pass = 0; $fail = 0
 function Check($name, $cond) {
   if ($cond) { Write-Host "  [PASS] $name" -ForegroundColor Green; $script:pass++ }
@@ -94,12 +117,12 @@ if (-not (Test-Path $setupIni)) {
   & $monk setup | Out-Null
   if (-not (Test-Path $setupIni)) { Write-Host "'monkmode setup' did not produce $setupIni (exit $LASTEXITCODE). Aborting." -ForegroundColor Red; exit 1 }
 }
-if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host "MONKMODE already exists. Run cleanup.ps1 first." -ForegroundColor Yellow; exit 1 }
+if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host "MONKMODE already exists. Let any block end, then 'sc.exe delete MONKMODE' while idle." -ForegroundColor Yellow; exit 1 }
 if (-not (Test-Path $backup)) { Copy-Item $hosts $backup -Force }
 
 try {
   # 1. Arm a block long enough that it cannot auto-expire during the test (we
-  #    exit via unblock --force, not by waiting).
+  #    exit by code, not by waiting - see the BROKEN BY 319 header).
   Write-Host "`n=== 1. Arming a 15-minute block on example.com ===" -ForegroundColor Cyan
   & $monk block --sites example.com --for 15
   Start-Sleep -Seconds 3
@@ -156,17 +179,19 @@ try {
 }
 finally {
   # 6. Exit via the B6 escape hatch (the documented clean way out of a frozen
-  #    block), then verify + fall back to cleanup.ps1.
-  Write-Host "`n=== 5. Tearing down via 'monkmode unblock --force' ===" -ForegroundColor Cyan
-  & $monk unblock --force
+  #    block), then verify.
+  # BROKEN BY 319: `unblock --force` no longer exists, and neither does cleanup.ps1.
+  # This step must become a partner-code lift + `sc.exe delete MONKMODE` (header).
+  Write-Host "`n=== 5. Tearing down ===" -ForegroundColor Cyan
+  throw 'BROKEN BY 319: this teardown step needs rewriting as a partner-code lift (see the header).'
   Start-Sleep -Seconds 2
   $gone = -not (Get-Service MONKMODE -ErrorAction SilentlyContinue)
   $hostsClean = ((Get-Content $hosts -Raw) -notmatch '#### MonkMode Entries ####')
-  Check "unblock --force removed the service" $gone
-  Check "unblock --force restored hosts"      $hostsClean
+  Check "the teardown removed the service" $gone
+  Check "the teardown restored hosts"      $hostsClean
   if (-not $gone -or -not $hostsClean) {
-    Write-Host "  unblock --force did not fully clean up - running cleanup.ps1..." -ForegroundColor Yellow
-    & powershell -ExecutionPolicy Bypass -File $cleanup
+    Write-Host "  the teardown did not fully clean up - and ledger 319 removed the rescue." -ForegroundColor Yellow
+    Write-Host "  Wait for the block's timer, or lift it with its partner code." -ForegroundColor Yellow
   }
 }
 

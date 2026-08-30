@@ -70,29 +70,20 @@ Friend Module Guardian
         Return macValid AndAlso BlockHasExpired(untilText, asOf, graceSeconds)
     End Function
 
-    ' ---- C2b: cooling-off (the guardian's half of the exit decision) ----
+    ' ---- Ledger 319 (30/08/2026): the cooling-off arm of the guardian's exit decision is
+    ' PERMANENTLY DISARMED, exactly as in the service ----
     '
-    ' Byte-for-byte the same semantics as Service1.CoolOffElapsedTime /
-    ' Service1.EffectiveExit (parity-pinned, like BlockHasExpired). LOAD-BEARING
-    ' for the guardian: its stand-down gate MUST fold cooling-off in, or a
-    ' guardian tick in the stopMe() gap at the end of a cooling-off would read
-    ' "Until not passed + macValid => still active" and SCM-resurrect the service
-    ' - the cooled-off block would come back and cooling-off could never
-    ' complete. Both read the STORED HighWater (the service is its sole writer;
-    ' the guardian never advances it), so the guardian never stands down on a
-    ' rolled clock either.
-
-    ' Has the pending cooling-off deadline been reached? "" (none pending) and
-    ' any unparseable input read as NOT elapsed (fail closed - a corrupted
-    ' deadline keeps the guardian guarding). The caller folds macValid via
-    ' EffectiveExit, exactly as expiry does.
+    ' This was the guardian's parity copy of Service1.CoolOffElapsedTime, folded into its
+    ' EffectiveExit so a guardian tick in the stopMe() gap at the end of a cooling-off would
+    ' not read "Until not passed + macValid => still active" and SCM-resurrect the service.
+    ' There is no cooling-off any more - nothing writes a CoolOffUntil, and there is no gap to
+    ' cover - so the honest answer is always NO, returned WITHOUT LOOKING at either argument.
+    ' Both copies must stay byte-identical in BEHAVIOUR (parity-pinned like BlockHasExpired):
+    ' if the guardian still lifted on an elapsed deadline while the service ignored it, the
+    ' guardian would stand down under a block the service is still enforcing. Returning False
+    ' is also the over-blocking direction here - it can only keep the guardian guarding.
     Friend Function CoolOffElapsedTime(ByVal coolOffUntilText As String, ByVal highWaterText As String) As Boolean
-        If coolOffUntilText = "" Then Return False
-        Dim ca As New CultureInfo("en-CA")
-        Dim coolOffUntil As DateTime, highWater As DateTime
-        If Not DateTime.TryParse(coolOffUntilText, ca, DateTimeStyles.None, coolOffUntil) Then Return False
-        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
-        Return coolOffUntil <= highWater
+        Return False
     End Function
 
     ' C3b: is the block partner-code-unlocked? Byte-for-byte the same as

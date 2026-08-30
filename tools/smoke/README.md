@@ -25,16 +25,36 @@ versioned.
 
 | Script | What it proves | Time | Self-cleaning |
 |---|---|---|---|
-| `run-smoketest.ps1` | Full stack B1–B7 + B5a: install, block, hosts self-heal, watchdog kill drills, SafeBoot, sc-delete resistance, DoH-off policy, auto-lift + clean teardown. `-IncludeClockTest` adds the B4 forward-clock-jump drill (moves the system clock, restored in a `finally`). Baseline **71/0** (with clock test). | ~7 min | yes (+ `cleanup.ps1` fallback) |
-| `b7-failclosed-test.ps1` | B7 fail-closed: a tampered `[Integrity] Mac` is NOT re-stamped and the block HOLDS (never lifts). Standalone. Baseline **10/0**. | ~1 min | yes (exits via `unblock --force`) |
-| `cv-d-smoke.ps1` | C-core + Section-D usability: partner-code verify/rotate, committed code-only exit, cooling-off flow, `--preset`/`--app-preset` expansion, account-default inherit, `stats`, `status` exit lines, `schedule --clear` teardown, and `--all-session-kill` (arm AllSession=yes + live app kill). Short blocks, `unblock --force` between each, global-finally cleanup. NO clock manipulation. | ~7 min | yes |
-| `clock-drill-test.ps1` | B4 forward-jump-past-Until (no lift) + B1c backward-roll (no over-extend). Guaranteed-restore (monotonic-anchor Set-Date in a `finally`, **no `w32tm`**), HTTP-Date offset verify, and a feasibility probe that self-defers if w32time yanks manual jumps. **Run FOREGROUND + WATCHED only — never piped under an external timeout** (a hard-kill mid-drill skips the restore). | ~3 min | yes |
-| `cleanup.ps1` | Emergency teardown: disarm SCM recovery, kill guardian+service, strip B6 deny-DELETE ACE, delete the service, restore hosts, remove SafeBoot keys + DoH snapshot. Run if any script hangs or leaves the box blocked. | — | n/a |
+| `run-smoketest.ps1` | Full stack B1–B7 + B5a: install, block, hosts self-heal, watchdog kill drills, SafeBoot, sc-delete resistance, DoH-off policy, auto-lift + clean teardown. `-IncludeClockTest` adds the B4 forward-clock-jump drill (moves the system clock, restored in a `finally`). Baseline **71/0** (with clock test). | ~7 min | **BROKEN BY 319** — its teardown was `unblock --force` |
+| `b7-failclosed-test.ps1` | B7 fail-closed: a tampered `[Integrity] Mac` is NOT re-stamped and the block HOLDS (never lifts). Standalone. Baseline **10/0**. | ~1 min | **BROKEN BY 319** — its teardown was `unblock --force` |
+| `cv-d-smoke.ps1` | C-core + Section-D usability: partner-code verify/rotate, code-only exit, `--preset`/`--app-preset` expansion, account-default inherit, `stats`, `status` exit lines, `schedule --clear` teardown, and `--all-session-kill` (arm AllSession=yes + live app kill). Short blocks. NO clock manipulation. (CV3, the cooling-off flow, was deleted by ledger 319.) | ~7 min | **BROKEN BY 319** — `ForceDown` was `unblock --force` |
+| `clock-drill-test.ps1` | B4 forward-jump-past-Until (no lift) + B1c backward-roll (no over-extend). Guaranteed-restore (monotonic-anchor Set-Date in a `finally`, **no `w32tm`**), HTTP-Date offset verify, and a feasibility probe that self-defers if w32time yanks manual jumps. **Run FOREGROUND + WATCHED only — never piped under an external timeout** (a hard-kill mid-drill skips the restore). | ~3 min | **BROKEN BY 319** — `ForceDown` was `unblock --force` |
+| `fx6-drill.ps1` | FX6 clock-change / orphaned-raise drill. | — | **BROKEN BY 319** — `ForceDown` was `unblock --force` |
 | `f2-url-smoke.ps1` | The v1.1 URL watcher (B13) probe — **non-elevated, arms nothing, strictly read-only against the browsers**: confirms Chrome/Edge/Brave still expose the omnibox the way the watcher expects, and what shape `ValuePattern.Value` hands back. Run it first when a browser update is suspected of breaking the nudge. It prints whatever URL the address bar currently shows. | ~20 s | n/a (arms nothing) |
 | `dns-diag.ps1` / `dns-diag2.ps1` / `dns-diag3.ps1` | Isolated hosts-reload timing diagnostics (no MonkMode). Kept for DNS-cache debugging. | — | yes |
 
-If a block ever jams, the unconditional escapes (in order): `dist\monkmode.exe
-unblock --force`, then `tools\smoke\cleanup.ps1` (elevated).
+## ⚠ BROKEN BY 319 — every drill that tore a block down needs reworking
+
+Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
+`cleanup.ps1`. **There is no unconditional escape any more, by design**: a running
+block ends at its own end time, or with the one-time partner code its arm printed.
+Nothing else, at any privilege level the CLI has.
+
+Every drill above that used `--force` (or `cleanup.ps1`) to get from one section to
+the next therefore does not work as written, and each carries a `BROKEN BY 319`
+header saying so. The rework, once there is a live elevated sitting to verify it in:
+
+1. capture the arm's output and parse the one-time code off the line **after**
+   `Emergency unlock code` (`cv-d-smoke.ps1`'s `ParseCode` is the pattern);
+2. tear down with `unblock --code <CODE>`, then wait for **Stopped-or-gone** — a
+   lift leaves the service registered but stopped, never 'gone' (RUNBOOK E9);
+3. `sc.exe delete MONKMODE` while idle to reach 'gone' for the next section's
+   precondition (the service re-grants DELETE on its own genuine-expiry teardown);
+4. where a code cannot be threaded through, use a `--for` short enough that natural
+   expiry *is* the teardown. `--for 1` is always refused, so one minute is the floor.
+
+An aborted run now leaves the armed block standing until its timer runs out. Say so
+in each drill's header rather than implying a rescue exists — there isn't one.
 
 ---
 

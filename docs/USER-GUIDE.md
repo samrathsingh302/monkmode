@@ -41,11 +41,12 @@ that do exist.
 **What it honestly cannot do.** MonkMode is *impulse-proof, not
 unbreakable*. It defeats the casual "I'll just turn it off for a minute"
 urge and quite determined fiddling too, but you own this computer: an
-administrator with time, tools and determination can always win eventually,
-and one clearly-marked emergency command (`monkmode unblock --force`,
-Section 8.5) is kept on purpose so a fault can never brick your machine.
-If you want a lock even *you* can't open, hand the one-time code to another
-person and use a committed block (Sections 4.7 and 8.4).
+administrator with time, tools and determination can always win eventually —
+booting from a USB stick and editing the disk is outside anything a program
+can stop. What it *does* no longer have is a way out from inside: as of
+30/08/2026 there is **no escape hatch and no self-serve wait**. A block ends
+at its end time or with its one-time code, and nothing else. Hand that code
+to someone else and the lock is one even you can't open (Section 8).
 
 **Privacy:** MonkMode needs no internet, no account and no licence. It sends
 nothing anywhere, ever. Everything it stores stays on your computer.
@@ -186,7 +187,7 @@ these are optional:
 | Option | What it does | Example |
 |---|---|---|
 | `--partner "..."` | Names who to hand each block's code to. | `--partner "Alex (my sister)"` |
-| `--cooloff 2h` | Sets your default cooling-off wait (Section 8.3) for every block that doesn't set its own. | `--cooloff 4h` |
+| `--cooloff 2h` | **Does nothing since 30/08/2026.** Still accepted so old commands don't break; there is no cooling-off wait to set. | — |
 | `--default-sites a.com,b.com` | Sites blocked when you start a block without naming any. | `--default-sites reddit.com,x.com` |
 | `--default-preset social` | Folds a ready-made category (Section 4.3) into those default sites. | `--default-preset social,video` |
 | `--default-apps a.exe,b.exe` | Apps closed when you start a block without naming any. | `--default-apps steam.exe` |
@@ -195,7 +196,7 @@ these are optional:
 A complete example — defaults for a social-media-and-games household:
 
 ```
-monkmode setup --partner "Alex (my sister)" --cooloff 2h --default-preset social --default-app-preset games
+monkmode setup --partner "Alex (my sister)" --default-preset social --default-app-preset games
 ```
 
 Things worth knowing about setup:
@@ -329,11 +330,11 @@ Two honest details about the waiting period:
 
 - **The sites are blocked from the moment you arm**, not from the start
   time — a waiting block blocks too much rather than too little, on purpose.
-- **A waiting block cannot be cancelled.** The on-screen help says
-  `unblock --cancel` works "freely until it starts" — that wording is wrong
-  (a known fault, kept because it fails in the stricter direction): the
-  cancel does nothing and the block starts anyway. Treat `--start` as
-  seriously as `block` itself.
+- **A waiting block cannot be cancelled.** The on-screen help used to claim
+  `unblock --cancel` worked "freely until it starts"; it never did, and both
+  the flag and the claim were removed on 30/08/2026. A delayed block starts
+  on schedule and then ends like any other — its end time, or its code.
+  Treat `--start` as seriously as `block` itself.
 
 ### 4.6 Growing a running block: `add`
 
@@ -346,17 +347,16 @@ ten seconds). A block can only ever **grow** — there is no command to remove
 a site from a running block, on purpose. With more than one block running,
 say which one: `monkmode add --sites x.com --id 2` (Section 5).
 
-### 4.7 The strictness dials: `--commit`, `--cooloff`, `--all-session-kill`
+### 4.7 The strictness dial: `--all-session-kill`
 
 | Flag | What it does |
 |---|---|
-| `--commit` | A **committed** block: the "wait an hour and it unlocks" self-serve exit (Section 8.3) is disabled. The **only** ways out are your partner's code or the timer. Use it when you mean it. |
-| `--cooloff 4h` | Makes *this* block's self-serve wait longer than the standard hour (same time grammar as `--for`). It can only ever make the wait **longer** — a value under an hour still waits the hour. |
 | `--all-session-kill` | If several people (or accounts) are logged into this computer, blocked apps are closed in **every** login session, not just yours — so switching to a second Windows account doesn't dodge the app block. Does nothing unless the block includes apps. |
+| `--commit` | **Does nothing since 30/08/2026** — every block is committed now, so there is nothing left to opt into. Still accepted so old commands don't break. |
+| `--cooloff 4h` | **Does nothing since 30/08/2026** — there is no cooling-off wait to lengthen. Still accepted so old commands don't break. |
 
 ```
-monkmode block --preset social --for 8h --commit
-monkmode block --sites youtube.com --for 4h --cooloff 3h
+monkmode block --preset social --for 8h
 monkmode block --app-preset games --for 2h --all-session-kill
 ```
 
@@ -372,8 +372,7 @@ ignored rather than stopping the block.
 
 Starting a block **never** replaces the ones already running — it starts a
 **new** one beside them, up to **eight at a time**. Each block is fully
-independent: its own timer, its own sites and apps, its own one-time code,
-its own cooling-off, its own `--commit`.
+independent: its own timer, its own sites and apps, its own one-time code.
 
 ```
 monkmode block --preset social --for 8h          → Block #1
@@ -391,15 +390,15 @@ monkmode status
 ```
 MonkMode: 3 blocks active
  Id  State     Ends / Starts             Sites Apps URLs  Exit
-  1  ACTIVE    2026-08-26 22:04             11    0    0  code+wait  (~5h 12m of active time left)
-     Exit:  run 'monkmode unblock --id 1' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.
-  2  ACTIVE    2026-08-26 16:04              0    1    0  code+wait  (~1h 42m of active time left)
+  1  ACTIVE    2026-08-26 22:04             11    0    0  code  (~5h 12m of active time left)
+     Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --id 1 --code <CODE>'. There is no other way out.
+  2  ACTIVE    2026-08-26 16:04              0    1    0  code  (~1h 42m of active time left)
      ...
   Note: the end time counts machine-ON time only - sleep or shutdown pushes it later by the same amount.
 ```
 
 The **Ends** column is a wall-clock stamp, but a block's timer only runs while
-the computer is on — exactly like the cooling-off wait. So the trailing
+the computer is on. So the trailing
 `(~5h 12m of active time left)` is the number that decides when it lifts: shut
 the laptop down for two hours and the block ends two hours later than the stamp
 says. Nothing is lost and nothing is gained by turning the machine off.
@@ -408,11 +407,11 @@ When more than one block is running, commands that act on *one* block need
 `--id <number>` (the Id column):
 
 - `monkmode add --sites x.com --id 2` — grow block 2.
-- `monkmode unblock --id 2` — start block 2's cooling-off exit.
-- With exactly **one** block running you can leave `--id` off.
-- MonkMode **refuses to guess**: an `add` or `unblock` without `--id` while
-  several blocks run is refused with the list of ids — never aimed at a
-  block you didn't name.
+- `monkmode unblock --code <CODE>` — no `--id` needed: the code is offered to
+  every running block and can only ever match the one that minted it.
+- With exactly **one** block running you can leave `--id` off an `add`.
+- MonkMode **refuses to guess**: an `add` without `--id` while several blocks
+  run is refused with the list of ids — never aimed at a block you didn't name.
 
 The unlock **code** needs no id — each code belongs to exactly one block and
 can only ever open that one. Ids are never reused; when block 3 ends, the
@@ -480,7 +479,7 @@ Shorts.
 A **schedule** opens and closes blocks automatically on a weekly rhythm —
 "every weekday, nine to five", with no command to type each morning. While a
 window is open it blocks at full strength, and **an open window cannot be
-ended early at all** — no cooling-off, no code. It closes at its end time.
+ended early at all** — not even with a code. It closes at its end time.
 
 ```
 monkmode schedule --sites reddit.com,x.com --windows "Mon-Fri 09:00-17:00"
@@ -522,7 +521,16 @@ Rules:
 
 ## 8. How a block ends: the exits
 
-There are exactly four ways. Know them before you start your first block.
+There are exactly **two**, and there is deliberately no third. Know them
+before you start your first block.
+
+> **Changed on 30/08/2026.** MonkMode used to have four exits. Two of them — a
+> self-serve **cooling-off** wait (`monkmode unblock` counted down about an hour
+> of machine-on time and then lifted the block for you) and an **emergency
+> escape hatch** (`monkmode unblock --force`, which tore everything down at
+> once) — were removed on purpose. They are not hidden, not behind a flag and
+> not behind an environment variable: the code is gone. `--force` and `--cancel`
+> are now reported as commands that do not exist.
 
 ### 8.1 The timer (do nothing)
 
@@ -542,59 +550,42 @@ nothing (and MonkMode deliberately doesn't say whether a code was right —
 watch whether the block lifts). Each code opens only the block that minted
 it; codes are never shown twice and never stored readably.
 
-### 8.3 Cooling-off (self-serve, but slow on purpose)
+### 8.3 What happens if you just type `unblock`
 
 ```
-monkmode unblock            # one block running
-monkmode unblock --id 2     # several running: name the one you mean
+monkmode unblock
 ```
 
-No partner needed — but it is **not instant**. The block stays fully
-enforced while a countdown of about **one hour of the computer being
-actually on** runs down (time the machine spends asleep or off doesn't
-count). Then it lifts by itself. The wait is at least an hour, always; a
-block armed with `--cooloff 4h` waits four. The point: an urge that can wait
-an hour was not an urge.
-
-Changed your mind during the wait?
+It refuses, and says so:
 
 ```
-monkmode unblock --cancel
+A running block ends only at its end time or with the partner code. Run:  monkmode unblock --code <CODE>
+If the code is lost, you wait. There is no cooling-off wait, no escape hatch and no recovery - that is the point.
 ```
 
-That cancels the pending cooling-off and the block simply continues to its
-normal end. `status` shows the remaining wait while one is pending.
+Nothing is started, nothing is queued, and the block is untouched.
 
-### 8.4 Committed blocks have no cooling-off
+### 8.4 If you lose the code
 
-A block armed with `--commit` refuses the cooling-off exit outright:
+**You wait.** That is the whole answer, and it is the design rather than a gap
+in it: an exit that exists is an exit that gets used at 2am. There is no
+recovery command, no override, no reset, no support channel and no admin
+bypass. The block runs to its end time and lets itself go.
 
-```
-This block is COMMITTED: self-serve cooling-off is disabled. The only early exit is the accountability code:  monkmode unblock --code <CODE>
-```
+Two practical consequences worth taking seriously *before* you arm anything:
 
-Timer or code. That's the deal you chose at arm time.
+- **Choose durations you actually mean.** A 30-day block with a lost code is a
+  30-day block.
+- **Hand the code to your partner the moment it appears**, and don't keep the
+  only copy somewhere you might lose it in a moment of frustration.
 
-### 8.5 The emergency escape hatch (always works, tears everything down)
-
-```
-monkmode unblock --force
-```
-
-This is the deliberate, always-available way out — kept so that no bug, no
-corrupted file and no fault can ever trap the machine. It does not negotiate
-with any timer: it removes **every** running block, uninstalls the
-protection service, and puts your system files back exactly as they were.
-Your setup and history survive it. It prints each step as it goes; one
-harmless oddity you may see — a line like `Disabling service recovery policy
-... skipped` — just means that step had already been done, and everything
-still tears down.
-
-Two honest sentences about it: it exists because a self-control tool must
-never become a trap, and it is deliberately a *typed, admin-only, flagged*
-command so it can never happen by accident. If you find yourself using it to
-end ordinary blocks, use a partner and `--commit` — that is exactly what
-they are for.
+There is one sharper edge, stated plainly rather than buried. If MonkMode's
+stored settings are ever damaged — by editing them by hand, by disk corruption,
+or by arming a block and then upgrading the program underneath it — MonkMode
+freezes: it keeps blocking and refuses to lift, **including for the code**,
+because it will not trust a file that failed its own integrity check. A frozen
+block holds past its end time, indefinitely. Avoid it by never editing
+MonkMode's files and never upgrading while a block is running (Section 11).
 
 ---
 
@@ -605,7 +596,7 @@ they are for.
 The live picture: one row per running block (id, when it ends, how many
 sites/apps/URL-patterns it covers) and, under each row, exactly how that
 block can end. Also shown when relevant: what MonkMode has stopped today, a
-pending cooling-off's remaining wait, an armed schedule and whether a window
+an armed schedule and whether a window
 is open right now. Between blocks it says
 `no active block (service installed but idle)` — that is the normal resting
 state, not a problem.
@@ -616,7 +607,7 @@ Your history, read-only: blocks started and completed, total planned focus
 time, longest block, plus the measured actuals — real hours blocked, apps
 closed, browser nudges, and your **focus-day streak**. Nothing in `stats`
 records *which* sites or apps — counts only. The history survives blocks
-ending, uninstalls, and even `--force`.
+ending and uninstalls.
 
 ### `monkmode version`
 
@@ -662,8 +653,9 @@ watchdog restart each other; the service cannot be stopped through the
 normal Windows controls while a block runs (`sc delete` is refused — by
 design); the blocked-sites list self-heals within about ten seconds if
 edited. If tampering ever manages to corrupt MonkMode's files, it **freezes
-fail-closed**: the block keeps enforcing and won't lift by itself, and
-Section 8.5 is the way out.
+fail-closed**: the block keeps enforcing and won't lift by itself — and since
+30/08/2026 there is no way out of that state at all (Section 8.4). Don't
+edit MonkMode's files, and don't upgrade across a running block.
 
 What survives what:
 
@@ -671,7 +663,7 @@ What survives what:
 |---|---|---|
 | Restart / shutdown | ✅ still blocked | ✅ kept |
 | Block expires normally | block ends; others continue | ✅ kept |
-| `unblock --force` | ❌ all blocks removed | ✅ kept |
+| `unblock --force` | *(removed 30/08/2026 — the command no longer exists)* | — |
 | Uninstall (Section 12) | refuses while a block runs | ✅ kept (unless you ask) |
 
 ---
@@ -694,8 +686,9 @@ breakage (the program's own `monkmode help` prints the same list):
 4. **"the stored configuration failed its integrity check"** means someone
    or something edited MonkMode's protected files. MonkMode is now
    **FROZEN**: it keeps blocking and will not lift by itself — deliberately,
-   because the alternative is that any tampering unlocks it. Wait out the
-   timer, or use `monkmode unblock --force` (Section 8.5).
+   because the alternative is that any tampering unlocks it. Since 30/08/2026
+   there is no command that ends this state: not the timer, and not the code
+   either (Section 8.4). It is the one genuinely unrecoverable corner.
 
 And a few more honest answers:
 
@@ -715,9 +708,9 @@ And a few more honest answers:
   stars match nothing.
 - **`--for 1` is refused.** By design; the shortest block is `--for 2`.
 
-If something is genuinely stuck: `monkmode unblock --force` (Section 8.5)
-returns the machine to a clean, unblocked state without touching your data,
-and you can re-arm from there.
+If something is genuinely stuck, there is no rescue command any more
+(Section 8.4). A healthy block still ends at its end time on its own, and its
+code still lifts it early — those are the only two things that end a block.
 
 ---
 
@@ -758,10 +751,8 @@ Run `monkmode help` any time for the always-current version of this.
 | `monkmode add --sites a.com[,b.com] [--id N]` | Adds sites to a running block (within ~10 s). Growth only. |
 | `monkmode schedule --sites ... [--apps ...] --windows "..."` | Arms the weekly timetable (replaces any previous one; refuses beside a manual block). |
 | `monkmode schedule --show` / `--validate ...` / `--clear` | Inspect / dry-run / stop future windows. |
-| `monkmode unblock [--id N]` | Requests the cooling-off exit (~1 h of machine-on time, then lifts). |
-| `monkmode unblock --cancel` | Cancels a pending cooling-off; stays blocked. |
-| `monkmode unblock --code <CODE>` | Submits the partner code; a correct one lifts its block in ~10 s. |
-| `monkmode unblock --force` | The emergency escape hatch: removes all blocks and the service. |
+| `monkmode unblock --code <CODE>` | Submits the partner code; a correct one lifts its block in ~10 s. **The only early exit.** |
+| `monkmode unblock` (bare) | Refused. It starts nothing. |
 | `monkmode version` | Release, build date, install folder. |
 | `monkmode help` | Usage, live preset names, and the troubleshooting list. |
 
@@ -777,9 +768,9 @@ Run `monkmode help` any time for the always-current version of this.
 | `--urls` | `"youtube.com/shorts,..."` | **Substring match, no wildcards** (Section 6). Max 32 patterns × 200 chars; no `\|` or `;` inside a pattern. |
 | `--for` | `45` / `90m` / `2h` / `1d12h` | Bare number = minutes. Must exceed 1 minute. |
 | `--until` | `"2026-06-11 18:00"` | Alternative to `--for`. |
-| `--start` | `+90m` / `2h` / `"2026-08-10 07:00"` | Max 30 days ahead. Sites block immediately; **cannot be cancelled** despite what `help` says. |
-| `--commit` | *(bare)* | Disables cooling-off: code or timer only. |
-| `--cooloff` | `2h` | Lengthens *this* block's cooling-off wait (never below ~1 h). |
+| `--start` | `+90m` / `2h` / `"2026-08-10 07:00"` | Max 30 days ahead. Sites block immediately; **cannot be cancelled**. |
+| `--commit` | *(bare)* | Accepted, does nothing (every block is committed since 30/08/2026). |
+| `--cooloff` | `2h` | Accepted, does nothing (there is no cooling-off wait since 30/08/2026). |
 | `--all-session-kill` | *(bare)* | App-closing in every logged-in Windows session. |
 
 ### Exit codes (for scripting)
@@ -787,7 +778,7 @@ Run `monkmode help` any time for the always-current version of this.
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
-| 1 | Usage error: bad/missing argument, nothing to block, unknown preset, ambiguous `unblock`/`add` with several blocks running. |
+| 1 | Usage error: bad/missing argument, nothing to block, unknown preset, an ambiguous `add` with several blocks running, or a bare `unblock` (which is always refused). |
 | 2 | Not elevated, DPAPI unavailable, or an internal error. |
 | 3 | Schedule/block conflict, or all 8 slots in use. |
 | 4 | Setup has not been run yet. |

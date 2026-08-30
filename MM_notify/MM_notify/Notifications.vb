@@ -165,12 +165,7 @@ Friend Module Notifications
         Return CountNoun(blockCount, "block") & " active" & left
     End Function
 
-    ' The cooling-off-started toast: the self-serve `unblock` wait has begun and the
-    ' block stays fully enforced until it lifts itself. remaining is the monotonic
-    ' active-time left (deadline - HighWater), rendered short.
-    Friend Function CoolOffStartedMessage(ByVal remaining As TimeSpan) As String
-        Return "Cooling-off started - the block lifts in about " & HumanizeShort(remaining) & " of active machine time. Run 'monkmode unblock --cancel' to stay blocked."
-    End Function
+    ' Ledger 319: CoolOffStartedMessage is DELETED with the cooling-off exit it announced.
 
     ' The periodic "still blocked" nudge shown during a long manual block.
     Friend Function BlockActiveReminderMessage(ByVal remaining As TimeSpan) As String

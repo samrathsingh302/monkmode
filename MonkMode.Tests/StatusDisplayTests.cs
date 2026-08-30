@@ -40,87 +40,33 @@ public class StatusDisplayPureTests
 {
     private static readonly CultureInfo CA = new("en-CA");
 
-    // ---- FormatCoolOffStatusLine: the active-block exit line, all three branches ----
+    // ---- FormatExitStatusLine: the active-block exit line. ONE branch, since ledger 319 ----
+    //
+    // This replaced FormatCoolOffStatusLine, whose three branches (committed / cooling-off
+    // pending / self-serve wait) described a choice of exits that no longer exists. Every
+    // armed manual block now prints the same sentence, in both `status` renderers - the v1.1
+    // slot table and the v9 single-block fallback - and CoolOffRemainingFrom went with the
+    // countdown it computed.
 
     [Fact]
-    public void FormatCoolOffStatusLine_Committed_ShowsCodeOnlyExit()
+    public void FormatExitStatusLine_NamesTheTwoExitsAndDeniesAnyOther()
         => Assert.Equal(
-            "Exit:  committed block - the accountability code (shown at block start) is the only early exit, or wait for the timer.",
-            MonkMode.Program.FormatCoolOffStatusLine(true, null));
+            "Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --code <CODE>'. There is no other way out.",
+            MonkMode.Program.FormatExitStatusLine());
 
     [Fact]
-    public void FormatCoolOffStatusLine_Committed_IgnoresAnyCoolOffRemaining()
-        // A committed block has NO self-serve cooling-off, so even a (spurious) remaining is ignored.
+    public void FormatExitStatusLine_WithASlotId_NamesTheBlockInTheCommandHint()
         => Assert.Equal(
-            "Exit:  committed block - the accountability code (shown at block start) is the only early exit, or wait for the timer.",
-            MonkMode.Program.FormatCoolOffStatusLine(true, TimeSpan.FromHours(1)));
-
-    [Fact]
-    public void FormatCoolOffStatusLine_CoolOffPending_ShowsMonotonicRemainingAndCancel()
-        => Assert.Equal(
-            "Exit:  cooling-off pending - lifts in about 1h of active time. Run 'monkmode unblock --cancel' to stay blocked.",
-            MonkMode.Program.FormatCoolOffStatusLine(false, TimeSpan.FromHours(1)));
-
-    [Fact]
-    public void FormatCoolOffStatusLine_NothingPending_OffersTheSelfServeWaitAndCode()
-        => Assert.Equal(
-            "Exit:  run 'monkmode unblock' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
-            MonkMode.Program.FormatCoolOffStatusLine(false, null));
-
-    // ---- v1.1 S5 (P31): the SAME three branches, reused per slot with an --id ----
-    // The four tests above are the v9 fallback branch of `status` (and v1.0's wording); the
-    // three below are what every row of the slot table prints. The whole rest of the S5 CLI
-    // surface - the table layout, the exit tokens, the cv-d substrings, the --start refusals
-    // and the add channel - lives in SlotCliTests.cs.
-
-    [Fact]
-    public void FormatCoolOffStatusLine_WithASlotId_NamesTheBlockInBothCommandHints()
-    {
-        Assert.Equal(
-            "Exit:  run 'monkmode unblock --id 4' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
-            MonkMode.Program.FormatCoolOffStatusLine(false, null, "4"));
-        Assert.Equal(
-            "Exit:  cooling-off pending - lifts in about 1h of active time. Run 'monkmode unblock --id 4 --cancel' to stay blocked.",
-            MonkMode.Program.FormatCoolOffStatusLine(false, TimeSpan.FromHours(1), "4"));
-    }
-
-    [Fact]
-    public void FormatCoolOffStatusLine_CommittedLine_IsIdenticalWithOrWithoutASlotId()
-        // It carries no command to aim, so P31's "--id inside the two command hints" leaves it
-        // untouched - and cv-d-smoke.ps1:141 matches this line whichever way status renders it.
-        => Assert.Equal(
-            MonkMode.Program.FormatCoolOffStatusLine(true, null),
-            MonkMode.Program.FormatCoolOffStatusLine(true, null, "4"));
-
-    // ---- CoolOffRemainingFrom: deadline - HighWater, non-positive => not pending ----
-
-    [Fact]
-    public void CoolOffRemainingFrom_ValidFuture_IsTheDifference()
-    {
-        var rem = MonkMode.Blocker.CoolOffRemainingFrom(
-            new DateTime(2026, 7, 8, 17, 0, 0).ToString(CA),
-            new DateTime(2026, 7, 8, 15, 30, 0).ToString(CA));
-        Assert.Equal(TimeSpan.FromMinutes(90), rem);
-    }
-
-    [Fact]
-    public void CoolOffRemainingFrom_AtOrPastDeadline_IsNull()
-    {
-        // deadline == mark and deadline < mark are both "not pending" (about to lift / lifted).
-        var atDeadline = new DateTime(2026, 7, 8, 15, 0, 0).ToString(CA);
-        Assert.Null(MonkMode.Blocker.CoolOffRemainingFrom(atDeadline, atDeadline));
-        Assert.Null(MonkMode.Blocker.CoolOffRemainingFrom(
-            new DateTime(2026, 7, 8, 14, 0, 0).ToString(CA),
-            new DateTime(2026, 7, 8, 15, 0, 0).ToString(CA)));
-    }
+            "Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --id 4 --code <CODE>'. There is no other way out.",
+            MonkMode.Program.FormatExitStatusLine("4"));
 
     [Theory]
-    [InlineData("garbage", "2026-07-08 15:00")]
-    [InlineData("2026-07-08 17:00", "garbage")]
-    [InlineData("", "2026-07-08 15:00")]
-    [InlineData("2026-07-08 17:00", "")]
-    public void CoolOffRemainingFrom_Unparseable_IsNull(string deadline, string mark)
-        => Assert.Null(MonkMode.Blocker.CoolOffRemainingFrom(deadline, mark));
+    [InlineData("")]
+    [InlineData("?")]
+    [InlineData(null)]
+    public void FormatExitStatusLine_UnnameableId_BuildsNoCommandTheUserCannotType(string? slotId)
+        // "?" is ReadSlotViews' unreadable-id placeholder: it must never reach a command hint.
+        => Assert.Equal(MonkMode.Program.FormatExitStatusLine(), MonkMode.Program.FormatExitStatusLine(slotId!));
 
     // ---- ScheduleWindowElapsed: byte-for-byte parity with the service's copy ----
 
@@ -235,14 +181,15 @@ public class StatusDisplayReadOnlyTests
     }
 
     [Fact]
-    public void NoConfig_CoolOffAndScheduleAccessors_AreInertAndCreateNothing()
+    public void NoConfig_ScheduleAccessor_IsInertAndCreatesNothing()
     {
         var ini = MonkMode.Blocker.IniPath();
         var backup = MonkMode.Blocker.IniBackupPath();
         Wipe(ini, backup);
         try
         {
-            Assert.Null(MonkMode.Blocker.CoolOffPendingRemaining());   // no config -> nothing pending
+            // Ledger 319 deleted Blocker.CoolOffPendingRemaining, the other accessor this
+            // pinned; ScheduleWindowIsOpen carries the read-only-no-config contract alone now.
             Assert.False(MonkMode.Blocker.ScheduleWindowIsOpen());     // no config -> no window open
             Assert.False(File.Exists(ini));                            // reading created nothing
         }

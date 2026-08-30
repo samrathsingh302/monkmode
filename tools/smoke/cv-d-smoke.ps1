@@ -24,24 +24,42 @@
 #
 #   CV1  partner-code verify + rotate  (each block mints a fresh one-time code;
 #        the service KDF-verifies `unblock --code`, a wrong code stays blocked)
-#   CV2  committed block = code-only exit  (bare `unblock` is refused; the code
-#        still lifts it)                                                    [+D5]
-#   CV3  cooling-off trigger flow  (bare `unblock` registers a service-computed
-#        ~1h pending; `--cancel` clears it)                                 [+D5]
+#   CV2  code-only exit  (bare `unblock` is refused; the code still lifts it) [+D5]
 #   D1a  --preset expands to its domains (social -> reddit.com et al in hosts)
 #   D2a  --app-preset expands to its apps (games -> steam.exe in the config)
 #   D1b/D2b  account-default blocklist + app list inherit (both dimensions) when
 #        a block names no source of its own
 #   D3   `monkmode stats` renders the recorded history
-#   D5   `status` renders the committed / cooling-off / schedule exit lines
+#   D5   `status` renders the code-only / schedule exit lines
 #   #2   `schedule --clear` tears an armed schedule down cleanly (no orphan)
 #   D2c  `--all-session-kill` arms AllSession=yes (MAC-covered) and the service
 #        kills the blocked app; the pure cross-SESSION widening is unit-pinned
 #        (ProcessInKillScope) and needs a 2nd interactive session to eyeball.
 #
-# Every block uses a SHORT --for (minutes) as a safety floor and is torn down
-# immediately with `unblock --force` (unconditional, data-loss-safe hosts strip).
-# A global finally runs cleanup.ps1 so an abort never leaves the box blocked.
+# ############################################################################
+# # BROKEN BY 319:  THIS SCRIPT'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
+# #
+# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
+# # tools\smoke\cleanup.ps1. Both were this smoke's teardown: every section armed a
+# # 5-minute block and called ForceDown between phases, and the global finally ran
+# # cleanup.ps1 so an abort could never leave the box blocked. Neither exists now.
+# #
+# # WHAT IT NEEDS (a live, elevated sitting - it cannot be verified from a bench):
+# #   1. ForceDown must become a PARTNER-CODE lift: `unblock --code <CODE>`, then
+# #      WaitSvcLifted (Stopped-or-gone, RUNBOOK E9), then `sc.exe delete MONKMODE`
+# #      to get back to 'gone' for the next section's precondition.
+# #   2. That needs the code in scope at every teardown, so the ArmQuiet sections
+# #      (D1a/D1b/D2a/D2b/D2c) must capture the arm output like Arm does and parse
+# #      the code with ParseCode. Read the PIPE-WEDGE note below first - piping the
+# #      arm was live-proven fixed on 14/07/2026, but old dists still wedge.
+# #   3. The global finally has no rescue any more. The honest replacement is to
+# #      keep every block short enough that natural expiry IS the backstop, and to
+# #      say plainly that an aborted run leaves a block standing until its timer
+# #      runs out. There is no escape hatch to fall back on, by design.
+# #   4. CV3 was deleted outright rather than reworked: cooling-off is gone.
+# ############################################################################
+#
+# Every block uses a SHORT --for (minutes) as a safety floor.
 # NO clock manipulation here (see clock-drill-test.ps1 for B1c/B4).
 #
 # Usage (ELEVATED):  powershell -ExecutionPolicy Bypass -File tools\smoke\cv-d-smoke.ps1
@@ -55,7 +73,7 @@ if (-not $Dist) {
 $monk    = Join-Path $Dist 'monkmode.exe'
 $ini     = Join-Path $Dist 'monkmode_settings.ini'
 $hosts   = "$env:SystemRoot\System32\drivers\etc\hosts"
-$cleanup = Join-Path $PSScriptRoot 'cleanup.ps1'
+# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
 $testExe = Join-Path $env:TEMP 'mmsmoke_testapp.exe'
 $FOR     = 5   # minutes: safety floor with headroom so a block never auto-expires mid-section
                # (--for 2 raced the multi-step assertions); every block is force-unblocked first
@@ -71,7 +89,7 @@ function WaitSvc([string]$want, [int]$sec) {
   return ((SvcState) -eq $want)
 }
 # A LIFT ends Stopped-but-present (RUNBOOK [E9]: the service strips hosts and stops itself;
-# its registration stays installed - only 'unblock --force' / cleanup deletes it). 'gone'
+# its registration stays installed - only an explicit `sc.exe delete` removes it). 'gone'
 # is accepted too so the helper keeps working if a teardown ever races a force-clean.
 function WaitSvcLifted([int]$sec) {
   $u = (Get-Date).AddSeconds($sec)
@@ -116,9 +134,12 @@ function ParseCode($lines) {
   }
   return $null
 }
+# BROKEN BY 319: there is no forced teardown any more. See the header - this must
+# become a partner-code lift plus `sc.exe delete MONKMODE`, with the code threaded
+# through from each section's arm. Left THROWING rather than silently no-opping, so a
+# run cannot appear to pass while every section leaks a live block into the next.
 function ForceDown {
-  & $monk unblock --force 2>&1 | Out-Null
-  if (-not (WaitSvc 'gone' 25)) { & powershell -ExecutionPolicy Bypass -File $cleanup -Dist $Dist 2>&1 | Out-Null }
+  throw 'BROKEN BY 319: ForceDown needs rewriting as a partner-code lift (see the header).'
 }
 function HostsHas([string]$re) { $t = try { Get-Content $hosts -Raw } catch { '' }; return ($t -match $re) }
 function IniHas([string]$re)   { $t = try { Get-Content $ini -Raw } catch { '' }; return ($t -match $re) }
@@ -127,7 +148,7 @@ function IniHas([string]$re)   { $t = try { Get-Content $ini -Raw } catch { '' }
 $me = [Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Host 'Run ELEVATED.' -ForegroundColor Red; exit 1 }
 if (-not (Test-Path $monk)) { Write-Host "monkmode.exe not at $monk - build dist first." -ForegroundColor Red; exit 1 }
-if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host 'MONKMODE already exists - run cleanup.ps1 first.' -ForegroundColor Yellow; exit 1 }
+if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host 'MONKMODE already exists - let any block end, then `sc.exe delete MONKMODE` while idle.' -ForegroundColor Yellow; exit 1 }
 & $monk setup --partner 'Smoke Tester (smoke@test.local)' 2>&1 | Out-Null   # idempotent; ensures SetupIsComplete
 
 try {
@@ -138,10 +159,13 @@ try {
   $codeA = ParseCode $outA
   Check "CV1 one-time accountability code minted" ($codeA -and $codeA.Length -ge 6)
   $st = & $monk status 2>&1 | ForEach-Object { "$_" }
-  Check "D5 status shows committed code-only exit line" (($st -join "`n") -match 'committed block')
-  # bare unblock must be REFUSED on a committed block (exit 1)
+  # LEDGER 319: the matched substring was 'committed block'. Every block is committed
+  # now, so `status` prints one exit sentence for all of them and the phrase is gone.
+  Check "D5 status shows the code-only exit line" (($st -join "`n") -match '--code <CODE>')
+  Check "D5 status offers no other way out" (($st -join "`n") -match 'There is no other way out')
+  # bare unblock must be REFUSED (exit 1)
   & $monk unblock 2>&1 | Out-Null
-  Check "CV2 bare 'unblock' refused on committed block (exit 1)" ($LASTEXITCODE -eq 1)
+  Check "CV2 bare 'unblock' refused (exit 1)" ($LASTEXITCODE -eq 1)
   Check "CV2 block still enforced after refused unblock" ((SvcState) -eq 'Running' -and (HostsHas 'example\.com'))
   # the correct code lifts it (service adjudicates on its tick)
   & $monk unblock --code $codeA 2>&1 | Out-Null
@@ -149,8 +173,13 @@ try {
   Check "CV1 hosts block removed after code lift" (-not (HostsHas '#### MonkMode Entries ####'))
   ForceDown
 
-  # --- CV1 rotate + CV3 cooling-off + D5 --------------------------------------
-  Write-Host "`n=== CV1(rotate)/CV3/D5: fresh code per block; cooling-off flow ===" -ForegroundColor Cyan
+  # --- CV1 rotate + D5 --------------------------------------------------------
+  # LEDGER 319: CV3 (the cooling-off trigger flow - bare `unblock` registering a
+  # service-computed ~1h pending, `--cancel` clearing it) was DELETED from here rather
+  # than reworked: there is no cooling-off exit to smoke, and bare `unblock` now refuses
+  # on every block rather than only on a committed one. What survives is CV1's rotate
+  # half plus the wrong-code check, and the bare-unblock refusal now covers ALL blocks.
+  Write-Host "`n=== CV1(rotate)/D5: fresh code per block; a wrong code never lifts ===" -ForegroundColor Cyan
   $outB = Arm "--sites example.com --for $FOR"
   $codeB = ParseCode $outB
   Check "CV1 rotate: 2nd block minted a DIFFERENT code" ($codeB -and $codeB -ne $codeA)
@@ -158,16 +187,10 @@ try {
   & $monk unblock --code "WRONG-$codeB" 2>&1 | Out-Null
   Start-Sleep -Seconds 16
   Check "CV1 wrong code did NOT lift (still enforced)" ((SvcState) -eq 'Running')
-  # bare unblock registers a service-computed ~1h cooling-off; status reflects it
+  # bare unblock is refused on EVERY block now (ledger 319), not just a committed one
   & $monk unblock 2>&1 | Out-Null
-  Start-Sleep -Seconds 24        # >2 service ticks: the deadline is computed on a tick
-  $st2 = (& $monk status 2>&1 | ForEach-Object { "$_" }) -join "`n"
-  Check "CV3/D5 status shows cooling-off pending (~active-time countdown)" ($st2 -match 'cooling-off pending')
-  Check "CV3 block stays FULLY enforced during cooling-off" ((SvcState) -eq 'Running' -and (HostsHas 'example\.com'))
-  & $monk unblock --cancel 2>&1 | Out-Null
-  Start-Sleep -Seconds 24        # >2 ticks for the cancel to clear the pending
-  $st3 = (& $monk status 2>&1 | ForEach-Object { "$_" }) -join "`n"
-  Check "CV3 cooling-off cancelled (pending cleared)" ($st3 -notmatch 'cooling-off pending')
+  Check "319 bare 'unblock' refused on an ordinary block too (exit 1)" ($LASTEXITCODE -eq 1)
+  Check "319 block still enforced after the refusal" ((SvcState) -eq 'Running' -and (HostsHas 'example\.com'))
   ForceDown
 
   # --- D1a: --preset expands to its domains -----------------------------------
@@ -232,9 +255,10 @@ try {
   ForceDown
 }
 finally {
-  Write-Host "`n=== teardown (force-unblock + cleanup.ps1 + remove test app) ===" -ForegroundColor Cyan
-  & $monk unblock --force 2>&1 | Out-Null
-  & powershell -ExecutionPolicy Bypass -File $cleanup -Dist $Dist 2>&1 | Out-Null
+  # BROKEN BY 319: the rescue teardown is gone. An aborted run now leaves whatever
+  # block was armed standing until its own --for timer runs out - there is no escape
+  # hatch and no cleanup script to fall back on. See the header.
+  Write-Host "`n=== teardown (remove test app only - NO block rescue exists) ===" -ForegroundColor Cyan
   Get-Process mmsmoke_testapp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Remove-Item $testExe -Force -ErrorAction SilentlyContinue
 }

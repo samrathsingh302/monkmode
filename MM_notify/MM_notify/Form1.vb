@@ -92,13 +92,10 @@ Public Class Form1
 
     ' D4 notification state (all in-memory; the notifier persists NOTHING new - no
     ' MAC field, no write that could race the service):
-    '   coolOffAnnounced - latches the "cooling-off started" toast so the 5s poll
-    '     shows it once per cooling-off, not every tick; reset when CoolOffUntil
-    '     clears so a cancel+re-request announces afresh.
     '   reminderAnchorTick - the Environment.TickCount64 of block-start (seeded at
     '     Load) or of the last periodic reminder; the pure ShouldFirePeriodicReminder
     '     gate spaces the "still blocked" nudge off monotonic time.
-    Private coolOffAnnounced As Boolean = False
+    ' Ledger 319: coolOffAnnounced (and the toast it latched) went with the cooling-off exit.
     Private reminderAnchorTick As Long = 0
     ' The periodic block-active reminder cadence. 2h keeps a long block gently in
     ' view without nagging; a short block simply ends before the first one fires.
@@ -202,7 +199,6 @@ Public Class Form1
     Private Sub pollTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles pollTimer.Tick
         Dim done As String = "", needsAlerted As String = ""
         Dim isScheduleArmed As Boolean = False
-        Dim coolOffToast As String = ""
         Dim reminderToast As String = ""
         Try
             Dim ini As New IniFile
@@ -213,11 +209,10 @@ Public Class Form1
             ' C5b (c3): suppress the manual-expiry toast while a schedule is armed (design §6.4);
             ' announce only once the schedule is genuinely cleared (not armed -> stopMe -> Done=yes).
             isScheduleArmed = ScheduleArmed(macValid, ini.GetKeyValue("Schedule", "Spec"))
-            ' D4: manual-block notifications (cooling-off started + the periodic active reminder).
-            ' MAC-valid + not-a-schedule + not-already-ended only. Built here inside the single ini
-            ' load, but SHOWN below AFTER the Catch so a toast can never disturb the expiry logic.
+            ' D4: the periodic active reminder. MAC-valid + not-a-schedule + not-already-ended
+            ' only. Built here inside the single ini load, but SHOWN below AFTER the Catch so a
+            ' toast can never disturb the expiry logic. Ledger 319 removed its cooling-off sibling.
             If macValid AndAlso Not isScheduleArmed AndAlso StrComp("yes", done) <> 0 Then
-                coolOffToast = BuildCoolOffToast(ini)
                 reminderToast = BuildReminderToast(ini)
             End If
         Catch ex As Exception
@@ -228,7 +223,6 @@ Public Class Form1
         ' every 5s poll). Shown before the expiry branch below so an early ExitNotifier /
         ' AnnounceBlockEnded return can never drop a notification (both stay "" on an ended tick
         ' anyway - they are gated off Done<>"yes" above - so this ordering is simply the safe one).
-        If coolOffToast <> "" Then ShowToast(coolOffToast)
         If reminderToast <> "" Then ShowToast(reminderToast)
 
         ' v1.1 S7b (P52): refresh the tray quick-status on the existing 5s beat. Its
@@ -278,26 +272,10 @@ Public Class Form1
         End Try
     End Function
 
-    ' D4 (best-effort, fail-soft): the "cooling-off started" toast, latched. "" unless a cooling-off
-    ' is newly pending: an empty [Time] CoolOffUntil resets the latch (so a cancel + re-request
-    ' announces again); a set-and-already-announced deadline is silent; a set-but-unreadable/elapsed
-    ' remaining shows nothing. remaining is the monotonic CoolOffUntil - HighWater. Never throws.
-    Private Function BuildCoolOffToast(ByVal ini As IniFile) As String
-        Try
-            Dim coolOffEnc As String = ini.GetKeyValue("Time", "CoolOffUntil")
-            If coolOffEnc = "" Then
-                coolOffAnnounced = False
-                Return ""
-            End If
-            If coolOffAnnounced Then Return ""
-            Dim remaining As TimeSpan? = Notifications.RemainingFromMark(enc.DecryptData(coolOffEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
-            If remaining Is Nothing OrElse remaining.Value.TotalSeconds <= 0 Then Return ""
-            coolOffAnnounced = True
-            Return Notifications.CoolOffStartedMessage(remaining.Value)
-        Catch ex As Exception
-            Return ""
-        End Try
-    End Function
+    ' Ledger 319: BuildCoolOffToast is DELETED. It announced "cooling-off started - the block
+    ' lifts in about N" off [Time] CoolOffUntil; nothing writes that field any more and the
+    ' service would ignore it if it did, so the toast could only ever promise an exit that does
+    ' not exist. The periodic reminder below is unaffected.
 
     ' D4 (best-effort, fail-soft): the periodic "still blocked" reminder, gated on the monotonic
     ' ShouldFirePeriodicReminder interval. The anchor is reset whenever the interval elapses (even

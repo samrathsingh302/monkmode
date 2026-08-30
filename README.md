@@ -46,15 +46,14 @@ before you arm anything long.
 monkmode setup --partner "Alex (alex@example.com)"   # required once, first run
 monkmode block --sites reddit.com,youtube.com --for 2h30m
 monkmode block --preset social,video --apps chrome.exe --until "2026-06-11 18:00"
-monkmode block --file blocklist.txt --for 8h --commit
+monkmode block --file blocklist.txt --for 8h
 monkmode block --urls "youtube.com/shorts" --for 4h # pages, not whole sites
 monkmode block --sites x.com --start +90m --for 2h  # begins in 90 minutes
 monkmode schedule --sites x.com --windows "Mon-Fri 09:00-17:00"
 monkmode status                     # one row per running block, with its id
 monkmode stats
 monkmode add --sites x.com --id 2   # an active block can only ever grow
-monkmode unblock --id 2             # start the cooling-off exit (delayed)
-monkmode unblock --code <CODE>      # partner code: lifts within ~10s
+monkmode unblock --code <CODE>      # partner code: the ONLY early exit
 monkmode help
 ```
 
@@ -63,8 +62,8 @@ cannot be shortened or replaced until it expires; `add` can only add more sites.
 
 **Up to eight blocks run side by side.** `monkmode block` starts a *new* one
 beside the ones already running rather than refusing, each with its own timer,
-lists, cooling-off and partner code; `monkmode status` gives every block an
-**id**, and `--id N` names one for `add`, `unblock` or a cancel. A block retires
+lists and partner code; `monkmode status` gives every block an
+**id**, and `--id N` names one for `add` or `unblock`. A block retires
 on its own timer without touching the others — only the last one leaving tears
 the machine down. `--start` delays a block (up to 30 days; `--for` then measures
 from the start, and the service computes the end time when it actually begins).
@@ -79,8 +78,8 @@ is best-effort; the hosts block is what actually stops a site.
 You block **sites** (hosts-level, machine-wide) and **apps** (killed on sight),
 named explicitly, from a `--file` list, or via a named **preset** category —
 `social`, `video`, `news`, `shopping`, `adult` for sites; `games`, `chat` for
-apps. `monkmode setup` can record **account defaults** (a default blocklist,
-app list and cooling-off duration) that a bare `monkmode block` inherits. You
+apps. `monkmode setup` can record **account defaults** (a default blocklist and
+app list) that a bare `monkmode block` inherits. You
 can arm recurring **schedules** (wall-clock windows enforced at the same
 strength as a manual block, including overnight windows such as
 `Mon-Fri 22:30-04:00`), review history with `monkmode stats`, and widen
@@ -88,7 +87,7 @@ app-kill to every logged-in session with `--all-session-kill`. A schedule and a
 manual block deliberately refuse to run together, in either direction — clear
 the schedule first. `monkmode status` shows every running block, the time it
 actually has left and the current exit path; the notifier keeps a tray icon and
-raises toasts at block start, when a cooling-off begins, and at expiry.
+raises toasts at block start, periodically during a long block, and at expiry.
 
 That "time left" is **machine-ON time**. A block's end time advances only while
 the service is running, so hours spent shut down or asleep are not served and
@@ -112,17 +111,11 @@ when it was read back and freeze this and every other running block permanently.
 ## Exits — how a block ends (and what that honestly protects against)
 
 A block is deliberately *hard to leave on impulse*, not impossible to leave.
-There are three ordinary ways out, in increasing order of friction:
+There are exactly **two** ways out, and there is deliberately no third:
 
 - **Wait for the timer.** A block always lifts itself at its end time. Expiry
   is decided off a monotonic high-water mark (see below), so rolling the clock
   forward can't bring it early.
-- **Cooling-off (self-serve, but delayed).** `monkmode unblock` does *not* lift
-  the block — it *requests* a lift. The block stays fully enforced while the
-  service counts down a mandatory wait (~1 hour of active machine time by
-  default; raise it with `--cooloff`, never shorten it), then lifts itself.
-  `monkmode unblock --cancel` aborts a pending wait. There is no self-serve
-  *instant* exit — that is the point.
 - **Partner accountability code (immediate).** Every block mints a one-time
   code, shown once at block start and stored only as a salted, MAC-covered
   hash. Relay it to an accountability partner. `monkmode unblock --code <CODE>`
@@ -130,21 +123,34 @@ There are three ordinary ways out, in increasing order of friction:
   code is minted per block; a wrong, blank or tampered code leaves the block
   standing.
 
-A **committed** block (`monkmode block --commit`) disables the self-serve
-cooling-off, leaving the partner code (or the timer) as the only early way out
-— use it when you mean it.
+**Lose the code and you wait.** There is no recovery, no override, no admin
+bypass and no support channel — the block runs to its end time. Bare
+`monkmode unblock` refuses; it does not start anything. Every block is
+committed: there is no lesser mode. Choose durations you mean.
 
-**What this does *not* protect against — the honest ceiling.** You keep
-Administrator rights on your own single machine, so MonkMode is *impulse-proof,
-not admin-proof*. A deliberate, explicitly-flagged escape hatch —
-`monkmode unblock --force` — always tears a block down and removes the service.
-It is retained on purpose as brick-insurance: a fail-closed bug or a dead DPAPI
-store must never be able to trap the machine permanently, so the guaranteed way
-out is kept and documented rather than hidden. And an offline / WinRE /
-determined-admin-with-time attack (B10) always wins eventually. MonkMode aims to
-defeat casual-to-determined bypasses; it does **not** claim to be unbreakable,
-and there is deliberately no BitLocker / BIOS-lock / non-admin-account layer in
-this codebase. The full bypass table (B1–B14) and the honest ceiling live in
+Until 30/08/2026 there were two more exits, and both were removed on purpose:
+a self-serve **cooling-off** wait (`monkmode unblock` counted down ~1 hour of
+active machine time and then lifted the block itself) and an escape hatch
+(`monkmode unblock --force`, an unconditional teardown). Neither exists in the
+code any more — not as a hidden flag, not as an environment variable, not as a
+debug path. `--force` and `--cancel` are now reported as options that do not
+exist. `--commit` and `--cooloff` are still *accepted* so old scripts keep
+working, but they do nothing.
+
+**What this does *not* protect against — the honest ceiling.** MonkMode is
+*impulse-proof, not admin-proof*, and there is **no built-in escape**. You keep
+Administrator rights on your own single machine, so an offline / WinRE /
+determined-admin-with-time attack (B10) always wins eventually — booting
+elsewhere and editing the disk is outside anything this program can defend, and
+it is the only route left. The trade the removal makes is explicit: with no
+escape hatch, a fail-closed corner is now genuinely unrecoverable in-band. A
+config that fails its integrity check (B7 freeze) cannot be lifted even by the
+partner code, because the code is checked against a config the service will not
+trust — such a block holds past its end time, indefinitely, and only B10 gets
+out. That is accepted, not overlooked. MonkMode aims to defeat
+casual-to-determined bypasses; it does **not** claim to be unbreakable, and
+there is deliberately no BitLocker / BIOS-lock / non-admin-account layer in this
+codebase. The full bypass table (B1–B14) and the honest ceiling live in
 `ARCHITECTURE.md`, the author's working threat-model notes (kept outside this
 repo); the summary above is the accurate short form.
 
@@ -156,7 +162,7 @@ Four cooperating processes, so that no single Ctrl+Alt+Del kill ends the block:
 |---|---|---|---|
 | `MonkMode/` | `monkmode.exe` | User (elevated) | CLI. Parses commands, writes the hosts file, writes the encrypted config, installs & starts the service, registers the notifier. |
 | `MonkMode_srv/` | `MonkMode_srv.exe` | **LocalSystem service `MONKMODE`** | Enforcement core. Locks the hosts file, restores it if tampered with, kills blocked processes, keeps the guardian alive, lifts the block only when the timer genuinely expires. `CanStop=False`. |
-| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service (it no longer rewrites the end time), shows the tray icon and toasts at block start, when a cooling-off begins, and when the block ends, watches the browser address bar for `--urls` patterns, and serves the loopback block page. Nudge and comfort layers only — it holds no enforcement authority. |
+| `MM_notify/` | `mm_notify.exe` | User session (HKCU `Run`) | Notifier. Kills blocked apps in the user session, flags clock changes to the service (it no longer rewrites the end time), shows the tray icon and toasts at block start, periodically during a long block, and when the block ends, watches the browser address bar for `--urls` patterns, and serves the loopback block page. Nudge and comfort layers only — it holds no enforcement authority. |
 | `MM_guard/` | `mm_guard.exe` | SYSTEM session (spawned by the service) | Watchdog guardian. Restarts the service via the SCM if it is killed, relaunches the notifier into the user session, stands down only when the block genuinely expires. |
 
 A block is hosts-file DNS sinkholing (`127.0.0.1` entries between the
@@ -236,9 +242,9 @@ point, not a product:
   and the notifier in turn, disabling SCM recovery to prove the guardian alone
   restores the service, the browser-DoH self-heal, and a corrupted MAC that
   keeps the block standing rather than lifting it. The accountability core was
-  exercised live in the same sitting (cooling-off can't be skipped, a wrong code
-  doesn't lift, a good code does, a committed block refuses self-serve, a
-  scheduled window auto-starts and tears down on `--clear`). The forward /
+  exercised live in the same sitting (a wrong code doesn't lift, a good code
+  does, a bare `unblock` is refused, a scheduled window auto-starts and tears
+  down on `--clear`). The forward /
   backward clock drills are unit-pinned; their live drill is deferred, since
   manipulating the system clock is unsafe to run unattended. The smoke's first
   incarnation exposed three real bugs the compiler couldn't: `0.0.0.0` sinkholes
@@ -251,8 +257,8 @@ point, not a product:
   round-trips under de-DE/fr-FR/en-US/en-GB locales, crypto round-trips and
   cross-project ciphertext equivalence, the config-integrity MAC and its
   four-project canonical parity, the monotonic clock gates, and the browser-DoH
-  policy decisions), plus the accountability core added since (the cooling-off
-  and partner-code lifecycle and their fail-closed gates, schedule parsing and
+  policy decisions), plus the accountability core added since (the partner-code
+  lifecycle and its fail-closed gates, schedule parsing and
   window→duration conversion, preset expansion, and the separate stats file),
   and the v1.1 surface on top of that (the two-level slot canonical and its
   four-project parity, the retire/teardown state machine, overnight window
@@ -297,18 +303,21 @@ point, not a product:
 
 ## Removing a block or the service
 
-The intended way out of an active block is one of the exits above — cooling-off,
-the partner code, or waiting for the timer. While a block is active the service
-carries a deny-DELETE ACE, so `sc delete MONKMODE` is *refused* (B6); that is by
-design, not a bug.
+The way out of an active block is one of the two exits above — the partner code,
+or waiting for the timer. While a block is active the service carries a
+deny-DELETE ACE, so `sc delete MONKMODE` is *refused* (B6); that is by design,
+not a bug.
 
-The deliberate escape hatch is `monkmode unblock --force` (run as
-Administrator): it disables SCM recovery, stops the watchdog pair, removes the
-deny-DELETE ACE, deletes the service, and strips only the MonkMode hosts marker
-block (your own hosts content is preserved). It is the honest, documented
-removal for a fail-closed corner or a determined admin — see the honest ceiling
-above. When no block is active the service is idle and `sc delete MONKMODE`
-removes it normally.
+**There is no escape hatch.** `monkmode unblock --force` was removed on
+30/08/2026 along with the cooling-off wait, and `monkmode.exe` no longer contains
+any code path that can stop or delete the service, kill the watchdog pair, strip
+the hosts block or clear the SafeBoot registration. Nothing you can type ends a
+block early except its own partner code.
+
+Once the block has ended, the service stands itself down and re-grants DELETE on
+its own, so `sc delete MONKMODE` removes it normally while idle — which is what
+`tools\uninstall.ps1` does. That uninstaller is fail-closed and **refuses** while
+anything is enforcing; it is not a way out either.
 
 ## Upstream & licence
 

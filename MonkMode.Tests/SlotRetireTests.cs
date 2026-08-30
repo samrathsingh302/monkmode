@@ -113,24 +113,31 @@ public class SlotClassifierTests
         Assert.Equal(monkmode.Service1.SlotAction.Hold, Due(Slot(until: "")));
     }
 
+    // FLIPPED BY LEDGER 319. This was CoolingOffElapsed_AndCodeUnlock_EachRetireTheSlotOnTheirOwn:
+    // an elapsed CoolOffUntil retired a slot whose Until was still hours away, with no partner
+    // code. That is the code-free exit Samrath asked to be rid of, so the cooling-off arm now
+    // never retires anything - whatever the deadline says, and even under a valid MAC.
     [Fact]
-    public void CoolingOffElapsed_AndCodeUnlock_EachRetireTheSlotOnTheirOwn()
+    public void OnlyTheCodeUnlockRetiresEarly_TheCoolingOffArmIsInert()
     {
-        Assert.Equal(monkmode.Service1.SlotAction.Retire, Due(Slot(until: Future, coolOffUntil: Past)));
         Assert.Equal(monkmode.Service1.SlotAction.Retire, Due(Slot(until: Future, unlockedAt: "2026-08-12 11:00:00")));
-        // A cooling-off deadline still ahead of the trusted mark holds.
+        // An elapsed deadline: was Retire, is Hold.
+        Assert.Equal(monkmode.Service1.SlotAction.Hold, Due(Slot(until: Future, coolOffUntil: Past)));
+        // A deadline still ahead of the mark held before and holds now.
         Assert.Equal(monkmode.Service1.SlotAction.Hold, Due(Slot(until: Future, coolOffUntil: Future)));
     }
 
     [Fact]
-    public void PendingSlot_NeverRetiresOnTime_ButItsAuthorisedExitsStillWork()
+    public void PendingSlot_NeverRetiresOnTime_ButTheCodeStillCancelsIt()
     {
         // A `--start` slot has no Until at all, so "no recorded end" must not read as over.
         Assert.Equal(monkmode.Service1.SlotAction.Hold, Due(Slot(startAt: Future)));
-        // ...but a partner code or a completed cooling-off must still cancel it: a block you
-        // scheduled for tomorrow has to be cancellable by the exits you were promised.
+        // ...but a partner code must still cancel it: a block you scheduled for tomorrow has to
+        // be endable by the ONE exit you were promised. Ledger 319: the completed-cooling-off
+        // half of this pair is gone, which is also why the PENDING row's status line no longer
+        // claims `--cancel` ends it "freely until it starts" (it never did).
         Assert.Equal(monkmode.Service1.SlotAction.Retire, Due(Slot(startAt: Future, unlockedAt: "2026-08-12 11:00:00")));
-        Assert.Equal(monkmode.Service1.SlotAction.Retire, Due(Slot(startAt: Future, coolOffUntil: Past)));
+        Assert.Equal(monkmode.Service1.SlotAction.Hold, Due(Slot(startAt: Future, coolOffUntil: Past)));
     }
 
     [Fact]
@@ -298,15 +305,14 @@ public class SlotActivationAndTriggerNameTests
         // P29: storing an absolute end at arm time would UNDER-block after downtime, because
         // the wall clock runs on while the machine is off. Anchoring on HighWater is what
         // makes "machine off across the window" yield the FULL duration from the resume.
-        // The stored SHAPE is en-CA, byte-identical to ComputeCoolOffDeadline's - the two
-        // service-computed deadlines must be written and re-parsed the same way.
+        // The stored SHAPE is en-CA. (It used to be pinned against ComputeCoolOffDeadline's
+        // output, the other service-computed deadline; ledger 319 deleted that function with
+        // the cooling-off exit, so the shape is pinned against the literals alone now.)
         var enCa = new CultureInfo("en-CA");
         Assert.Equal(new DateTime(2026, 8, 12, 13, 0, 0).ToString(enCa),
             monkmode.Service1.ComputeSlotActivationUntil("2026-08-12 12:00:00", "3600"));
         Assert.Equal(new DateTime(2026, 8, 13, 12, 0, 0).ToString(enCa),
             monkmode.Service1.ComputeSlotActivationUntil("2026-08-12 12:00:00", "86400"));
-        Assert.Equal(monkmode.Service1.ComputeCoolOffDeadline("2026-08-12 12:00:00", 3600, 0),
-            monkmode.Service1.ComputeSlotActivationUntil("2026-08-12 12:00:00", "3600"));
         // ...and it round-trips through the parser every gate reads it with.
         Assert.True(DateTime.TryParse(monkmode.Service1.ComputeSlotActivationUntil("2026-08-12 12:00:00", "3600"),
                                       enCa, DateTimeStyles.None, out _));
@@ -363,7 +369,10 @@ public class SlotActivationAndTriggerNameTests
     public void TriggerPrefixes_AreParityPinnedWithTheCliCopies()
     {
         // A drift here silently breaks the whole exit channel: the CLI would drop files the
-        // service never reads, and `unblock` would appear to do nothing at all.
+        // service never reads, and `unblock --code` would appear to do nothing at all.
+        // Ledger 319: the two CoolOff prefixes are still pinned even though nothing WRITES one
+        // any more - both sides still need the same names for the stale-file sweep
+        // (EnumerateTriggerFilesIn globs them; PurgeUnaddressedTriggers deletes them unread).
         Assert.Equal(MonkMode.Blocker.CoolOffRequestPrefix, monkmode.Service1.CoolOffRequestPrefix);
         Assert.Equal(MonkMode.Blocker.CoolOffCancelPrefix, monkmode.Service1.CoolOffCancelPrefix);
         Assert.Equal(MonkMode.Blocker.PartnerCodePrefix, monkmode.Service1.PartnerCodePrefix);
@@ -838,14 +847,18 @@ public class SlotRetireLiveTests
 
     // ---- P2: the [Commit] Committed latch must not outlive its slot ----
 
+    // LEDGER 319: the two CLI readers of the [Commit] latch - BlockIsCommitted (machine-wide)
+    // and SlotIsCommitted (per-slot) - are DELETED, because their only caller was the `unblock`
+    // gate that refused a committed block's self-serve cooling-off. There is no cooling-off, so
+    // there is no gate, so the latch decides nothing. What is still worth pinning is that the
+    // retire pass keeps the STORED field honest (it is MAC-covered, and a stale "yes" over a
+    // machine with no committed slot left is exactly the kind of drift that bites later), so
+    // these two assert the recompute directly off the ini instead of through the deleted readers.
     [Fact]
-    public void RetiringACommittedSlot_ClearsTheV9CommitLatch_SoTheSurvivorKeepsItsExit()
+    public void RetiringACommittedSlot_ClearsTheV9CommitLatch()
     {
-        // The latch is "yes if ANY slot is committed", written at every arm and never cleared.
-        // The CLI's `unblock` gate reads it, so a committed 1h block retiring beside an
-        // uncommitted 30d one used to refuse the SURVIVOR's cooling-off - "This block is
-        // COMMITTED" - for the whole 30 days, until some later arm happened to recompute it.
-        // Over-block, no bypass, but it locks the user out of an exit they are entitled to.
+        // The latch is "yes if ANY slot is committed", written at every arm; the retire pass
+        // recomputes it from what SURVIVED.
         Wipe();
         var dir = TempDir();
         try
@@ -854,16 +867,12 @@ public class SlotRetireLiveTests
             Assert.True(MonkMode.Blocker.ArmSlot(new[] { "a.com" }, Array.Empty<string>(), "", null, Ends, false, committed: true).Ok);
             Assert.True(Arm("b.com").Ok);
             Assert.Equal("yes", Reload().GetKeyValue("Commit", "Committed"));
-            Assert.True(MonkMode.Blocker.BlockIsCommitted());
 
             Assert.True(Svc().RetireSlotAt(MonkMode.Blocker.IniPath(),
                                                              Path.Combine(dir, "monkmode_hosts.block"),
                                                              Path.Combine(dir, "hosts"), "1"));
 
             Assert.Equal("no", Reload().GetKeyValue("Commit", "Committed"));
-            Assert.False(MonkMode.Blocker.BlockIsCommitted());
-            // ...and the addressed gate agrees about the survivor specifically.
-            Assert.False(MonkMode.Blocker.SlotIsCommitted(2));
         }
         finally { Wipe(); Drop(dir); }
     }
@@ -871,8 +880,7 @@ public class SlotRetireLiveTests
     [Fact]
     public void RetiringAnUncommittedSlot_LeavesACommittedSurvivorsLatchOn()
     {
-        // The recompute is a UNION, not a clear: a surviving committed block must keep the
-        // machine-wide latch on, or the CLI would offer a cooling-off the service will Ignore.
+        // The recompute is a UNION, not a clear: a surviving committed block keeps the latch on.
         Wipe();
         var dir = TempDir();
         try
@@ -883,35 +891,22 @@ public class SlotRetireLiveTests
                                                              Path.Combine(dir, "monkmode_hosts.block"),
                                                              Path.Combine(dir, "hosts"), "1"));
             Assert.Equal("yes", Reload().GetKeyValue("Commit", "Committed"));
-            Assert.True(MonkMode.Blocker.SlotIsCommitted(2));
         }
         finally { Wipe(); Drop(dir); }
     }
 
-    [Fact]
-    public void SlotIsCommitted_ReadsTheNamedBlock_NotTheMachineWideLatch()
-    {
-        Wipe();
-        try
-        {
-            Assert.True(MonkMode.Blocker.ArmSlot(new[] { "a.com" }, Array.Empty<string>(), "", null, Ends, false, committed: true).Ok);
-            Assert.True(Arm("b.com").Ok);
-            Assert.True(MonkMode.Blocker.BlockIsCommitted());     // the latch says yes...
-            Assert.True(MonkMode.Blocker.SlotIsCommitted(1));
-            Assert.False(MonkMode.Blocker.SlotIsCommitted(2));    // ...but block 2 is not
-            Assert.False(MonkMode.Blocker.SlotIsCommitted(99));   // unknown id: fail-safe False
-        }
-        finally { Wipe(); }
-    }
-
-    // ---- P33: a bare `unblock` may never aim at a block the user did not name ----
+    // ---- LEDGER 319: a bare `unblock` starts NOTHING, on any number of blocks ----
+    //
+    // P33 existed because a bare `unblock` began a real countdown that ended a block, so it
+    // could not be aimed at blocks the user had not named: with a 1h focus block and a 30d
+    // commitment armed, habit-typing `unblock` started the ~1h clock on BOTH. Ledger 319 solved
+    // that problem by removing the countdown. BareUnblockIsAmbiguous is deleted; what replaces
+    // its three tests is the STRONGER claim - dropping the request triggers by hand, exactly as
+    // a broadcast would have, still leaves every block fully enforced.
 
     [Fact]
-    public void BareUnblock_WithTwoBlocksArmed_Refuses_AndNeitherCoolOffIsWritten()
+    public void CoolOffRequestTriggers_OnEveryArmedBlock_LiftNothingAndAreSweptAway()
     {
-        // THE PIN. Habit-typing `unblock` with a 1h focus block and a 30d commitment armed
-        // must NOT start the ~1h clock on both - the 30d block would lift within the hour and
-        // the success message never said it had addressed every block.
         Wipe();
         var dir = TempDir();
         try
@@ -920,50 +915,24 @@ public class SlotRetireLiveTests
             Assert.True(Arm("b.com").Ok);
             var armed = MonkMode.Blocker.ArmedSlotIds();
             Assert.Equal(2, armed.Count);
-            Assert.True(MonkMode.Program.BareUnblockIsAmbiguous(false, armed.Count));
 
-            // The refusal means NO trigger is dropped, and the service is the only writer of
-            // CoolOffUntil - so with an empty trigger zone a full poll writes nothing.
-            var svc = Svc();
-            svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), svc.LoadSlots(Reload()),
-                                        "2026-08-12 12:00:00", true, monkmode.Service1.EnumerateTriggerFilesIn(dir));
+            // The worst case the old P33 refusal was protecting against: a request addressed at
+            // EVERY armed block at once, on a healthy MAC-valid config.
+            foreach (var id in armed) File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + id), "");
+            var names = monkmode.Service1.EnumerateTriggerFilesIn(dir);
+            Assert.Equal(2, names.Count);
+
+            // The tick's ONE disposal step for them now. There is no cooling-off poll left to
+            // run: the prefixes address no family, so they are deleted unread.
+            monkmode.Service1.PurgeUnaddressedTriggers(dir, names);
+
+            // Nothing was written, on either block...
             Assert.Equal("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));
             Assert.Equal("", Reload().GetKeyValue("Slot2", "CoolOffUntil"));
-
-            // ...and this is the harm the refusal prevents: had the CLI broadcast instead,
-            // BOTH blocks would now be counting down to a lift.
-            foreach (var id in armed) File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + id), "");
-            svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), svc.LoadSlots(Reload()),
-                                        "2026-08-12 12:00:00", true, monkmode.Service1.EnumerateTriggerFilesIn(dir));
-            Assert.NotEqual("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));
-            Assert.NotEqual("", Reload().GetKeyValue("Slot2", "CoolOffUntil"));
+            // ...and nothing was left on disk to squat the per-tick trigger budget for ever.
+            Assert.Empty(monkmode.Service1.EnumerateTriggerFilesIn(dir));
         }
         finally { Wipe(); Drop(dir); }
-    }
-
-    [Fact]
-    public void BareUnblock_WithOneBlockArmed_StillTargetsIt()
-    {
-        // v1.0's feel is preserved on a single-block machine: no --id needed.
-        Wipe();
-        try
-        {
-            Assert.True(Arm("a.com").Ok);
-            Assert.False(MonkMode.Program.BareUnblockIsAmbiguous(false, MonkMode.Blocker.ArmedSlotIds().Count));
-        }
-        finally { Wipe(); }
-    }
-
-    [Theory]
-    [InlineData(true, 0, false)]    // --id given: never ambiguous
-    [InlineData(true, 5, false)]
-    [InlineData(false, 0, false)]
-    [InlineData(false, 1, false)]
-    [InlineData(false, 2, true)]
-    [InlineData(false, 8, true)]
-    public void BareUnblockIsAmbiguous_OnlyWhenUnnamedAndPlural(bool explicitId, int armedCount, bool expected)
-    {
-        Assert.Equal(expected, MonkMode.Program.BareUnblockIsAmbiguous(explicitId, armedCount));
     }
 
     [Fact]
@@ -1008,18 +977,26 @@ public class SlotRetireLiveTests
             File.WriteAllText(Path.Combine(dir, "monkmode_partner.code"), "OLD-CODE123");
             File.WriteAllText(Path.Combine(dir, "monkmode_cooloff.request.4"), "");
 
+            File.WriteAllText(Path.Combine(dir, "monkmode_partner.code.4"), "REAL-CODE12");
+
             var names = monkmode.Service1.EnumerateTriggerFilesIn(dir);
-            Assert.Equal(4, names.Count);                                    // the quirk is real
+            Assert.Equal(5, names.Count);                                    // the quirk is real
             Assert.Contains("monkmode_cooloff.request", names);
             Assert.False(monkmode.Service1.TriggerAddressesAnyFamily("monkmode_cooloff.request"));
-            Assert.True(monkmode.Service1.TriggerAddressesAnyFamily("monkmode_cooloff.request.4"));
+            // Ledger 319: an ADDRESSED cooling-off name now answers "no family" too, so it is
+            // purged alongside the unsuffixed legacy ones instead of being read by a poller.
+            // Only the partner-code family (and `add`) still address anything.
+            Assert.False(monkmode.Service1.TriggerAddressesAnyFamily("monkmode_cooloff.request.4"));
+            Assert.True(monkmode.Service1.TriggerAddressesAnyFamily("monkmode_partner.code.4"));
 
             monkmode.Service1.PurgeUnaddressedTriggers(dir, names);
             Assert.False(File.Exists(Path.Combine(dir, "monkmode_cooloff.request")));
             Assert.False(File.Exists(Path.Combine(dir, "monkmode_cooloff.cancel")));
             Assert.False(File.Exists(Path.Combine(dir, "monkmode_partner.code")));
-            // The addressed one is untouched - purging is only ever for names with no id.
-            Assert.True(File.Exists(Path.Combine(dir, "monkmode_cooloff.request.4")));
+            Assert.False(File.Exists(Path.Combine(dir, "monkmode_cooloff.request.4")));
+            // The addressed PARTNER-CODE trigger is untouched - the purge only ever bins names
+            // that resolve to no family, and that is still the whole exit channel.
+            Assert.True(File.Exists(Path.Combine(dir, "monkmode_partner.code.4")));
             Assert.Single(monkmode.Service1.EnumerateTriggerFilesIn(dir));
         }
         finally { Wipe(); Drop(dir); }
@@ -1392,7 +1369,8 @@ public class SlotRetireLiveTests
             }
             var slots = svc.LoadSlots(Reload());
             var names = monkmode.Service1.EnumerateTriggerFilesIn(dir);
-            svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), slots, "2026-08-12 12:00:00", true, names);
+            // Ledger 319: the cooling-off half of this is now the purge, not a poll.
+            monkmode.Service1.PurgeUnaddressedTriggers(dir, names);
             svc.ProcessPartnerCodeSignalAt(dir, MonkMode.Blocker.IniPath(), slots, true, names);
 
             Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));    // not one byte
@@ -1402,12 +1380,15 @@ public class SlotRetireLiveTests
         finally { Wipe(); Drop(dir); }
     }
 
+    // LEDGER 319 replaces two tests here. CoolingOff_IsPerSlot_... pinned the S2 under-block
+    // fix (a per-slot deadline, so `arm 30d; unblock; arm 30d` could not lift both at ~1h), and
+    // CoolOffCancel_WinsOverASimultaneousRequest_PerSlot pinned "cancel wins" in the
+    // cancel-vs-elapse race. Both described a deadline that can no longer be written at all.
+    // The single test below is what is left to say, and it is stronger than either: a request
+    // trigger addressed at a real, MAC-valid, armed slot writes NO deadline and lifts nothing.
     [Fact]
-    public void CoolingOff_IsPerSlot_SoASecondArmIsNotSubjectedToTheFirstsDeadline()
+    public void ACoolOffRequestAgainstARealSlot_WritesNoDeadline_AndTheBlockHolds()
     {
-        // THE S2 UNDER-BLOCK, CLOSED. `arm 30d; unblock; arm 30d` used to subject the second
-        // block to the first's machine-wide ~1h deadline, so BOTH lifted at ~1h. There is no
-        // machine-wide deadline left to inherit.
         Wipe();
         var dir = TempDir();
         try
@@ -1418,43 +1399,15 @@ public class SlotRetireLiveTests
             const string hw = "2026-08-12 12:00:00";
 
             File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + a.Id), "");
-            svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), svc.LoadSlots(Reload()), hw, true,
-                                        monkmode.Service1.EnumerateTriggerFilesIn(dir));
-            var enc = new MonkMode.Simple3Des("mm_textbox");
-            Assert.NotEqual("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));
-            // The deadline is the FLOOR-clamped HighWater offset, never the wall clock.
-            Assert.Equal(monkmode.Service1.ComputeCoolOffDeadline(hw, monkmode.Service1.MinCoolOffFloorSeconds, monkmode.Service1.MinCoolOffFloorSeconds),
-                         enc.DecryptData(Reload().GetKeyValue("Slot1", "CoolOffUntil")));
+            monkmode.Service1.PurgeUnaddressedTriggers(dir, monkmode.Service1.EnumerateTriggerFilesIn(dir));
 
-            // Now arm a SECOND block. It starts with no deadline of its own and cannot inherit
-            // the first's.
-            var b = Arm("b.com");
-            Assert.True(b.Ok);
-            Assert.Equal("", Reload().GetKeyValue("Slot2", "CoolOffUntil"));
-            var slots = svc.LoadSlots(Reload());
-            var asOf = DateTime.Parse(hw, new CultureInfo("en-CA"));
-            Assert.Equal(monkmode.Service1.SlotAction.Hold, monkmode.Service1.SlotExitDue(slots[1], asOf, 5, true, hw));
-        }
-        finally { Wipe(); Drop(dir); }
-    }
-
-    [Fact]
-    public void CoolOffCancel_WinsOverASimultaneousRequest_PerSlot()
-    {
-        Wipe();
-        var dir = TempDir();
-        try
-        {
-            var a = Arm("a.com");
-            Assert.True(a.Ok);
-            var svc = Svc();
-            File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + a.Id), "");
-            File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffCancelPrefix + a.Id), "");
-            svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), svc.LoadSlots(Reload()), "2026-08-12 12:00:00", true,
-                                        monkmode.Service1.EnumerateTriggerFilesIn(dir));
-            // Cancel wins: the safe outcome is "stay blocked".
             Assert.Equal("", Reload().GetKeyValue("Slot1", "CoolOffUntil"));
             Assert.Empty(Directory.GetFiles(dir, "monkmode_cooloff.*"));
+
+            // ...and the block is still HELD through the real per-slot exit gate.
+            var slots = svc.LoadSlots(Reload());
+            var asOf = DateTime.Parse(hw, new CultureInfo("en-CA"));
+            Assert.Equal(monkmode.Service1.SlotAction.Hold, monkmode.Service1.SlotExitDue(slots[0], asOf, 5, true, hw));
         }
         finally { Wipe(); Drop(dir); }
     }
@@ -1474,7 +1427,7 @@ public class SlotRetireLiveTests
             File.WriteAllText(Path.Combine(dir, monkmode.Service1.CoolOffRequestPrefix + a.Id), "");
             File.WriteAllText(Path.Combine(dir, monkmode.Service1.PartnerCodePrefix + a.Id), a.PartnerCode);
             var names = monkmode.Service1.EnumerateTriggerFilesIn(dir);
-            svc.ProcessCoolOffSignalsAt(dir, MonkMode.Blocker.IniPath(), slots, "2026-08-12 12:00:00", macValid: false, triggerNames: names);
+            monkmode.Service1.PurgeUnaddressedTriggers(dir, names);
             svc.ProcessPartnerCodeSignalAt(dir, MonkMode.Blocker.IniPath(), slots, macValid: false, triggerNames: names);
             Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));
         }

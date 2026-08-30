@@ -79,11 +79,18 @@ public class ClassifyHeartbeatTests
         Assert.Equal(Hb.Hold, monkmode.Service1.ClassifyHeartbeat(macValid: false, blockExpired: false, coolOffElapsed: false, codeUnlocked: false, scheduleActive: false, scheduleArmed: false));
     }
 
-    // C2b: a completed cooling-off lifts - but ONLY under a valid MAC.
+    // Ledger 319: the coolOffElapsed ARM of this pure matrix is now UNREACHABLE in production.
+    // Its only producer, Service1.CoolOffElapsedTime, returns False unconditionally, so nothing
+    // can hand this parameter a true. The arm is left in the matrix (and pinned here) because
+    // removing the parameter would mean re-shaping three gates across two assemblies and ~130
+    // positional call sites in this suite. CoolOffTests proves the END-TO-END property that
+    // actually matters: an elapsed CoolOffUntil in the ini never lifts, through the real gates.
     [Fact]
-    public void ValidMac_CoolOffElapsed_Lifts()
+    public void CoolOffElapsedArm_StillLiftsInTheMatrix_ButNothingCanEverSetIt()
     {
         Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: true, codeUnlocked: false, scheduleActive: false, scheduleArmed: false));
+        // ...and the only thing that ever fed it says False, whatever it is given.
+        Assert.False(monkmode.Service1.CoolOffElapsedTime("2020-01-01 12:00:00 a.m.", "2099-01-01 12:00:00 a.m."));
     }
 
     // C3b: a partner-verified code-unlock lifts - but ONLY under a valid MAC.
@@ -93,9 +100,9 @@ public class ClassifyHeartbeatTests
         Assert.Equal(Hb.Lift, monkmode.Service1.ClassifyHeartbeat(macValid: true, blockExpired: false, coolOffElapsed: false, codeUnlocked: true, scheduleActive: false, scheduleArmed: false));
     }
 
-    // C2b KEYSTONE: a tampered config can never cool off its way out. Even with
-    // an "elapsed" cooling-off deadline, an invalid MAC HOLDS - never lifts,
-    // never re-stamps. (The cooling-off analogue of the B7 heartbeat P0.)
+    // C2b KEYSTONE, kept as belt AND braces: even in the pure matrix, and even with an
+    // "elapsed" cooling-off deadline, an invalid MAC HOLDS - never lifts, never re-stamps.
+    // (Ledger 319 made the arm unreachable; this says it would still be safe if it were not.)
     [Fact]
     public void InvalidMac_EvenWithCoolOffElapsed_Holds()
     {

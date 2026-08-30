@@ -71,26 +71,21 @@ public class CommitBlockEndToEndTests
         OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", HwText, "", SaltB64, HashB64, unlockedAt, committed, "", "", "", "");
 
     [Fact]
-    public void CommittedBlock_RefusesCoolingOff_ButTheCodeStillExits_TheC4Seam()
+    public void CommittedBlock_KeepsTheCodeExit()
     {
         // Armed committed, healthy (valid MAC).
         var armed = CommittedCanonical("", "yes");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             armed, MonkMode.ConfigIntegrity.ComputeConfigMac(armed, Key), Key);
         Assert.True(macValid);
-        var committed = monkmode.Service1.IsCommitted("yes");
-        Assert.True(committed);
+        Assert.True(monkmode.Service1.IsCommitted("yes"));
 
-        // Cooling-off is REFUSED (Ignored) on a committed block...
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            monkmode.Service1.ClassifyCoolOffSignal(requestPresent: true, cancelPresent: false,
-                coolOffPending: false, committed: committed, macValid: macValid));
-
-        // ...but the partner code channel is UNAFFECTED (no committed axis)...
+        // The partner code channel Verifies (it has no committed axis, and never had one)...
         Assert.Equal(monkmode.Service1.PartnerCodeAction.Verify,
             monkmode.Service1.ClassifyPartnerCodeSignal(codePresent: true, candidateNonEmpty: true, alreadyUnlocked: false, macValid: macValid));
 
-        // ...and a verified code lifts the committed block (the kept exit).
+        // ...and a verified code lifts the committed block: since ledger 319 this and the end
+        // time are the ONLY two exits, for every block.
         var unlockedAt = Hw.AddMinutes(1).ToString(EnCa);
         var unlocked = CommittedCanonical(unlockedAt, "yes");
         var unlockedMacValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
@@ -98,26 +93,35 @@ public class CommitBlockEndToEndTests
         Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, "", unlockedAt, "", HwText, 5, unlockedMacValid, scheduleArmed: false));
     }
 
+    // LEDGER 319: the C4 asymmetry is GONE because the weaker half of it is gone. There used to
+    // be two grades of block - uncommitted (cooling-off OR code) and committed (code only) - and
+    // NotCommittedBlock_AllowsCoolingOff pinned the difference. Every block is committed now, and
+    // more to the point there is no cooling-off machinery left to allow: what this test asserts
+    // is that a config which still SAYS Committed="no" (an old file, or a forged one under a
+    // valid MAC) buys no cooling-off exit, because there is none to buy.
     [Fact]
-    public void NotCommittedBlock_AllowsCoolingOff()
+    public void EvenAnUncommittedConfig_HasNoCoolingOffExit()
     {
-        // The contrast: an un-committed healthy block DOES start cooling-off.
         var armed = CommittedCanonical("", "no");
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(
             armed, MonkMode.ConfigIntegrity.ComputeConfigMac(armed, Key), Key);
-        Assert.Equal(monkmode.Service1.CoolOffAction.Start,
-            monkmode.Service1.ClassifyCoolOffSignal(requestPresent: true, cancelPresent: false,
-                coolOffPending: false, committed: monkmode.Service1.IsCommitted("no"), macValid: macValid));
+        Assert.True(macValid);
+        Assert.False(monkmode.Service1.IsCommitted("no"));
+
+        // A long-elapsed cooling-off deadline, a valid MAC, an unexpired block: no exit.
+        var elapsedCoolOff = Hw.AddHours(-5).ToString(EnCa);
+        Assert.False(monkmode.Service1.CoolOffElapsedTime(elapsedCoolOff, HwText));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, elapsedCoolOff, "", "", HwText, 5, macValid, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, elapsedCoolOff, "", "", HwText, 5, macValid, scheduleArmed: false));
     }
 
     [Fact]
-    public void UnCommittingByRawEdit_FreezesTheBlock_CannotReEnableCoolingOff()
+    public void UnCommittingByRawEdit_FreezesTheBlock()
     {
         // R6 / "stays committed": the block was armed committed (MAC over Committed="yes").
-        // An attacker flips it to "no" by a raw ini edit to re-enable the easy cooling-off
-        // exit. The canonical changes, so the stored MAC no longer validates the flipped
-        // config => macValid False => the block FREEZES: ClassifyCoolOffSignal Ignores it
-        // (macValid required), so the un-commit yields a frozen block, NOT cooling-off.
+        // An attacker flips it to "no" by a raw ini edit. The canonical changes, so the stored
+        // MAC no longer validates the flipped config => macValid False => the block FREEZES.
+        // Ledger 319: there is no longer even a prize for winning this - the flag gates nothing.
         var committedArmed = CommittedCanonical("", "yes");
         var storedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(committedArmed, Key);
 
@@ -125,11 +129,7 @@ public class CommitBlockEndToEndTests
         var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(flippedToNo, storedMac, Key);
         Assert.False(macValid);   // the un-commit broke the MAC
 
-        // Under macValid=False the flipped "no" buys nothing - cooling-off is Ignored.
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            monkmode.Service1.ClassifyCoolOffSignal(requestPresent: true, cancelPresent: false,
-                coolOffPending: false, committed: monkmode.Service1.IsCommitted("no"), macValid: macValid));
-        // And no exit gate lifts it either (frozen, not lifted).
+        // No exit gate lifts it (frozen, not lifted).
         Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, "", "", "", HwText, 5, macValid, scheduleArmed: false));
     }
 
@@ -165,9 +165,10 @@ public class CommitWriteConfigTests
             var ini = new MonkMode.IniFile();
             ini.Load(iniPath);
             Assert.Equal("yes", ini.GetKeyValue("Commit", "Committed"));
-            // The MAC-gated CLI reader agrees (and the stamped MAC validates over the
-            // [Commit] field - if it didn't, BlockIsCommitted would return False).
-            Assert.True(MonkMode.Blocker.BlockIsCommitted());
+            Assert.Equal("yes", ini.GetKeyValue("Slot1", "Committed"));
+            // Ledger 319 deleted Blocker.BlockIsCommitted (its only caller was the cooling-off
+            // gate), so the field is read straight off the ini here. The stamped MAC still
+            // covers it - CommittedFlag_IsMacCovered_AnyFlipFailsVerification pins that.
         }
         finally
         {
@@ -177,19 +178,21 @@ public class CommitWriteConfigTests
     }
 
     [Fact]
-    public void WriteConfig_NotCommitted_StoresNo_AndBlockIsCommittedReportsFalse()
+    public void WriteConfig_NotCommitted_StoresNo()
     {
         var iniPath = MonkMode.Blocker.IniPath();
         var backupPath = MonkMode.Blocker.IniBackupPath();
         try
         {
-            // Default committed:=false.
+            // Default committed:=false. The WRITER still takes the flag both ways - ledger 319
+            // put the "every block is committed" policy in the CLI's DoBlock (which now always
+            // passes True), deliberately NOT in the writer, so the canonical shape is unchanged
+            // and an old config that says "no" still round-trips.
             MonkMode.Blocker.WriteConfig(new[] { "reddit.com" }, Array.Empty<string>(),
                 new DateTime(2026, 12, 31, 23, 59, 59));
             var ini = new MonkMode.IniFile();
             ini.Load(iniPath);
             Assert.Equal("no", ini.GetKeyValue("Commit", "Committed"));
-            Assert.False(MonkMode.Blocker.BlockIsCommitted());
         }
         finally
         {

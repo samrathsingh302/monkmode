@@ -54,13 +54,13 @@ Namespace Global.ServiceTools
         ' --- Standard rights for the B6 security ops ---
         ' READ_CONTROL | WRITE_DAC is the MINIMAL handle B6 needs to read and
         ' rewrite the service's DACL (QueryServiceObjectSecurity /
-        ' SetServiceObjectSecurity). DELETE is needed only by the escape hatch's
-        ' DeleteService. Crucially we never need (and never request) anything
+        ' SetServiceObjectSecurity). Crucially we never need (and never request) anything
         ' that would let a denied-DELETE service resist its OWN restore: WRITE_DAC
-        ' is NOT in the deny ACE, so this handle always succeeds.
+        ' is NOT in the deny ACE, so this handle always succeeds. Ledger 319: the DELETE
+        ' access right is no longer defined here at all - the escape hatch that needed it is
+        ' gone, and the CLI has no service-delete path left to grant it to.
         Private Const READ_CONTROL As UInteger = &H20000UI
         Private Const WRITE_DAC As UInteger = &H40000UI
-        Private Const [DELETE] As UInteger = &H10000UI
         ' SECURITY_INFORMATION: we read/write the DACL only - never the owner,
         ' group or SACL, so the rest of the descriptor is left exactly as-is.
         Private Const DACL_SECURITY_INFORMATION As UInteger = &H4UI
@@ -153,9 +153,7 @@ Namespace Global.ServiceTools
         ' SDDL revision constant (the only one defined).
         Private Const SDDL_REVISION_1 As UInteger = 1UI
 
-        <DllImport("advapi32.dll", SetLastError:=True)> _
-        Private Shared Function DeleteService(ByVal hService As IntPtr) As Boolean
-        End Function
+        ' Ledger 319: the DeleteService P/Invoke is gone with `unblock --force`.
 
         <StructLayout(LayoutKind.Sequential)> _
         Private Structure SC_ACTION
@@ -306,7 +304,8 @@ Namespace Global.ServiceTools
         ' CLI (BA, still holding WRITE_DAC) can always restore the DACL. There is
         ' no path here that can make the service un-removable: the per-tick
         ' re-assert undoes a casual re-ACL, stopMe() removes the ACE at genuine
-        ' expiry, and the `unblock --force` escape hatch removes it unconditionally.
+        ' expiry. (The `unblock --force` escape hatch that also removed it was deleted by
+        ' ledger 319, along with this file's RestoreDefaultServiceSd.)
 
         ' Read the service's DACL as an SDDL string, or Nothing on any failure.
         ' Two-phase QueryServiceObjectSecurity (size probe, then fetch).
@@ -394,100 +393,22 @@ Namespace Global.ServiceTools
             End Try
         End Sub
 
-        ''' <summary>
-        ''' B6: restore the default service SD by removing the deny-DELETE ACE, so
-        ''' an expired block (or the escape hatch) leaves a fully removable
-        ''' service. The exact inverse of AssertDenyDelete. Best-effort; a no-op if
-        ''' the ACE is absent. THIS is the non-negotiable re-grant: stopMe() calls
-        ''' it at genuine expiry (after killing the guardian, before stopping) so
-        ''' no live guardian can re-deny in the gap. Throws on SCM open failures
-        ''' for the caller to swallow.
-        ''' </summary>
-        Friend Shared Sub RestoreDefaultServiceSd(ByVal serviceName As String)
-            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
-            If scm = IntPtr.Zero Then
-                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
-            End If
-            Dim svc As IntPtr = IntPtr.Zero
-            Try
-                svc = OpenService(scm, serviceName, READ_CONTROL Or WRITE_DAC)
-                If svc = IntPtr.Zero Then
-                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to restore its DACL.")
-                End If
-                Dim sddl As String = ReadServiceDaclSddl(svc)
-                If sddl Is Nothing Then Return
-                Dim updated As String = MonkMode.ServiceSecurity.RemoveDenyDeleteAce(sddl)
-                If updated <> sddl Then
-                    WriteServiceDaclSddl(svc, updated)
-                End If
-            Finally
-                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
-                CloseServiceHandle(scm)
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Disable the SCM auto-restart recovery policy (B1 layer 1) on the named
-        ''' service - the escape hatch's first step, so nothing resurrects the
-        ''' service mid-teardown. Equivalent to `sc failure NAME reset= 0
-        ''' actions= ""`. Best-effort; throws on the SCM open failures only.
-        ''' </summary>
-        Friend Shared Sub DisableRecovery(ByVal serviceName As String)
-            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
-            If scm = IntPtr.Zero Then
-                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
-            End If
-            Dim svc As IntPtr = IntPtr.Zero
-            Dim faPtr As IntPtr = IntPtr.Zero
-            Try
-                svc = OpenService(scm, serviceName, SERVICE_ALL_ACCESS)
-                If svc = IntPtr.Zero Then
-                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to clear its recovery policy.")
-                End If
-                ' Zero reset period, zero actions (empty list) = no recovery.
-                Dim fa As New SERVICE_FAILURE_ACTIONS
-                fa.dwResetPeriod = 0UI
-                fa.lpRebootMsg = Nothing
-                fa.lpCommand = Nothing
-                fa.cActions = 0UI
-                fa.lpsaActions = IntPtr.Zero
-                faPtr = Marshal.AllocHGlobal(Marshal.SizeOf(GetType(SERVICE_FAILURE_ACTIONS)))
-                Marshal.StructureToPtr(fa, faPtr, False)
-                ChangeServiceConfig2(svc, SERVICE_CONFIG_FAILURE_ACTIONS, faPtr)
-            Finally
-                If faPtr <> IntPtr.Zero Then Marshal.FreeHGlobal(faPtr)
-                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
-                CloseServiceHandle(scm)
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Delete the named service via the SCM (escape-hatch final step). Opens
-        ''' with DELETE and calls DeleteService. The caller MUST already have
-        ''' restored the default SD (RestoreDefaultServiceSd) so the deny-DELETE
-        ''' ACE no longer blocks this open. Best-effort; throws on SCM failures so
-        ''' the escape hatch can report and continue. (Marks the service for
-        ''' deletion; it is removed once the last handle closes / it stops.)
-        ''' </summary>
-        Friend Shared Sub DeleteServiceByName(ByVal serviceName As String)
-            Dim scm As IntPtr = OpenSCManager(Nothing, Nothing, SC_MANAGER_ALL_ACCESS)
-            If scm = IntPtr.Zero Then
-                Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the Service Control Manager (administrator rights required).")
-            End If
-            Dim svc As IntPtr = IntPtr.Zero
-            Try
-                svc = OpenService(scm, serviceName, [DELETE])
-                If svc = IntPtr.Zero Then
-                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "Could not open the MonkMode service to delete it.")
-                End If
-                If Not DeleteService(svc) Then
-                    Throw New Win32Exception(Marshal.GetLastWin32Error(), "DeleteService failed for the MonkMode service.")
-                End If
-            Finally
-                If svc <> IntPtr.Zero Then CloseServiceHandle(svc)
-                CloseServiceHandle(scm)
-            End Try
-        End Sub
+        ' ---- Ledger 319 (30/08/2026): the CLI's three SCM TEARDOWN entry points are DELETED ----
+        '
+        ' RestoreDefaultServiceSd (remove the deny-DELETE ACE), DisableRecovery (clear the SCM
+        ' auto-restart policy) and DeleteServiceByName (DeleteService) existed for one caller
+        ' between them: `unblock --force`. In sequence they were the escape hatch's teeth - stop
+        ' the SCM resurrecting the service, unlock the service object, delete it - so leaving
+        ' them behind would leave the whole teardown three call sites from working again.
+        '
+        ' Nothing is lost at a GENUINE exit: the SERVICE has its own RestoreDefaultServiceSd
+        ' (MonkMode_srv\Service1.vb) and calls it from stopMe() after killing the guardian, so an
+        ' expired block still leaves a fully removable service. What is gone is the CLI's ability
+        ' to do any of it while a block is running. tools\uninstall.ps1 (which refuses outright
+        ' while a block enforces) is the supported removal route on an idle machine.
+        '
+        ' The [DELETE] access-right constant and the DeleteService P/Invoke went with them,
+        ' deliberately: monkmode.exe now has no code path that can delete a Windows service.
 
         ''' <summary>Start the named service if it is not already running.</summary>
         Public Shared Sub StartService(ByVal serviceName As String)

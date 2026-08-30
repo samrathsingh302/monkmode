@@ -64,7 +64,9 @@ public class MonotonicStatusDisplayTests
         Assert.EndsWith("  (~2h 10m of active time left)", MonkMode.Program.FormatSlotRow(v));
         // ...and the row up to the Exit token is untouched by it - the fixed-width columns
         // still line up (P32).
-        Assert.StartsWith("  1  ACTIVE    2026-08-09 21:00              1    0    0  code+wait",
+        // Ledger 319: the Exit token is "code" (was "code+wait" - the self-serve cooling-off
+        // half of that pair is gone). The column layout either side of it is unchanged.
+        Assert.StartsWith("  1  ACTIVE    2026-08-09 21:00              1    0    0  code",
                           MonkMode.Program.FormatSlotRow(v));
     }
 

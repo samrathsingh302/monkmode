@@ -22,11 +22,13 @@
 # alternative to them.
 #
 # THE ONE RULE: this uninstaller is NOT an escape hatch. If a block is enforcing it
-# REFUSES and routes you to the intended exits (wait for the timer / cooling-off /
+# REFUSES and routes you to the intended exits (wait for the timer /
 # the partner code) - see docs\USER-GUIDE.md section 6. It NEVER calls
-# 'monkmode unblock --force', NEVER stops or deletes a RUNNING service, and NEVER
+# the partner code), NEVER stops or deletes a RUNNING service, and NEVER
 # edits the hosts file. To remove MonkMode DURING an active block, use the documented
-# escape hatch 'monkmode unblock --force' (docs\RUNBOOK.md section 3.2) FIRST, then
+# LEDGER 319 (30/08/2026): the escape hatch 'monkmode unblock --force' is GONE, so
+# this uninstaller's refusal is now the only gate there is - there is nothing to
+# route a still-blocked user to except the timer or the code. Let the block end FIRST, then
 # run this uninstaller on the resulting idle machine.
 #
 # DETECTION IS FAIL-CLOSED. The script proceeds ONLY when it can positively establish
@@ -59,7 +61,7 @@
 #     account keeps its own stale Run value (the same B9 per-user boundary the notifier has).
 #
 # DATA, KEPT BY DEFAULT (honest no-data-loss default). By default your account data
-# SURVIVES so a reinstall keeps it - mirroring what 'unblock --force' verifiably leaves
+# SURVIVES so a reinstall keeps it - mirroring what the service's own genuine-expiry teardown leaves
 # behind (docs\RUNBOOK.md 3.3): monkmode_setup.ini (partner + defaults), monkmode_stats
 # (block history), and monkmode_settings.ini(.bak) (stale enforcement config, overwritten
 # by the next block). These are preserved in the install dir and the dir is kept. Pass
@@ -217,11 +219,11 @@ function Get-UninstallDecision {
     )
     if ($ServiceRunning) {
         return [pscustomobject]@{ Proceed = $false; Reason =
-            "The $serviceName service is RUNNING - a block is active, a schedule window is open, or the service heartbeat is alive. This uninstaller is NOT an escape hatch and will not stop it. End the block through an R1 exit first (wait for the timer / 'monkmode unblock' cooling-off / 'monkmode unblock --code <CODE>' - see docs\USER-GUIDE.md section 6), or use the documented escape hatch 'monkmode unblock --force' (docs\RUNBOOK.md section 3.2). Then re-run this uninstaller." }
+            "The $serviceName service is RUNNING - a block is active, a schedule window is open, or the service heartbeat is alive. This uninstaller is NOT an escape hatch and will not stop it. End the block first: wait for its end time, or use its partner code ('monkmode unblock --code <CODE>' - see docs\USER-GUIDE.md section 6). Ledger 319 removed 'monkmode unblock --force', so those two are the only ways out. Then re-run this uninstaller." }
     }
     if ($HostsMarker) {
         return [pscustomobject]@{ Proceed = $false; Reason =
-            "The hosts marker '$hostsMarker' is still present but the service is not running - an orphaned or stuck block (docs\RUNBOOK.md 2.3 / 3.2). Refusing rather than editing hosts. Run 'monkmode unblock --force' to tear it down cleanly, then re-run this uninstaller." }
+            "The hosts marker '$hostsMarker' is still present but the service is not running - an orphaned or stuck block (docs\RUNBOOK.md 2.3 / 3.2). Refusing rather than editing hosts. Ledger 319 removed 'monkmode unblock --force', so there is no clean teardown to run: start the service so it can reach the block's expiry, or use the block's partner code. Then re-run this uninstaller." }
     }
     if ($ScheduleArmed -and -not $IgnoreSchedule) {
         return [pscustomobject]@{ Proceed = $false; Reason =

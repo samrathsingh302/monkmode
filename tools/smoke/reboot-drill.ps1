@@ -48,7 +48,10 @@
 #       Sits until the block's own end time and confirms it lifts ITSELF - hosts marker
 #       gone, service stopped. Safe to run in a window you leave open; it only reads.
 #
-# If anything ever looks wrong:  monkmode unblock --force   (elevated). Always works.
+# LEDGER 319 (30/08/2026): there is NO escape hatch any more. If anything looks
+# wrong, the block still ends at its own end time, or earlier with the one-time
+# partner code this drill's arm printed:  monkmode unblock --code <CODE>  (elevated).
+# Keep that code where you can find it before starting a reboot drill.
 #
 # It uses the INSTALLED binary (Program Files, on PATH) by default, because the point is to
 # prove the thing you actually run. Pass -Dist to drill a build folder instead.
@@ -114,7 +117,7 @@ if ($Arm) {
     Write-Host ("  ends at {0} (cross-check it against 'Ends' in the table above)" -f $armedAt.AddMinutes($Minutes).ToString('HH:mm:ss'))
     Write-Host ""
     Write-Host "NOW REBOOT NORMALLY - the drill is worthless without it. Then log back in, wait ~60s, and run:  -Check" -ForegroundColor Yellow
-    Write-Host "If you want out at any point:  monkmode unblock --force" -ForegroundColor Yellow
+    Write-Host "If you want out at any point:  monkmode unblock --code <CODE>  (the code printed above - there is no other way out)" -ForegroundColor Yellow
 }
 
 # ---------------- CHECK (after the reboot) ----------------

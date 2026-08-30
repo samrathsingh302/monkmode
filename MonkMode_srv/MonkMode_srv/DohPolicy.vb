@@ -31,7 +31,7 @@
 '    like the Simple3Des / ConfigIntegrity / ServiceSecurity copies across the
 '    projects - only the RootNamespace differs (monkmode here, MonkMode in the
 '    CLI). DohPolicyParityTests pins that 2-copy parity element-for-element: the
-'    service WRITES + self-heals these keys and the `unblock --force` escape hatch
+'    service WRITES + self-heals these keys and its own genuine-expiry teardown
 '    RESTORES them, so a drift would mean the two disagree on WHICH keys to touch
 '    (a stuck policy the hatch can't lift, or the wrong value restored = data
 '    loss). The exes never reference each other (house rule), so each side uses

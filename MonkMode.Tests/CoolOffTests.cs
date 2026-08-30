@@ -16,34 +16,40 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// MonkMode.Tests - C2b cooling-off (R1: the service-adjudicated early exit).
+// MonkMode.Tests - LEDGER 319 (30/08/2026): THE COOLING-OFF EXIT IS GONE. THIS FILE PROVES IT.
 //
-// The mechanism under test (design: vault\dev\monk-mode\plans\C2a-cooling-off-design.md):
-// `monkmode unblock` drops an authority-free, PRESENCE-ONLY trigger file; on its
-// next tick the SERVICE (the sole deadline writer) computes a MAC-covered
-// deadline CoolOffUntil = HighWater_at_request + max(duration, floor) and counts
-// it down against the B4 monotonic HighWater - never DateTime.Now - so a
-// clock-forward can't skip the wait, a reboot pauses it, and a raw ini edit of
-// the deadline fails the MAC (freeze). When HighWater >= CoolOffUntil (and the
-// MAC is valid) the service lifts via the SAME stopMe() as natural expiry.
+// WHAT THIS FILE USED TO BE. C2b's cooling-off was the self-serve early exit: `monkmode unblock`
+// dropped a presence-only trigger, the SERVICE computed a MAC-covered deadline
+// CoolOffUntil = HighWater_at_request + max(duration, floor), counted it down against the B4
+// monotonic mark, and lifted the block via the same stopMe() as natural expiry. This file pinned
+// every part of that - the compile-time floor, ComputeCoolOffDeadline, the ClassifyCoolOffSignal
+// request/cancel matrix, and end-to-end countdowns through the real B4 gates.
 //
-// What is pure and unit-tested here (no DPAPI, no real hosts/registry/SCM):
-//   - the pinned consts: the compile-time floor (THE one new security
-//     parameter) and the CLI<->service trigger-filename parity;
-//   - CoolOffElapsedTime / ComputeCoolOffDeadline / ClassifyCoolOffSignal /
-//     EffectiveExit, each fail-closed on every axis;
-//   - service<->guardian parity for CoolOffElapsedTime + EffectiveExit (the
-//     guardian folding cooling-off in is LOAD-BEARING: without it, it would
-//     SCM-resurrect a cooled-off block the moment the service tears down);
-//   - end-to-end simulations through the REAL B4 gates (NextHighWater +
-//     CapHighWaterAdvance): request->countdown->lift; forward-jump/creep/
-//     backward-roll can't skip; reboot resumes off the stored mark; a tampered
-//     deadline freezes; a replayed request can't reset the deadline; the C1b
-//     backup carries the deadline across a corrupt-then-restore.
+// WHY IT IS GONE. Samrath, 30/08/2026: "i dont like how i can force unblock it regardless ...
+// i should only be able to unblock with code." Cooling-off was one of exactly two exits that
+// needed no partner code (the other, `unblock --force`, went in the same slice). A block now
+// ends on its end time or on a service-verified partner code. Nothing else.
 //
-// The live wiring (ProcessCoolOffSignals' file I/O + ini save + backup refresh,
-// the CLI trigger writers, the tick/OnStart/guardian-loop plumbing) is the
-// smoke-tested seam (CV C-core smoke), exactly like the B1/B2/B4/C1b live wiring.
+// WHAT THIS FILE PINS NOW - that the removal is a REMOVAL, not a disconnection:
+//   - CoolOffElapsedTime returns False for EVERY input, in BOTH copies (service + guardian).
+//     It is still called from EffectiveExit, so this is the choke point: even a MAC-VALID
+//     config carrying an already-elapsed CoolOffUntil cannot lift anything.
+//   - the same, end to end through the REAL gates: EffectiveExit (both copies),
+//     ClassifyHeartbeat, and the per-slot SlotExitDue - a full honest countdown past the old
+//     deadline still never Lifts.
+//   - the writer side is unchanged and still MAC-covers CoolOffDuration (the field stays in the
+//     v12 canonical - removing it would mean a schema bump and a four-copy parity edit while
+//     v12 is mid-deploy), and `--cooloff` still parses so old invocations do not start failing.
+//
+// Deleted with the mechanism: CoolOffConstTests' floor pins, ComputeCoolOffDeadlineTests and
+// ClassifyCoolOffSignalTests - all three tested functions that no longer exist. The trigger
+// DISPOSAL (a stale monkmode_cooloff.* file is now unaddressed junk the tick's
+// PurgeUnaddressedTriggers deletes unread) is pinned in TriggerJunkTests and SlotRetireTests.
+//
+// One thing this file deliberately does NOT pin, because it is not reachable from a unit test:
+// that `monkmode block` now writes Committed="yes" and an empty CoolOffDuration on every arm.
+// That policy lives in Program.DoBlock, which is Private - the same smoke-tested seam every
+// other CLI verb body sits behind.
 
 using System.Globalization;
 using System.IO;
@@ -53,28 +59,13 @@ namespace MonkMode.Tests;
 public class CoolOffConstTests
 {
     [Fact]
-    public void Floor_IsOneHour_ThePinnedSecurityParameter()
-    {
-        // D1 (recommended default, ratifiable): 1 hour. A retune is a single
-        // loud edit here, exactly like HighWaterJumpCeilingSeconds.
-        Assert.Equal(3600L, monkmode.Service1.MinCoolOffFloorSeconds);
-    }
-
-    [Fact]
-    public void Floor_IsNeverTrivial()
-    {
-        // The floor is what makes cooling-off a real wait: a floor of seconds
-        // would make `unblock` a trivial escape. Pin a hard lower bound (a few
-        // minutes) independent of the exact D1 value.
-        Assert.True(monkmode.Service1.MinCoolOffFloorSeconds >= 300L);
-    }
-
-    [Fact]
     public void TriggerFileNames_AreStable_AndParityAcrossCliAndService()
     {
-        // The CLI drops the files; the service polls for them. A drift would
-        // silently break the channel (requests never seen), so both copies are
-        // pinned to the exact strings, like SnapshotName/BackupFileName.
+        // Kept even though nothing WRITES these files any more: both sides still need the same
+        // names so the tick's sweep finds and deletes a stale one left by an older dist
+        // (EnumerateTriggerFilesIn still globs them; TriggerAddressesAnyFamily no longer claims
+        // them, so PurgeUnaddressedTriggers bins them). A drift would strand those files on
+        // disk, where they would occupy the shared per-tick trigger budget for ever.
         Assert.Equal("monkmode_cooloff.request", MonkMode.Blocker.CoolOffRequestFileName);
         Assert.Equal("monkmode_cooloff.cancel", MonkMode.Blocker.CoolOffCancelFileName);
         Assert.Equal(MonkMode.Blocker.CoolOffRequestFileName, monkmode.Service1.CoolOffRequestFileName);
@@ -82,200 +73,57 @@ public class CoolOffConstTests
     }
 }
 
+// THE CHOKE POINT. CoolOffElapsedTime was "has the pending cooling-off deadline been reached?",
+// and a True LIFTED the block through EffectiveExit / ClassifyHeartbeat. It now answers False
+// without reading either argument, in both copies. Every test below feeds it the inputs that
+// used to mean "the wait is over" - including the exact shape the service itself used to write.
 public class CoolOffElapsedTimeTests
 {
     private static readonly CultureInfo EnCa = new("en-CA");
     private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
 
-    [Fact]
-    public void EmptyDeadline_NoCoolOffPending_IsNotElapsed()
+    // Every deadline shape crossed with every mark shape: past, exactly-equal, future,
+    // unparseable, empty, and the legacy de-DE format that used to be a fail-closed case.
+    public static IEnumerable<object[]> EveryShape()
     {
-        Assert.False(monkmode.Service1.CoolOffElapsedTime("", Hw.ToString(EnCa)));
-        Assert.False(mm_guard.Guardian.CoolOffElapsedTime("", Hw.ToString(EnCa)));
-    }
-
-    [Fact]
-    public void PastDeadline_IsElapsed_AndEqualCountsAsElapsed()
-    {
-        Assert.True(monkmode.Service1.CoolOffElapsedTime(Hw.AddMinutes(-1).ToString(EnCa), Hw.ToString(EnCa)));
-        // deadline == HighWater: the wait is served (<=, like the design pins).
-        Assert.True(monkmode.Service1.CoolOffElapsedTime(Hw.ToString(EnCa), Hw.ToString(EnCa)));
-    }
-
-    [Fact]
-    public void FutureDeadline_IsNotElapsed()
-    {
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(Hw.AddHours(1).ToString(EnCa), Hw.ToString(EnCa)));
+        foreach (var deadline in new[]
+                 {
+                     Hw.AddHours(-99).ToString(EnCa), Hw.AddMinutes(-1).ToString(EnCa),
+                     Hw.ToString(EnCa), Hw.AddHours(1).ToString(EnCa),
+                     "garbage", "25.06.2026 17:04:33", "",
+                 })
+            foreach (var mark in new[] { Hw.ToString(EnCa), Hw.AddYears(50).ToString(EnCa), "garbage", "" })
+                yield return new object[] { deadline, mark };
     }
 
     [Theory]
-    [InlineData("garbage")]
-    [InlineData("25.06.2026 17:04:33")] // legacy de-DE format
-    public void UnparseableDeadline_IsNotElapsed_FailClosed(string deadline)
+    [MemberData(nameof(EveryShape))]
+    public void ItIsAlwaysFalse_WhateverTheDeadlineAndWhateverTheMark(string deadline, string mark)
     {
-        // A corrupted deadline can only ever HOLD the block, never lift it.
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, Hw.ToString(EnCa)));
+        // Including the two rows that used to return True: deadline < mark, and deadline == mark.
+        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, mark));
     }
 
     [Theory]
-    [InlineData("garbage")]
-    [InlineData("")]
-    public void UnparseableOrBlankHighWater_IsNotElapsed_FailClosed(string hw)
+    [MemberData(nameof(EveryShape))]
+    public void ServiceAndGuardian_StillAgreeAcrossTheTable(string deadline, string mark)
     {
-        // No trustworthy mark to measure against => the wait is never over.
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(Hw.ToString(EnCa), hw));
-    }
-
-    [Fact]
-    public void ServiceAndGuardian_AgreeAcrossTheTable()
-    {
-        // The pair must never disagree on "cooling-off elapsed", or the guardian
-        // could resurrect a block the service just cooled off (or stand down
-        // while the service still enforces).
-        var inputs = new[]
-        {
-            Hw.AddMinutes(-1).ToString(EnCa), Hw.ToString(EnCa),
-            Hw.AddHours(1).ToString(EnCa), "garbage", "",
-        };
-        foreach (var deadline in inputs)
-            foreach (var hw in new[] { Hw.ToString(EnCa), "garbage", "" })
-                Assert.Equal(
-                    monkmode.Service1.CoolOffElapsedTime(deadline, hw),
-                    mm_guard.Guardian.CoolOffElapsedTime(deadline, hw));
+        // Parity is LOAD-BEARING in both directions and always was. If the guardian still
+        // lifted on an elapsed deadline while the service ignored it, the guardian would stand
+        // down under a block the service is still enforcing - and the mirror image would have
+        // it SCM-resurrect a block the service had let go.
+        Assert.Equal(monkmode.Service1.CoolOffElapsedTime(deadline, mark),
+                     mm_guard.Guardian.CoolOffElapsedTime(deadline, mark));
     }
 }
 
-public class ComputeCoolOffDeadlineTests
-{
-    private static readonly CultureInfo EnCa = new("en-CA");
-    private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
-    private const long Floor = 3600;
-
-    [Fact]
-    public void DurationBelowFloor_IsClampedToTheFloor()
-    {
-        // THE floor property: a (future C6) configured duration is CLI-written
-        // and MAC-stampable by an attacker running the CLI, so duration=0 must
-        // still wait the full floor. The shortest possible cooling-off is the
-        // compile-time floor.
-        Assert.Equal(Hw.AddSeconds(Floor).ToString(EnCa),
-            monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), 0, Floor));
-        Assert.Equal(Hw.AddSeconds(Floor).ToString(EnCa),
-            monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), -999, Floor));
-        Assert.Equal(Hw.AddSeconds(Floor).ToString(EnCa),
-            monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), Floor - 1, Floor));
-    }
-
-    [Fact]
-    public void DurationAboveFloor_Extends()
-    {
-        // A configured duration can only ever EXTEND the wait beyond the floor.
-        Assert.Equal(Hw.AddSeconds(7200).ToString(EnCa),
-            monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), 7200, Floor));
-    }
-
-    [Theory]
-    [InlineData("garbage")]
-    [InlineData("")]
-    public void UnparseableHighWater_YieldsNoDeadline_FailClosed(string hw)
-    {
-        // No trustworthy mark => no deadline computable => the service writes
-        // nothing (the trigger stays for the next tick). Never a bogus deadline.
-        Assert.Equal("", monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor));
-    }
-
-    [Fact]
-    public void FreshDeadline_IsNotElapsed_AtTheMarkItWasComputedFrom()
-    {
-        // Round-trip with the elapsed gate: a just-written deadline must not be
-        // instantly elapsed (the wait is real).
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), Floor, Floor);
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, Hw.ToString(EnCa)));
-    }
-}
-
-public class ClassifyCoolOffSignalTests
-{
-    private static monkmode.Service1.CoolOffAction Classify(
-        bool request, bool cancel, bool pending, bool committed, bool macValid) =>
-        monkmode.Service1.ClassifyCoolOffSignal(request, cancel, pending, committed, macValid);
-
-    [Fact]
-    public void Request_OnAHealthyIdleBlock_Starts()
-    {
-        Assert.Equal(monkmode.Service1.CoolOffAction.Start,
-            Classify(request: true, cancel: false, pending: false, committed: false, macValid: true));
-    }
-
-    [Fact]
-    public void CancelWins_WhenBothTriggersArePresent()
-    {
-        // Fail-closed tiebreak: the safe outcome is "stay blocked".
-        Assert.Equal(monkmode.Service1.CoolOffAction.Cancel,
-            Classify(request: true, cancel: true, pending: true, committed: false, macValid: true));
-        Assert.Equal(monkmode.Service1.CoolOffAction.Cancel,
-            Classify(request: true, cancel: true, pending: false, committed: false, macValid: true));
-    }
-
-    [Fact]
-    public void RequestWhilePending_IsIgnored_DeadlineImmutableOnceSet()
-    {
-        // A replayed/re-dropped request must never reset or extend a running
-        // deadline (and this is also what makes consume-after-persist crash-safe:
-        // a crash between save and trigger-delete re-classifies here as Ignore).
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            Classify(request: true, cancel: false, pending: true, committed: false, macValid: true));
-    }
-
-    [Fact]
-    public void RequestOnACommittedBlock_IsIgnored_TheC4Seam()
-    {
-        // C4 (future): a committed block has no self-serve cooling-off - the
-        // partner code is the only exit. C2b callers pass committed:=False.
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            Classify(request: true, cancel: false, pending: false, committed: true, macValid: true));
-    }
-
-    [Theory]
-    [InlineData(true, false, false, false)]
-    [InlineData(false, true, true, false)]
-    [InlineData(true, true, true, true)]
-    public void InvalidMac_AlwaysIgnores_NeverTouchesAFrozenConfig(
-        bool request, bool cancel, bool pending, bool committed)
-    {
-        // Mirrors the `add` fail-open fix: never modify/re-stamp an unverified
-        // config. A frozen (tampered) block ignores the trigger channel entirely.
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            Classify(request, cancel, pending, committed, macValid: false));
-    }
-
-    [Fact]
-    public void NoTriggers_IsIgnore()
-    {
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            Classify(request: false, cancel: false, pending: false, committed: false, macValid: true));
-    }
-
-    [Fact]
-    public void FullMatrix_MatchesThePinnedContract()
-    {
-        // All 32 combinations against the design's processing rules, so any
-        // future edit to the classifier is caught whichever row it bends.
-        foreach (var request in new[] { true, false })
-            foreach (var cancel in new[] { true, false })
-                foreach (var pending in new[] { true, false })
-                    foreach (var committed in new[] { true, false })
-                        foreach (var macValid in new[] { true, false })
-                        {
-                            var expected =
-                                !macValid ? monkmode.Service1.CoolOffAction.Ignore :
-                                cancel ? monkmode.Service1.CoolOffAction.Cancel :
-                                request && !committed && !pending ? monkmode.Service1.CoolOffAction.Start :
-                                monkmode.Service1.CoolOffAction.Ignore;
-                            Assert.Equal(expected, Classify(request, cancel, pending, committed, macValid));
-                        }
-    }
-}
+// Ledger 319: ComputeCoolOffDeadlineTests and ClassifyCoolOffSignalTests stood here. They
+// pinned Service1.ComputeCoolOffDeadline (the floor-clamped deadline the service wrote on a
+// request) and Service1.ClassifyCoolOffSignal (the 32-row request/cancel/pending/committed/
+// macValid matrix that decided Start / Cancel / Ignore). Both functions - and the
+// CoolOffAction enum, ParseConfiguredCoolOffSeconds and MinCoolOffFloorSeconds with them -
+// were DELETED with the cooling-off exit: with no trigger reader there is no signal to
+// classify and no deadline to compute. Nothing anywhere can write a slot's CoolOffUntil now.
 
 public class EffectiveExitTests
 {
@@ -296,17 +144,32 @@ public class EffectiveExitTests
     private static readonly string ScheduleOpen = Hw.AddMinutes(30).ToString(EnCa);
     private static readonly string ScheduleClosed = Hw.AddMinutes(-5).ToString(EnCa);
 
+    // FLIPPED BY LEDGER 319, and this is the single most important assertion in the file.
+    // It used to read CoolOffElapsed_WithValidMac_Exits_EvenThoughUntilIsFuture - "the whole
+    // point of cooling-off: the block ends BEFORE Until". That is exactly the behaviour Samrath
+    // asked to be rid of, so it is now asserted in the negative: a HEALTHY, MAC-VALID config
+    // carrying an already-elapsed CoolOffUntil does NOT exit. This is the end-to-end version of
+    // the choke point above - it goes through the real EffectiveExit, in both copies.
     [Fact]
-    public void CoolOffElapsed_WithValidMac_Exits_EvenThoughUntilIsFuture()
+    public void CoolOffElapsed_WithValidMac_NoLongerExits_TheBlockRunsToItsUntil()
     {
-        // The whole point of cooling-off: the block ends BEFORE Until.
-        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: true, scheduleArmed: false));
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: true, scheduleArmed: false));
+
+        // The deadline being long past changes nothing, and neither does the mark being far
+        // beyond it: there is no arm left for it to satisfy.
+        var longPast = Hw.AddYears(-5).ToString(EnCa);
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, longPast, "", "", HwText, 5, macValid: true, scheduleArmed: false));
+
+        // ...and the block still ends normally at its own Until, so nothing else was broken.
+        Assert.True(monkmode.Service1.EffectiveExit(PastUntil, "", "", "", HwText, 5, macValid: true, scheduleArmed: false));
     }
 
     [Fact]
     public void CoolOffElapsed_WithInvalidMac_NeverExits()
     {
-        // A tampered config can't cool off its way out (freeze).
+        // A tampered config can't cool off its way out (freeze). Belt and braces now that the
+        // cool-off arm is inert under a VALID MAC too.
         Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: false, scheduleArmed: false));
         Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, PastCoolOff, "", "", HwText, 5, macValid: false, scheduleArmed: false));
     }
@@ -404,15 +267,20 @@ public class EffectiveExitTests
     }
 }
 
-// End-to-end simulations through the REAL B4 gates: the cooling-off countdown is
-// nothing but HighWater advancing at the honest tick rate toward the deadline,
-// so these compose NextHighWater + CapHighWaterAdvance (the live tick's exact
-// pair) with the C2b gates.
+// End-to-end through the REAL B4 gates, REWRITTEN BY LEDGER 319. What stood here was the
+// cooling-off countdown proved against the live tick's own pair (NextHighWater +
+// CapHighWaterAdvance): request -> 360 honest ticks -> Lift, plus the never-skip properties
+// (a forward clock jump, creep and a backward roll could none of them reach the deadline
+// early, and a reboot resumed off the stored mark).
+//
+// Every one of those tests ended in a LIFT that needed no partner code, which is the thing
+// this slice removed. They are replaced by the inverse, run through the same real gates: the
+// full honest countdown, well past the old deadline, and the block is still standing.
 public class CoolOffEndToEndTests
 {
     private static readonly CultureInfo EnCa = new("en-CA");
     private const long Ceiling = 120;  // Service1.HighWaterJumpCeilingSeconds (pinned elsewhere)
-    private const long Floor = 3600;   // Service1.MinCoolOffFloorSeconds (pinned above)
+    private const long Floor = 3600;   // the cooling-off floor that used to exist
     private static readonly DateTime T0 = new(2026, 6, 25, 12, 0, 0);
     private static readonly string FutureUntil = T0.AddHours(8).ToString(EnCa);
 
@@ -421,176 +289,84 @@ public class CoolOffEndToEndTests
         monkmode.Service1.CapHighWaterAdvance(
             hw, monkmode.Service1.NextHighWater(hw, wallNow.ToString(EnCa), Ceiling), 10);
 
+    // The deadline the service USED to compute on a request, reconstructed here as a literal
+    // because ComputeCoolOffDeadline is deleted: HighWater_at_request + the floor. This is the
+    // most favourable possible input to the old lift path, and it is what the tests feed it.
+    private static string OldStyleDeadline(DateTime at) => at.AddSeconds(Floor).ToString(EnCa);
+
     [Fact]
-    public void RequestToLift_TheFullCountdown_LiftsExactlyAfterTheFloor()
+    public void TheFullCountdown_PastTheOldDeadline_StillNeverLifts()
     {
-        // Request at T0: the service computes deadline = HighWater + floor.
+        // The exact scenario that used to end a block with no code: a deadline written at T0,
+        // then honest ticking until well past it. 720 ticks = 2 hours, double the old floor.
         var hw = T0.ToString(EnCa);
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
+        var deadline = OldStyleDeadline(T0);
 
-        // Immediately after the request: enforced, no lift (Restamp keeps the
-        // countdown moving - that arm is what advances HighWater).
-        Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
-            monkmode.Service1.ClassifyHeartbeat(true,
-                monkmode.Service1.BlockHasExpired(FutureUntil, T0, 5),
-                monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false, scheduleArmed: false));
-
-        // 359 honest ticks (3590s): still waiting, still enforced.
-        for (int i = 1; i <= 359; i++)
+        for (var i = 1; i <= 720; i++)
+        {
             hw = HonestTick(hw, T0.AddSeconds(i * 10));
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, hw));
+            Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, hw));
+        }
 
-        // The 360th tick reaches T0+3600 = the deadline: cooling-off elapsed,
-        // the heartbeat classifies Lift (same stopMe() as natural expiry).
-        hw = HonestTick(hw, T0.AddSeconds(3600));
-        Assert.True(monkmode.Service1.CoolOffElapsedTime(deadline, hw));
-        Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
+        // Two hours of genuine on-machine time past the deadline, on a MAC-VALID config, and
+        // every gate still says the block is enforced. Restamp, not Lift.
+        Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
             monkmode.Service1.ClassifyHeartbeat(true,
                 monkmode.Service1.BlockHasExpired(FutureUntil, DateTime.Parse(hw, EnCa), 5),
                 monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false, scheduleArmed: false));
+        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false));
 
-        // And the guardian agrees (stands down; never resurrects the service).
-        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.ShouldRestartService(
+        // ...and the guardian keeps guarding rather than standing down.
+        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false));
+        Assert.True(mm_guard.Guardian.ShouldRestartService(
             blockActive: !mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false),
             serviceRunning: false));
     }
 
     [Fact]
-    public void ClockRolledForward_IsRefused_TheWaitIsNeverSkipped()
+    public void TheBlockStillEndsNormally_AtItsOwnUntil()
     {
-        // The headline never-skip guarantee: jump the wall clock 2h past the
-        // deadline - NextHighWater classifies a ForwardJump and keeps the stored
-        // mark, so the deadline is NOT reached.
+        // The control, so "nothing lifts" cannot pass for the wrong reason: with the SAME
+        // elapsed deadline present, the block still ends when its own timer runs out.
+        var deadline = OldStyleDeadline(T0);
+        var pastUntil = T0.AddHours(-1).ToString(EnCa);
         var hw = T0.ToString(EnCa);
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
 
-        var jumped = monkmode.Service1.NextHighWater(hw, T0.AddHours(2).ToString(EnCa), Ceiling);
-        Assert.Equal(hw, jumped); // the jump was refused
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, jumped));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", jumped, 5, macValid: true, scheduleArmed: false));
-    }
-
-    [Fact]
-    public void ClockCreep_IsCappedToRealElapsed_TheWaitIsNotShortened()
-    {
-        // The creep attack: before each 10s real tick, set the wall to the
-        // current mark +119s (each step within the ceiling = Trusted, so
-        // NextHighWater alone would credit ~12x real time). CapHighWaterAdvance
-        // credits only the real ~10s per tick, so after 60 real ticks (~10 min)
-        // the mark has moved exactly 10 min - far short of the 1h deadline.
-        var hw = T0.ToString(EnCa);
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
-
-        for (int i = 1; i <= 60; i++)
-        {
-            var wall = DateTime.Parse(hw, EnCa).AddSeconds(119); // within-ceiling nudge
-            var candidate = monkmode.Service1.NextHighWater(hw, wall.ToString(EnCa), Ceiling);
-            hw = monkmode.Service1.CapHighWaterAdvance(hw, candidate, 10);
-        }
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, hw));
-        // The mark advanced only the real elapsed (60 x 10s = 600s).
-        Assert.Equal(T0.AddSeconds(600).ToString(EnCa), hw);
-    }
-
-    [Fact]
-    public void ClockRolledBackward_HoldsTheMark_OverWaitNeverEarlyLift()
-    {
-        var hw = T0.ToString(EnCa);
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
-        var rolled = monkmode.Service1.NextHighWater(hw, T0.AddHours(-3).ToString(EnCa), Ceiling);
-        Assert.Equal(hw, rolled); // backward roll refused, mark frozen
-        Assert.False(monkmode.Service1.CoolOffElapsedTime(deadline, rolled));
-    }
-
-    [Fact]
-    public void RebootMidCoolOff_ResumesOffTheStoredMark_DowntimeNeverCounts()
-    {
-        // 5 minutes into the wait, the machine reboots and stays off 2 hours.
-        var hw = T0.ToString(EnCa);
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
-        for (int i = 1; i <= 30; i++)                       // 5 min of uptime
-            hw = HonestTick(hw, T0.AddSeconds(i * 10));
-
-        // OnStart after the reboot decides off the STORED mark (it never
-        // advances it): the deadline is still ~55 min of UPTIME away - no lift,
-        // regardless of how long the machine was off (B4: the boot gap is a
-        // ForwardJump and is never credited).
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, deadline, "", "", hw, 0, macValid: true, scheduleArmed: false));
-        var bootCandidate = monkmode.Service1.NextHighWater(hw, T0.AddHours(2).ToString(EnCa), Ceiling);
-        Assert.Equal(hw, bootCandidate); // the 2h off-time gap is refused
-
-        // The countdown then resumes at the honest rate from the stored mark.
-        var t = DateTime.Parse(hw, EnCa);
-        for (int i = 1; i <= 330; i++)                      // the remaining 55 min
-            hw = HonestTick(hw, t.AddSeconds(i * 10));
-        Assert.True(monkmode.Service1.CoolOffElapsedTime(deadline, hw));
-    }
-
-    [Fact]
-    public void TamperedDeadline_FailsTheMac_EverythingFreezes()
-    {
-        // Forge CoolOffUntil to "already elapsed" by raw ini edit: the canonical
-        // changes, the stored MAC no longer validates => macValid False => the
-        // heartbeat HOLDS (never lifts, never re-stamps) and the guardian keeps
-        // guarding. Cooling-off is exactly as unforgeable as every other
-        // MAC-covered field.
-        var key = new byte[32];
-        for (var i = 0; i < 32; i++) key[i] = (byte)i;
-        var hw = T0.ToString(EnCa);
-        var honestDeadline = monkmode.Service1.ComputeCoolOffDeadline(hw, Floor, Floor);
-
-        var honest = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, honestDeadline, "", "", "", "", "", "", "", "");
-        var storedMac = MonkMode.ConfigIntegrity.ComputeConfigMac(honest, key);
-
-        var forgedDeadline = T0.AddHours(-1).ToString(EnCa); // "the wait is over"
-        var forged = OneSlot.Canonical(FutureUntil, "chrome.exe;", "reddit.com;", "N", hw, forgedDeadline, "", "", "", "", "", "", "", "");
-        var macValid = MonkMode.ConfigIntegrity.ConfigMacIsValid(forged, storedMac, key);
-        Assert.False(macValid);
-
-        Assert.Equal(monkmode.Service1.HeartbeatAction.Hold,
-            monkmode.Service1.ClassifyHeartbeat(macValid,
-                monkmode.Service1.BlockHasExpired(FutureUntil, T0, 5),
-                monkmode.Service1.CoolOffElapsedTime(forgedDeadline, hw), false, false, scheduleArmed: false));
-        Assert.False(monkmode.Service1.EffectiveExit(FutureUntil, forgedDeadline, "", "", hw, 5, macValid, scheduleArmed: false));
-        Assert.False(mm_guard.Guardian.EffectiveExit(FutureUntil, forgedDeadline, "", "", hw, 5, macValid, scheduleArmed: false));
-    }
-
-    [Fact]
-    public void CancelBeforeElapse_WinsTheRace_NoLiftThatTick()
-    {
-        // The deadline has been reached, but a cancel trigger is present on the
-        // same tick. The tick processes signals BEFORE the heartbeat (inside the
-        // same tickLock), so the classifier returns Cancel, the deadline is
-        // cleared, and the heartbeat - deciding off the POST-signal state -
-        // re-stamps instead of lifting. Fail-closed: stay blocked.
-        var hw = T0.AddHours(2).ToString(EnCa);
-        var elapsedDeadline = T0.AddHours(1).ToString(EnCa);
-        Assert.True(monkmode.Service1.CoolOffElapsedTime(elapsedDeadline, hw));
-
-        Assert.Equal(monkmode.Service1.CoolOffAction.Cancel,
-            monkmode.Service1.ClassifyCoolOffSignal(
-                requestPresent: false, cancelPresent: true,
-                coolOffPending: true, committed: false, macValid: true));
-
-        // Post-cancel state: no deadline pending, no code-unlock => no lift, back to
-        // the block.
-        Assert.Equal(monkmode.Service1.HeartbeatAction.Restamp,
+        Assert.True(monkmode.Service1.EffectiveExit(pastUntil, deadline, "", "", hw, 5, macValid: true, scheduleArmed: false));
+        Assert.Equal(monkmode.Service1.HeartbeatAction.Lift,
             monkmode.Service1.ClassifyHeartbeat(true,
-                monkmode.Service1.BlockHasExpired(FutureUntil, DateTime.Parse(hw, EnCa), 5),
-                monkmode.Service1.CoolOffElapsedTime("", hw), false, false, scheduleArmed: false));
+                monkmode.Service1.BlockHasExpired(pastUntil, T0, 5),
+                monkmode.Service1.CoolOffElapsedTime(deadline, hw), false, false, scheduleArmed: false));
     }
 
     [Fact]
-    public void ReplayedRequest_CannotResetARunningDeadline()
+    public void ThePartnerCodeStillLifts_WithTheSameElapsedDeadlinePresent()
     {
-        // Mid-wait, the attacker re-drops the request file hoping to push the
-        // deadline out (or, with a doctored duration, pull it in): Ignore while
-        // pending - the deadline is immutable once set, except by cancel.
-        Assert.Equal(monkmode.Service1.CoolOffAction.Ignore,
-            monkmode.Service1.ClassifyCoolOffSignal(
-                requestPresent: true, cancelPresent: false,
-                coolOffPending: true, committed: false, macValid: true));
+        // The other control, and the exit that is now the ONLY early one: a service-verified
+        // UnlockedAt lifts a block whose Until is still hours away - unchanged by this slice.
+        var deadline = OldStyleDeadline(T0);
+        var hw = T0.ToString(EnCa);
+        var unlockedAt = T0.AddMinutes(1).ToString(EnCa);
+
+        Assert.True(monkmode.Service1.EffectiveExit(FutureUntil, deadline, unlockedAt, "", hw, 5, macValid: true, scheduleArmed: false));
+        Assert.True(mm_guard.Guardian.EffectiveExit(FutureUntil, deadline, unlockedAt, "", hw, 5, macValid: true, scheduleArmed: false));
+    }
+
+    [Fact]
+    public void APerSlotElapsedDeadline_DoesNotRetireTheSlot()
+    {
+        // The per-slot gate, which is what actually retires a block on the live tick. A slot
+        // carrying an elapsed CoolOffUntil under a valid MAC must classify Hold, not Retire.
+        var slot = new monkmode.Service1.SlotState
+        {
+            Id = "1",
+            UntilText = FutureUntil,
+            CoolOffUntil = OldStyleDeadline(T0),
+            Committed = "yes",
+        };
+        var hw = T0.AddHours(3).ToString(EnCa);   // long past the old deadline
+        Assert.Equal(monkmode.Service1.SlotAction.Hold,
+            monkmode.Service1.SlotExitDue(slot, DateTime.Parse(hw, EnCa), 5, true, hw));
     }
 }
 
@@ -651,66 +427,12 @@ public class CoolOffBackupCarryTests
     }
 }
 
-// C6b: the CLI-configured cooling-off DURATION ([CoolOff] Duration, MAC-covered seconds).
-// ParseConfiguredCoolOffSeconds is the pure interpreter the service uses to turn the stored
-// field into a duration; end-to-end (parse + ComputeCoolOffDeadline) a configured value can
-// only ever EXTEND the wait, never shorten it below the compile-time floor - the whole point,
-// since an attacker running the CLI could set it to 0 under a valid MAC, so the floor clamp is
-// load-bearing. The MAC-coverage of the field itself is pinned in ConfigIntegrityTests (a
-// forged Duration fails the MAC -> freeze) and CanonicalParityTests (every reader carries it).
-public class ConfiguredCoolOffDurationTests
-{
-    private static readonly CultureInfo EnCa = new("en-CA");
-    private static readonly DateTime Hw = new(2026, 6, 25, 12, 0, 0);
-    private const long Floor = 3600;
-
-    [Theory]
-    [InlineData("7200", 7200)]      // a plain positive value passes through (ComputeCoolOffDeadline then clamps)
-    [InlineData("5400", 5400)]
-    [InlineData("600", 600)]        // below the floor but positive: returned as-is here; the clamp is in ComputeCoolOffDeadline
-    [InlineData("  900  ", 900)]    // surrounding whitespace is trimmed
-    public void PositiveValue_PassesThrough(string raw, long expected)
-    {
-        Assert.Equal(expected, monkmode.Service1.ParseConfiguredCoolOffSeconds(raw, Floor));
-    }
-
-    [Theory]
-    [InlineData("")]         // absent key reads as ""
-    [InlineData("   ")]      // blank
-    [InlineData(null)]       // a bare/absent key can read back as Nothing
-    [InlineData("garbage")]
-    [InlineData("2h")]       // NOT a raw number - the CLI converts --cooloff to seconds before storing
-    [InlineData("0")]        // non-positive => default floor (an attacker-set 0 can't shorten)
-    [InlineData("-5")]
-    [InlineData("99999999999999999999999")]  // overflow => TryParse fails => floor
-    public void AbsentBlankOrUnusable_YieldsTheFloor(string? raw)
-    {
-        Assert.Equal(Floor, monkmode.Service1.ParseConfiguredCoolOffSeconds(raw!, Floor));
-    }
-
-    [Fact]
-    public void ConfiguredAboveFloor_ExtendsTheWait_EndToEnd()
-    {
-        // A configured 2h (> the 1h floor) produces a deadline exactly 2h out.
-        var seconds = monkmode.Service1.ParseConfiguredCoolOffSeconds("7200", Floor);
-        var deadline = monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), seconds, Floor);
-        Assert.Equal(Hw.AddSeconds(7200).ToString(EnCa), deadline);
-    }
-
-    [Fact]
-    public void ConfiguredBelowFloorOrTampered_ClampsToTheFloor_EndToEnd()
-    {
-        // A positive-but-below-floor value, and every unusable/tampered value (blank, 0,
-        // negative, garbage), all wait the full floor: the parser + max(configured, floor)
-        // clamp guarantee cooling-off is NEVER shorter than the floor. Fail-safe.
-        foreach (var raw in new[] { "600", "", "0", "-999", "garbage" })
-        {
-            var seconds = monkmode.Service1.ParseConfiguredCoolOffSeconds(raw, Floor);
-            var deadline = monkmode.Service1.ComputeCoolOffDeadline(Hw.ToString(EnCa), seconds, Floor);
-            Assert.Equal(Hw.AddSeconds(Floor).ToString(EnCa), deadline);
-        }
-    }
-}
+// Ledger 319: ConfiguredCoolOffDurationTests stood here, pinning
+// Service1.ParseConfiguredCoolOffSeconds - the interpreter that turned the stored [CoolOff]
+// Duration into a wait, with the floor clamp that stopped an attacker-set 0 shortening it. The
+// function is deleted with the wait it sized. The FIELD is still written and still MAC-covered
+// (see CoolOffWriteConfigTests below and CanonicalParityTests) because it stays in the v12
+// canonical; it simply has no consumer left anywhere in the four assemblies.
 
 // C6b: the CLI arm path (`block --cooloff`) writes [CoolOff] Duration MAC-covered from birth.
 // Uses the REAL Blocker.WriteConfig (into the test bin dir), then loads the ini back and checks

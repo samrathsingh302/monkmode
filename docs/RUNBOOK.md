@@ -27,7 +27,7 @@ machine's state without arming anything, how to remove MonkMode completely, and
 the operational footguns that have actually bitten.
 
 **This runbook complements `USER-GUIDE.md`, it does not repeat it.** For the
-command reference (setup, block, schedule, presets, cooling-off, the partner
+command reference (setup, block, schedule, presets, the partner
 code, stats), and for the *intended* exits from an active block, read the user
 guide first. This document assumes you already know those and picks up where
 they stop: diagnosis, forced removal, and the honest residual register.
@@ -40,8 +40,8 @@ executables run from (`AppContext.BaseDirectory`, i.e. `dist\` today) [E1].
 > dev or audit. The runbook *instructs the operator* to run diagnostic and
 > teardown commands — that is its job — but those are live-machine actions.
 > `sc query`, `Get-Service`, `reg query`, and reading the hosts file are
-> read-only and safe. `monkmode unblock --force` and `sc delete` are
-> destructive and mutate the live machine — run them only when you mean to.
+> read-only and safe. `sc delete` is destructive and mutates the live machine —
+> run it only when you mean to, and only while idle.
 
 ---
 
@@ -75,16 +75,27 @@ skipped by design: a non-admin daily account, full-disk encryption (BitLocker),
 and a BIOS/boot-order lock [E3]. If you want the offline nuke to be hard, that
 is where the effort goes — not into MonkMode.
 
-### 1.3 The `unblock --force` escape hatch is retained on purpose
+### 1.3 There is no escape hatch — removed 30/08/2026 (ledger 319)
 
-`monkmode unblock --force` unconditionally tears any block down and removes the
-service [E4]. Despite the R1 exit model's "removed" wording, it is **kept
-deliberately as brick-insurance**: a fail-closed bug or a dead DPAPI store must
-never be able to trap the machine permanently, so the one guaranteed way out is
-kept and documented rather than concealed. It is admin-only and gated behind an
-explicit `--force`, so it can never be a casual one-word bypass — but an admin
-who *wants* out can always take it. This is the honest ceiling in practice.
-Full teardown behaviour is Section 3.
+`monkmode unblock --force` used to tear any block down unconditionally and remove
+the service. It was **removed**, along with the self-serve cooling-off wait, at
+Samrath's instruction on 30/08/2026: *"i dont like how i can force unblock it
+regardless ... i should only be able to unblock with code."* A running block now
+ends on exactly two events — its own end time, or a service-verified partner code.
+
+The removal is a removal, not a hiding. `monkmode.exe` no longer contains any code
+path that can disable SCM recovery, kill the watchdog pair, remove the deny-DELETE
+ACE, delete the service, strip the hosts block or clear the SafeBoot registration:
+those primitives were deleted from `Blocker.vb` and `ServiceTools.vb`, and the
+`DeleteService` P/Invoke went with them. `--force` and `--cancel` are now reported
+as unknown options.
+
+**What that costs, stated plainly.** The escape hatch was retained for four
+releases as brick-insurance, and the brick case is real: a dead DPAPI store or a
+MAC-invalid config freezes fail-closed and can now be lifted by *nothing* — not
+the end time, and not the partner code either, because the code is verified
+against a config the service will not trust. Such a block holds indefinitely and
+only the offline route (B10, 3.4) gets out. That trade was made knowingly.
 
 ### 1.4 Everything self-healing chains to B1
 
@@ -130,12 +141,12 @@ Get-Service MONKMODE          # PowerShell equivalent
   also carrying a deny-DELETE ACE, so `sc delete` will be refused (that is B6,
   by design, not a fault) [E8].
 - **`STOPPED` but the query still returns a service** — this is what a **genuine
-  expiry looks like**. When a block reaches its real end (timer, cooling-off, or
-  a correct partner code) the service strips the hosts block, removes its
+  expiry looks like**. When a block reaches its real end (its timer, or a correct
+  partner code) the service strips the hosts block, removes its
   protections, and **stops itself**, but the service *registration remains
   installed and idle** [E9]. This is normal, not a stuck state.
-- **Service absent entirely** — MonkMode was removed (via `unblock --force`, or a
-  manual `sc delete` while idle). Nothing is being enforced by the service.
+- **Service absent entirely** — MonkMode was removed by a manual `sc delete`
+  while idle (the only route since ledger 319). Nothing is enforced by the service.
 
 The authoritative one-command read is:
 
@@ -154,9 +165,10 @@ lifts when the service is *not Running* **or** the hosts marker block is gone
 
 ### 2.2 What removes the service registration?
 
-Only `monkmode unblock --force`, or a manual `sc delete MONKMODE` while the
-service is **idle** (no active block — the deny-DELETE ACE is off at expiry)
-[E9][E11]. During an active block, `sc delete` is refused (B6). See Section 3.
+Only a manual `sc delete MONKMODE` while the service is **idle** (no active
+block — the service re-grants DELETE on its own genuine-expiry teardown)
+[E9][E11]. During an active block, `sc delete` is refused (B6). Ledger 319
+removed the other route (`unblock --force`). See Section 3.
 
 ### 2.3 The hosts marker block
 
@@ -213,7 +225,7 @@ reg query "HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MONKMODE"
 Both are present during a block, self-healed each tick, and removed at a genuine
 expiry [E14]. If you see these two keys but the service is gone and no block is
 active, they are harmless orphans (e.g. left by an `sc delete` mid-block) —
-`unblock --force` removes them, or delete the two leaf keys by hand.
+The service removes them at a genuine expiry; otherwise delete the two leaf keys by hand.
 
 ### 2.6 The guardian process
 
@@ -236,14 +248,14 @@ All in the app folder (next to the exes) [E1]:
 
 | Artefact | File | Protected? | What it holds |
 |---|---|---|---|
-| Enforcement config | `monkmode_settings.ini` | HMAC-SHA256, schema `v11` | Global header (HighWater, Now, SlotCount, NextSlotId, Guard fields, the global `[Schedule]` pair) + one `[SlotN]` group per block: its Until/StartAt, sites, apps, URL patterns, cooling-off and partner fields [E16] |
+| Enforcement config | `monkmode_settings.ini` | HMAC-SHA256, schema `v12` | Global header (HighWater, Now, TrustedUtc, SlotCount, NextSlotId, Guard fields, the global `[Schedule]` pair) + one `[SlotN]` group per block: its Until/StartAt, sites, apps, URL patterns and partner fields [E16]. The `CoolOffUntil` / `CoolOffDuration` keys are still in the canonical and still MAC-covered, but since ledger 319 nothing writes them and nothing reads them to decide a lift — they are kept only to avoid a schema bump |
 | Config shadow backup | `monkmode_settings.ini.bak` | MAC-covered copy | Restore source if the primary is structurally corrupt (B8/R8) [E17] |
 | Setup config | `monkmode_setup.ini` | HMAC, schema `s4` | Account defaults: partner, cooloff seconds, default site/app lists [E18] |
 | Hosts snapshot | `monkmode_hosts.block` | (plain) | Exact marker block the service restores hosts from — the **union** over every contributing slot (B2) [E19] |
 | DoH snapshot | `monkmode_doh.snapshot` | (plain) | User's prior browser DoH policy, captured at block start (B5a) [E20] |
 | Stats | `monkmode_stats` | **non-MAC by design** | Display-only counts, zero enforcement authority [E21] |
-| Counter sidecars | `%ProgramData%\MonkMode\stats-service.ini`, `…\stats-notify.ini` | **non-MAC by design**, one writer each | Per-block app-kill counts (service) and URL-redirect counts (notifier). Outside the app folder because Program Files is admin-write-only and the notifier is not elevated. Survive retire, teardown and `--force` [E31] |
-| Cooling-off / code / add triggers | `monkmode_cooloff.request.<id>`, `monkmode_cooloff.cancel.<id>`, `monkmode_partner.code.<id>`, `monkmode_add.request.<id>` | (plain, presence/candidate only) | Requests the service adjudicates. Since v1.1 they are **slot-addressed**: the id is a zero-authority routing hint (an unknown or retired id deletes the file and changes nothing), and a partner code is verified only against the slot it names [E22] |
+| Counter sidecars | `%ProgramData%\MonkMode\stats-service.ini`, `…\stats-notify.ini` | **non-MAC by design**, one writer each | Per-block app-kill counts (service) and URL-redirect counts (notifier). Outside the app folder because Program Files is admin-write-only and the notifier is not elevated. Survive retire and teardown [E31] |
+| Code / add triggers | `monkmode_partner.code.<id>`, `monkmode_add.request.<id>` | (plain, presence/candidate only) | Requests the service adjudicates. **Slot-addressed**: the id is a zero-authority routing hint (an unknown or retired id deletes the file and changes nothing), and a partner code is verified only against the slot it names [E22]. Ledger 319 retired the two cooling-off names — `monkmode_cooloff.request.<id>` / `.cancel.<id>` are still *swept* by the tick, but they address no family any more, so they are deleted unread and can never start anything |
 
 **The DPAPI key that keys the MAC is not a separate store.** It lives *inside*
 `monkmode_settings.ini` as the `[Integrity] Key` value — a random 32-byte key
@@ -300,8 +312,8 @@ Two v1.1 state flags worth recognising when a block looks stuck:
 
 ## 3. Full-uninstall how-to
 
-The intended way out of an *active* block is one of the user-facing exits
-(cooling-off, the partner code, or the timer — `USER-GUIDE.md` §6). This section
+The way out of an *active* block is one of the two user-facing exits (the partner
+code, or the timer — `USER-GUIDE.md` §6). This section
 is the **manual removal surgery** for when you want MonkMode gone entirely, or
 when it is stuck.
 
@@ -322,62 +334,54 @@ entry and the current user's notifier autorun, and keeps your data unless you pa
 `-PurgeData` (`USER-GUIDE.md` §9). It is fail-closed: it refuses if anything is
 still enforcing, so it is never an escape hatch. The manual path below remains the
 fallback (and the only route for a plain `dist\` folder that was never installed):
-delete the folder by hand after the service is gone. `monkmode unblock --force`
-also works when idle and additionally cleans up the artefacts below.
+delete the folder by hand after the service is gone.
 
-### 3.2 The forced teardown (`unblock --force`) — what it removes
+### 3.2 There is no forced teardown any more (ledger 319, 30/08/2026)
 
-`monkmode unblock --force` is the complete teardown for an *active* block or a
-stuck one. It runs these steps, in order, **best-effort per step** — a failure in
-one step is reported and the teardown continues rather than aborting [E4][E25]:
+`monkmode unblock --force` ran a ten-step best-effort teardown: disable SCM
+recovery, kill the watchdog pair and notifier, remove the deny-DELETE ACE and
+delete the service, strip the hosts marker block, delete the hosts snapshot and
+the config shadow backup, delete the trigger files, remove the two SafeBoot leaf
+keys, restore the browser DoH policy, and clear the notifier autorun.
 
-1. **Disable SCM recovery** on `MONKMODE` so the kills in step 2 actually stick
-   (B1 layer 1 off) [E4].
-2. **Kill the watchdog pair and notifier** — guardian first, then service, then
-   `mm_notify` — retrying until both stay down [E4].
-3. **Remove the deny-DELETE ACE, then delete the service** — restores the default
-   service security descriptor (so the object can be opened for DELETE), then
-   `DeleteServiceByName`. If the ACE restore hard-fails it is retried once and
-   the delete is skipped with an actionable message rather than buried under a
-   misleading AccessDenied [E4].
-4. **Restore the hosts file** — strip *only* the MonkMode marker block; user
-   content preserved byte-for-byte [E4].
-5. **Delete the hosts snapshot** `monkmode_hosts.block` [E4].
-6. **Delete the config shadow backup** `monkmode_settings.ini.bak` [E4].
-7. **Delete the cooling-off + partner-code triggers** (`monkmode_cooloff.request`,
-   `monkmode_cooloff.cancel`, `monkmode_partner.code`) [E4].
-8. **Remove the two SafeBoot leaf keys** (HKLM Minimal + Network) [E4].
-9. **Restore the browser DoH policy** from `monkmode_doh.snapshot` (or remove our
-   lingering "off"), then consume the snapshot [E4].
-10. **Clear the notifier autorun** — delete the `MonkMode_notify` value from HKCU
-    Run [E4].
+**All ten steps, and every primitive behind them, were deleted** (1.3). The CLI
+cannot perform any of them.
 
-### 3.3 What `--force` leaves behind — verified
+What still happens, and does the equivalent work, is the SERVICE's own
+genuine-expiry teardown: at a real end (timer or partner code) it strips the
+hosts marker block, drops the snapshot, restores the browser DoH policy, removes
+its SafeBoot registration, re-grants DELETE on its own service object and stops
+itself — leaving the registration installed and idle (2.1). From there `sc delete
+MONKMODE`, or `tools\uninstall.ps1`, finishes the job. The operator sequence is
+therefore: **let the block end → confirm idle (2.1) → `sc delete` → remove the
+folder.** There is no way to compress that while a block is live.
 
-`--force` does **not** delete everything. Verified against the teardown code
-(there is no `File.Delete` for these artefacts anywhere in the CLI) [E26], the
-following **survive** a forced teardown and must be removed by hand if you want a
-truly clean slate:
+### 3.3 What an ended block leaves behind — verified
+
+The teardown does **not** delete everything. Verified against the code (there is
+no `File.Delete` for these artefacts anywhere in the CLI) [E26], the following
+**survive** and must be removed by hand if you want a truly clean slate:
 
 - **`monkmode_settings.ini`** — the enforcement config file itself is left in
   place. Harmless: the service that read it is gone, and the next `monkmode
   block` overwrites it. Delete it by hand only if you are wiping the folder.
-- **`monkmode_setup.ini`** — your account defaults (partner label, cooloff
-  seconds, default site/app lists) **survive**, so a reinstall keeps them. This
+- **`monkmode_setup.ini`** — your account defaults (partner label, the now-inert
+  cooloff seconds, default site/app lists) **survive**, so a reinstall keeps them. This
   is effectively a feature — but delete it if you want setup to start blank.
 - **`monkmode_stats`** — your block history (counts only) **survives**. Delete it
   by hand to reset the history.
 - **The `dist\` folder and the four executables** — MonkMode cannot delete its
-  own running binaries, so `--force` never touches them. Remove the folder
-  yourself after the service is gone (the exes are unlocked once the service and
-  guardian processes have exited — confirm with 2.6).
+  own running binaries. Remove the folder yourself after the service is gone (the
+  exes are unlocked once the service and guardian processes have exited — confirm
+  with 2.6).
 
-Note the `monkmode_doh.snapshot` is *consumed* by step 9 (restore-then-delete),
-so it is normally gone after `--force` — but if step 9 was skipped (best-effort),
-it may linger and is safe to delete by hand.
+Note the `monkmode_doh.snapshot` is *consumed* by the service's DoH restore
+(restore-then-delete), so it is normally gone after an expiry — but if that step
+was skipped (best-effort), it may linger and is safe to delete by hand.
 
-After a successful `--force`, `sc query MONKMODE` returns *service does not
-exist* and the hosts marker (2.3) is gone. That pair is your "it's off" signal.
+After the block has ended and `sc delete MONKMODE` has run, `sc query MONKMODE`
+returns *service does not exist* and the hosts marker (2.3) is gone. That pair is
+your "it's off" signal.
 
 ### 3.4 The stuck / bricked variant
 
@@ -386,16 +390,19 @@ store is dead. Causes: DPAPI at LocalMachine scope is unreadable (so the MAC
 can't be validated), a tampered (MAC-invalid) config that froze fail-closed, or a
 structurally corrupt primary ini with no valid backup [E23][E27]. In all of
 these the block **holds fail-closed on purpose** — no error path may ever lift a
-block — so cooling-off and the partner code cannot help.
+block. The partner code cannot help either: `ClassifyPartnerCodeSignal` requires
+a valid MAC before it will even attempt a verify, so a frozen config refuses the
+code as well as the clock.
 
-**The way out is `monkmode unblock --force`.** It is *unconditional*: the
-teardown in 3.2 does **not** read or validate the MAC, does not require DPAPI,
-and strips the hosts block by its literal marker text — so a dead config store
-does not block it [E4]. That is exactly why the escape hatch is retained as
-brick-insurance (1.3): the guaranteed exit survives even a frozen config.
+**Since ledger 319 there is no in-band way out of this state.** The escape hatch
+that used to be the answer here — unconditional, MAC-free, DPAPI-free, stripping
+hosts by literal marker text — was removed on 30/08/2026 (1.3). A frozen block
+now holds indefinitely, past its own end time, until the machine is recovered
+out-of-band. This is the sharp edge of the removal and it was accepted knowingly:
+avoid it by never arming across a binary upgrade (4.2) and never hand-editing the
+config.
 
-If even `--force` cannot delete the service (something is re-denying the DACL, or
-the machine is otherwise wedged), the honest floor is the offline route (B10):
+The floor is the offline route (B10):
 boot from WinRE / a live USB, mount the disk, delete the `MONKMODE`
 `HKLM\SYSTEM\CurrentControlSet\Services\MONKMODE` key and the app folder, and
 strip the marker block from the offline hosts file. On an unencrypted disk this
@@ -435,8 +442,8 @@ read by **newer** binaries and **freezes fail-closed** — it keeps enforcing an
 will not auto-lift [E16][E29]. **Arm blocks *after* upgrading the binaries, not
 across an upgrade.** If you are rebuilding: let any live block end first, then
 rebuild `dist\`, then arm. If you are already stuck in a forward-migration
-freeze, that is a "config store dead" case — recover with `unblock --force`
-(3.4).
+freeze, that is a "config store dead" case — and since ledger 319 there is no
+in-band recovery for it at all (3.4). Do not risk it.
 
 ### 4.3 Orphaned guardian holding a build file lock
 
@@ -537,17 +544,21 @@ weakens a block: they over-block, fail soft, or are cosmetic. Source for each is
   bare-second-level test sees two dots. Accepted: cosmetic under-coverage of an
   unusual spelling; the URL watcher now normalises trailing dots (FX8), so the
   nudge layer still sees it.
-- **F24 — a PENDING block cannot be cancelled**, although `status` and `help`
-  both say `unblock --id N --cancel` "cancels it freely until it starts". The
-  cancel is a no-op and the block still arms. Accepted for v1.1: it fails in the
-  block-harder direction; the wording is the part that is wrong.
+- **F24 — a PENDING block cannot be cancelled. CLOSED by ledger 319 (30/08/2026),
+  by fixing the wording rather than the behaviour.** `status` and `help` both used
+  to say `unblock --id N --cancel` "cancels it freely until it starts"; the cancel
+  only ever cleared a pending cooling-off deadline, which a PENDING slot has none
+  of, so it was a no-op and the block armed anyway. `--cancel` is gone with the
+  cooling-off, and both surfaces now say plainly that a waiting block cannot be
+  cancelled.
 - **F27 — the CLI `--preset video`/`social` vocabularies and the same-named
   `mm-video`/`mm-insta` wrappers arm different lists.** Two independent list
   sources, one name. Accepted, documented in `USER-GUIDE.md` §5 — check
   `monkmode status` after arming if the exact list matters.
-- **F28 — two display-only regressions:** the cooling-off "started" toast can
-  never fire, and the wrappers' duplicate-arm warning is suppressed whenever an
-  account default app list is set. Cosmetic only.
+- **F28 — one display-only regression left:** the wrappers' duplicate-arm warning
+  is suppressed whenever an account default app list is set. Cosmetic only. (Its
+  other half, a cooling-off "started" toast that could never fire, was deleted
+  outright by ledger 319 along with the cooling-off exit.)
 - **F19 — `"1 sites blocked"`** on the block page is not pluralised. Cosmetic.
 
 ### 5.2 Enforcement-adjacent, bounded
@@ -652,7 +663,7 @@ weakens a block: they over-block, fail soft, or are cosmetic. Source for each is
 ## See also
 
 - `USER-GUIDE.md` — the command-first lifecycle (setup, block, schedule,
-  presets, cooling-off, the partner code, stats, and the happy-path removal).
+  presets, the partner code, stats, and the happy-path removal).
 - `README.md` — the exit model, the honest ceiling, and engineering notes.
 - `ARCHITECTURE.md` (working docs, `OneDrive/dev/repos/monk-mode/specs/`) — the full
   bypass surface B1–B14, ranked by effort, with live-verification evidence.
@@ -670,9 +681,9 @@ where noted). Cites are `file:line` at the time of writing.
   `ARCHITECTURE.md:282` (bypass table B10) + §5 :304-306.
 - **[E3]** No BitLocker; B10 closure needs measures outside this codebase, D7
   SKIP — `ARCHITECTURE.md:311-315` (§5).
-- **[E4]** `unblock --force` teardown, unconditional + best-effort per step —
-  `MonkMode\Program.vb:642-751` (`DoUnblock` `--force` branch, steps 1–10 at
-  :686-747); step semantics `Step_` at :767-777.
+- **[E4]** RETIRED by ledger 319: the `unblock --force` teardown and its `Step_`
+  helper no longer exist in `MonkMode\Program.vb`. Grep the CLI for `--force`:
+  the only hits are the comments recording the removal.
 - **[E5]** Per-tick self-heals fail-closed (hosts B2) — `ARCHITECTURE.md:274`
   (B2 row); DoH/SafeBoot/ACE self-heal pattern :275, 277, 278.
 - **[E6]** B1 mitigation (SCM recovery + guardian) and its honest residuals —
@@ -724,11 +735,10 @@ where noted). Cites are `file:line` at the time of writing.
 - **[E24]** No `EventLog` writes in the service — grep of
   `MonkMode_srv\MonkMode_srv\Service1.vb` for `EventLog`/`WriteEntry` returns no
   matches (verified at time of writing).
-- **[E25]** Best-effort per step — `MonkMode\Program.vb:1206` (`Step_`
-  swallows + reports, returns success).
+- **[E25]** RETIRED by ledger 319 with `Step_` itself; see [E4].
 - **[E26]** No `File.Delete` of the ini / setup ini / stats anywhere in the CLI —
   grep of `MonkMode\` for `Delete.*IniPath` / `SetupIni` / `Stats` returns no
-  matches; the `--force` step list (E4) omits them.
+  matches. Since ledger 319 the CLI deletes nothing at all.
 - **[E27]** Corrupt/blank/short ini holds fail-closed; tampered (MAC-invalid)
   freezes and is never "recovered" — `ARCHITECTURE.md:280` (B8 row, C1b backup).
 - **[E28]** Pipe-wedge (notifier inherits stdout) — `USER-GUIDE.md` §10;

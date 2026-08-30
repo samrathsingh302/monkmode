@@ -61,8 +61,9 @@ Module Blocker
     Public Const CoolOffRequestFileName As String = "monkmode_cooloff.request"
     Public Const CoolOffCancelFileName As String = "monkmode_cooloff.cancel"
     ' v1.1 S3b (P40): the live channel is SLOT-ADDRESSED - <prefix><id>. The unsuffixed names
-    ' above survive only so the `unblock --force` escape hatch can still clear a legacy file
-    ' an older build left behind; nothing reads them any more. Parity-pinned with the service
+    ' above survive only so the tick's stale-trigger sweep can still recognise a legacy file
+    ' an older build left behind; nothing reads them any more, and since ledger 319 nothing
+    ' writes the suffixed ones either. Parity-pinned with the service
     ' copies (Service1.CoolOffRequestPrefix / CoolOffCancelPrefix / PartnerCodePrefix), like
     ' every other cross-assembly literal - a drift here silently breaks the exit channel.
     Public Const CoolOffRequestPrefix As String = "monkmode_cooloff.request."
@@ -233,7 +234,8 @@ Module Blocker
         ' decide off the persisted high-water mark (a clock-forward can't advance
         ' it) and the MAC (a tampered/frozen block stays active). Fail CLOSED: a
         ' running service with an unreadable/tampered config reads as ACTIVE, so the
-        ' standing block is never overwritten - the exit remains `unblock --force`.
+        ' standing block is never overwritten - and since ledger 319 the only exits are the
+        ' block's own end time and its partner code.
         If Not ServiceIsRunning() Then Return False
         Try
             Dim ini As New IniFile
@@ -294,46 +296,12 @@ Module Blocker
         End Try
     End Function
 
-    ' C4: is the active block committed (self-serve cooling-off disabled = code-only
-    ' exit)? Best-effort, for the CLI's `unblock` WARNING ONLY - it has ZERO
-    ' enforcement authority (the service alone adjudicates cooling-off). Gated on a
-    ' valid MAC so a tampered/frozen config never yields a misleading "committed"
-    ' message; returns False on any read/parse failure.
-    Public Function BlockIsCommitted() As Boolean
-        Try
-            Dim ini As New IniFile
-            ini.Load(IniPath())
-            If Not ConfigMacIsValidForIni(ini) Then Return False
-            Return String.Equals(If(ini.GetKeyValue("Commit", "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
-        Catch
-            Return False
-        End Try
-    End Function
-
-    ' v1.1 S3b: the PER-SLOT commit flag, for the `unblock --id N` exit gate. The v9
-    ' [Commit] Committed above is the machine-wide LATCH ("yes if ANY slot is"), and a latch is
-    ' the wrong thing to gate ONE block's exit on: with a committed 1h block beside an
-    ' uncommitted 30d one, the latch would refuse the survivor's cooling-off for a month after
-    ' the committed block ended. RefreshV9ListMirror now recomputes the latch as slots retire,
-    ' but an addressed exit should not consult a union at all - it should read the block it
-    ' names. Same fail-safe stance as BlockIsCommitted: MAC-gated, False on any read failure
-    ' (this is a CLI WARNING gate with zero enforcement authority - the service adjudicates).
-    Public Function SlotIsCommitted(ByVal slotId As Integer) As Boolean
-        Try
-            Dim ini As New IniFile
-            ini.Load(IniPath())
-            If Not ConfigMacIsValidForIni(ini) Then Return False
-            Dim wanted As String = slotId.ToString(CultureInfo.InvariantCulture)
-            For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
-                If String.Equals(If(ini.GetKeyValue(SlotSection(pos), "Id"), "").Trim(), wanted, StringComparison.Ordinal) Then
-                    Return String.Equals(If(ini.GetKeyValue(SlotSection(pos), "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
-                End If
-            Next
-            Return False
-        Catch
-            Return False
-        End Try
-    End Function
+    ' Ledger 319 (30/08/2026): BlockIsCommitted (the v9 machine-wide latch) and SlotIsCommitted
+    ' (its per-slot successor) are DELETED. Both existed for one caller: the `unblock` gate that
+    ' refused a committed block's self-serve cooling-off. Every block is committed now and there
+    ' is no cooling-off to refuse, so neither has a question left to answer. The MAC-covered
+    ' `Committed` field is still WRITTEN (always "yes") and still in the v12 canonical - the
+    ' schema is untouched - it simply has no reader on the CLI side any more.
 
     ' P33: one line per armed slot for the "name the one you mean" refusal -
     '   "  <id>  <state>  ends <when>  (<n> sites, <n> apps)"
@@ -418,14 +386,13 @@ Module Blocker
         Public Sites As Integer
         Public Apps As Integer
         Public Urls As Integer
-        Public Committed As Boolean
-        Public CoolOffRemaining As TimeSpan?     ' Nothing = none pending
         ' 313(a): the monotonic [Time] HighWater mark this row was read against - the SAME
         ' timeline expiry is decided on (Ends <= Mark => the block is over). Held as the raw
         ' moment, not a formatted remaining, because every string belongs to Program.vb's pure
-        ' formatters. DateTime.MinValue = unreadable OR MAC-invalid: the mark is MAC-GATED like
-        ' Committed / CoolOffRemaining, so a tampered config can never render a reassuring
-        ' countdown, and the formatters degrade to a placeholder rather than a wrong number.
+        ' formatters. DateTime.MinValue = unreadable OR MAC-invalid: the mark is MAC-GATED, so a
+        ' tampered config can never render a reassuring countdown, and the formatters degrade to
+        ' a placeholder rather than a wrong number. Ledger 319 removed Committed (always yes now)
+        ' and CoolOffRemaining (no such thing) from this row; Mark is what is left to gate.
         Public Mark As DateTime = DateTime.MinValue
     End Class
 
@@ -439,10 +406,8 @@ Module Blocker
     ' degrades to a placeholder, never an exception), matching ArmedSlotLines.
     '
     ' `macValid` is reported back so the caller can say plainly that a frozen config is
-    ' frozen. The two EXIT-relevant fields are MAC-GATED exactly like BlockIsCommitted /
-    ' CoolOffPendingRemaining: a tampered config must never render a reassuring exit story
-    ' (a forged `Committed=no` or a forged cooling-off deadline would otherwise read as an
-    ' exit that does not exist).
+    ' frozen, and the monotonic Mark is MAC-GATED: a tampered config must never render a
+    ' reassuring countdown (a forged HighWater would otherwise read as time nearly served).
     Friend Function ReadSlotViews(ByRef macValid As Boolean) As List(Of SlotView)
         Dim views As New List(Of SlotView)
         macValid = False
@@ -476,8 +441,6 @@ Module Blocker
                     v.State = SlotStateActive
                 End If
                 If macValid Then
-                    v.Committed = String.Equals(If(ini.GetKeyValue(sec, "Committed"), "").Trim(), "yes", StringComparison.OrdinalIgnoreCase)
-                    v.CoolOffRemaining = CoolOffRemainingFrom(DecryptOrEmpty(ini.GetKeyValue(sec, "CoolOffUntil")), highWater)
                     v.Mark = ParseStamp(highWater)
                 End If
                 views.Add(v)
@@ -568,47 +531,10 @@ Module Blocker
         Return ends > mark
     End Function
 
-    ' D5 (rich status): the MONOTONIC cooling-off remaining for `status` - CoolOffUntil - HighWater
-    ' (the SAME active-time countdown the service enforces via the B4 mark; NOT the wall clock).
-    ' Nothing when no cooling-off is pending ([Time] CoolOffUntil empty), the MAC is invalid
-    ' (tampered/frozen - never a misleading countdown, like BlockIsCommitted), the deadline has
-    ' already passed (about to lift), or anything is unreadable. Display-only: ZERO enforcement
-    ' authority. Best-effort; never throws.
-    ' v1.1 S3b: cooling-off is PER SLOT now (the machine-wide [Time] CoolOffUntil is no
-    ' longer written by anyone), so this reports the SOONEST pending deadline across the
-    ' armed slots - the next moment a block would lift. Display-only, so a soonest-wins
-    ' summary is the honest one-line answer; the per-block breakdown belongs to `status`.
-    Public Function CoolOffPendingRemaining() As TimeSpan?
-        Try
-            Dim ini As New IniFile
-            ini.Load(IniPath())
-            If Not ConfigMacIsValidForIni(ini) Then Return Nothing
-            Dim highWater As String = enc.DecryptData(ini.GetKeyValue("Time", "HighWater"))
-            Dim soonest As TimeSpan? = Nothing
-            For pos As Integer = 1 To ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
-                Dim coolOffEnc As String = ini.GetKeyValue(SlotSection(pos), "CoolOffUntil")
-                If coolOffEnc = "" Then Continue For
-                Dim remaining As TimeSpan? = CoolOffRemainingFrom(enc.DecryptData(coolOffEnc), highWater)
-                If remaining.HasValue AndAlso (Not soonest.HasValue OrElse remaining.Value < soonest.Value) Then soonest = remaining
-            Next
-            Return soonest
-        Catch
-            Return Nothing
-        End Try
-    End Function
-
-    ' Pure: cooling-off remaining from a deadline vs the HighWater mark, both en-CA plaintext.
-    ' Nothing if either is empty/unparseable OR the remaining is non-positive (a passed/at-deadline
-    ' cooling-off is "not pending" - the block is about to lift, so `status` shows no countdown).
-    ' Friend so the parse + positivity contract is unit-tested without arming a real cooling-off.
-    Friend Function CoolOffRemainingFrom(ByVal deadlineText As String, ByVal highWaterText As String) As TimeSpan?
-        Dim deadline As DateTime, mark As DateTime
-        If Not DateTime.TryParse(deadlineText, CA, DateTimeStyles.None, deadline) Then Return Nothing
-        If Not DateTime.TryParse(highWaterText, CA, DateTimeStyles.None, mark) Then Return Nothing
-        Dim remaining As TimeSpan = deadline - mark
-        If remaining.TotalSeconds <= 0 Then Return Nothing
-        Return remaining
-    End Function
+    ' Ledger 319: CoolOffPendingRemaining and CoolOffRemainingFrom are DELETED with the
+    ' countdown they rendered. `status` no longer has a cooling-off to report on any row -
+    ' nothing writes a slot's CoolOffUntil, and the service would ignore one if it found it -
+    ' so a "lifts in about N" line could only ever be a lie about an exit that does not exist.
 
     ' ---- hosts helpers ----
 
@@ -732,9 +658,9 @@ Module Blocker
         Return True
     End Function
 
-    ' The service's stopMe() marker-block strip, ported into the CLI so the
-    ' `unblock` LIFT path (RestoreHostsFromStrip) removes our block EXACTLY as the
-    ' service does at a genuine expiry: cut at the first LINE-ANCHORED ordinal
+    ' The service's stopMe() marker-block strip, ported into the CLI. Ledger 319 deleted its
+    ' one CLI caller (RestoreHostsFromStrip, the escape hatch's hosts step), so this is now
+    ' the ARM path's strip only - it still cuts at the first LINE-ANCHORED ordinal
     ' marker, then drop only the single line terminator the writer placed before
     ' it, so the user's own content - including any trailing blank line - is
     ' preserved byte-for-byte.
@@ -1306,7 +1232,8 @@ Module Blocker
     ' keeps only the head, the tail is swallowed as a malformed line, and the RELOADED canonical no
     ' longer equals the canonical that was MAC-stamped. macValid goes False and STAYS False - which
     ' is fail-CLOSED (nothing lifts) but also unrecoverable: every OTHER armed block freezes with it,
-    ' cooling-off and the partner code stop working, and only `unblock --force` gets out.
+    ' the partner code stops working, and since ledger 319 NOTHING gets out (the escape hatch
+    ' that used to answer this case is gone). Unrecoverable in-band, not merely inconvenient.
     '
     ' So the input side refuses instead. Refusing an arm can never lift anything (nothing is written,
     ' nothing torn down), which is why the check sits BEFORE every side effect on each route.
@@ -2293,8 +2220,8 @@ Module Blocker
     '    Any failure to establish those two facts (process enumeration or ini read
     '    throwing) returns WITHOUT killing: we cannot prove we are outside the
     '    clock-change window, and not killing is the safe side. Individual p.Kill()
-    '    failures are swallowed exactly like the teardown kill (KillWatchdogProcesses)
-    '    and simply cost an attempt. Nothing here can fail the arm.
+    '    failures are swallowed and simply cost an attempt (the teardown kill this used to
+    '    cite, KillWatchdogProcesses, was deleted by ledger 319). Nothing here can fail the arm.
     Private Sub KillLeftoverNotifiers(ByVal killLeftovers As Boolean)
         For attempt As Integer = 1 To LeftoverKillAttempts
             Try
@@ -3173,28 +3100,14 @@ Module Blocker
         End Try
     End Sub
 
-    ' ---- C2b: cooling-off request channel (authority-free trigger files) ----
-
-    ' Drop the cooling-off REQUEST trigger. Presence-only: the service polls for
-    ' the file on its next tick (<=10s), computes its OWN floor-clamped deadline
-    ' off the monotonic HighWater and consumes the file - nothing the CLI writes
-    ' here (content, timestamps) carries any timing authority (R2). Same
-    ' file-drop channel shape as add_to_hosts, but in MonkMode's own AppDir zone.
-    ' v1.1 S3b (P40): addressed at ONE slot. The id is a routing hint with no authority - the
-    ' service verifies it against its own slot list and deletes an unknown one without
-    ' changing any state - but it is what makes cooling-off PER BLOCK. Before S3b there was
-    ' one machine-wide deadline, so `arm 30d; unblock; arm 30d` silently subjected the second
-    ' block to the first's ~1h wait and lifted BOTH (the S2 under-block, P2).
-    Public Sub RequestCoolOff(ByVal slotId As Integer)
-        File.WriteAllText(Path.Combine(AppDir(), CoolOffRequestPrefix & slotId.ToString(CultureInfo.InvariantCulture)), "")
-    End Sub
-
-    ' Drop the cooling-off CANCEL trigger: the service clears any pending
-    ' CoolOffUntil (back into the block) and consumes both triggers. Cancel WINS
-    ' over a simultaneous request (fail-closed: stay blocked).
-    Public Sub CancelCoolOff(ByVal slotId As Integer)
-        File.WriteAllText(Path.Combine(AppDir(), CoolOffCancelPrefix & slotId.ToString(CultureInfo.InvariantCulture)), "")
-    End Sub
+    ' ---- The exit request channel (authority-free trigger files) ----
+    '
+    ' Ledger 319 (30/08/2026): C2b's cooling-off request/cancel writers - RequestCoolOff and
+    ' CancelCoolOff - are DELETED. Nothing in this program drops a monkmode_cooloff.* trigger
+    ' any more, and the service no longer has a reader for one: a stray file left by an older
+    ' dist is now unaddressed junk that PurgeUnaddressedTriggers deletes on the next tick. The
+    ' CoolOffRequestPrefix/CoolOffCancelPrefix constants survive precisely for that sweep.
+    ' The partner code below is the whole channel now.
 
     ' C3b: drop the partner-code ATTEMPT trigger carrying the candidate code. Unlike
     ' the cooling-off triggers (presence-only, content ignored), this trigger's
@@ -3384,15 +3297,10 @@ Module Blocker
         End Try
     End Sub
 
-    ' Remove the shadow backup (escape-hatch teardown), mirroring DeleteSnapshot -
-    ' a torn-down block must leave nothing behind to restore an old config from.
-    ' Best-effort.
-    Public Sub DeleteBackup()
-        Try
-            File.Delete(IniBackupPath())
-        Catch
-        End Try
-    End Sub
+    ' Ledger 319: DeleteBackup is DELETED with the escape-hatch teardown that was its only
+    ' caller. The service still drops its own shadow backup at a genuine exit (stopMe), which
+    ' is the path that matters; the CLI no longer tears anything down, so it has no reason to
+    ' be able to remove the config's only recovery copy.
 
     ' F70: the escape hatch (`unblock --force`) used to leave the ARMED CONFIG on disk after it
     ' had deleted the service, killed the watchdog pair and stripped hosts. That config is the
@@ -3441,10 +3349,15 @@ Module Blocker
     ' already failed at its real job, and the config is left saying exactly what is true.
     ' The Friend overload is the seam the unit tests drive, so they pin the rule without ever
     ' querying the SCM (dev fence: tests never touch the real service).
-    Public Sub PersistZeroSlotConfig()
-        PersistZeroSlotConfig(BlockIsActive())
-    End Sub
-
+    ' Ledger 319: the parameterless PUBLIC entry point is DELETED with the escape hatch that was
+    ' its only caller. What survives is the Friend seam below, which takes the live-block answer
+    ' as a PARAMETER rather than querying the SCM - so nothing in the shipped CLI can reach a
+    ' config-zeroing writer at all, and the F70 regression pins (ForcedTeardownTests) keep
+    ' driving the writer's contract directly. Kept rather than deleted outright because it is
+    ' the CLI-side statement of the shape a torn-down config must have - the service's own
+    ' genuine-expiry teardown (PersistZeroSlotConfigAt, P39) writes the same shape, and these
+    ' tests are where that shape is pinned. It is not a lift primitive: it refuses outright
+    ' while a block is live (see the paragraph above and TheWriterItselfRefusesWhileABlockIsLive).
     Friend Sub PersistZeroSlotConfig(ByVal blockIsActive As Boolean)
         If blockIsActive Then Return
         If Not File.Exists(IniPath()) Then Return
@@ -3507,67 +3420,19 @@ Module Blocker
         End Try
     End Sub
 
-    ' ---- B6 escape hatch primitives (the guaranteed-removal path) ----
-    ' These are the brick-insurance teardown steps the `unblock --force` verb
-    ' sequences (Program.DoUnblock). Each is best-effort and independent so the
-    ' verb can run them in the correct order and continue past any one failure.
-    ' They mirror the live-verified cleanup.ps1 emergency teardown exactly.
-
-    ' Kill the watchdog pair (guardian + service) in a retry loop until both stay
-    ' down, then the notifier. The caller MUST have disabled SCM recovery first
-    ' (ServiceTools.DisableRecovery) or the SCM would resurrect the service
-    ' between kills. Returns True if both watchdog processes are gone. Best
-    ' effort: a kill that races a restart is retried up to `attempts` times.
-    Public Function KillWatchdogProcesses(Optional ByVal attempts As Integer = 8) As Boolean
-        Dim bothDown As Boolean = False
-        For i As Integer = 1 To attempts
-            For Each name As String In New String() {GuardProcessName, ServiceProcessName}
-                For Each p As Process In Process.GetProcessesByName(name)
-                    Try
-                        p.Kill()
-                    Catch
-                    End Try
-                Next
-            Next
-            If Process.GetProcessesByName(GuardProcessName).Length = 0 AndAlso
-               Process.GetProcessesByName(ServiceProcessName).Length = 0 Then
-                bothDown = True
-                Exit For
-            End If
-            Threading.Thread.Sleep(500)
-        Next
-        ' The notifier is harmless once the block is gone, but kill it too so the
-        ' teardown leaves nothing behind.
-        For Each p As Process In Process.GetProcessesByName(NotifierProcessName)
-            Try
-                p.Kill()
-            Catch
-            End Try
-        Next
-        Return bothDown
-    End Function
-
-    ' Unlock hosts and strip ONLY the MonkMode marker block, preserving the
-    ' user's own content byte-for-byte via StripMonkModeBlock - the SAME strip
-    ' the service's expiry path (stopMe -> StripMonkModeBlock) uses, so lifting a
-    ' block through `unblock --force` and lifting it through a natural expiry
-    ' leave hosts in identical states. (This path previously called StripOurBlock,
-    ' which trims the tail, so the two teardowns diverged on a user's trailing
-    ' blank line - whitespace-only, but a real divergence; audit P3 #7.) No-op if
-    ' hosts has no MonkMode block.
-    Public Sub RestoreHostsFromStrip()
-        Dim path As String = HostsPath()
-        If Not File.Exists(path) Then Return
-        ClearReadOnly(path)
-        Dim text As String = File.ReadAllText(path)
-        If text.IndexOf(Marker, StringComparison.Ordinal) < 0 Then Return
-        ' C1: atomic write - this path's whole job is preserving the user's own
-        ' hosts content, so a torn rewrite here is the worst case to guard against.
-        AtomicHosts.WriteAtomic(path, StripMonkModeBlock(text))
-    End Sub
+    ' ---- Ledger 319: the B6 escape-hatch primitives are DELETED ----
+    '
+    ' KillWatchdogProcesses, RestoreHostsFromStrip and RemoveSafeBootKeys were the
+    ' brick-insurance teardown steps `unblock --force` sequenced, and they had no other caller.
+    ' Each was, on its own, a way to end a live block from the CLI: kill the watchdog pair,
+    ' unlock hosts and strip our entries, drop the Safe Mode registration. Keeping them around
+    ' "just as helpers" would leave the capability one call site away from returning, which is
+    ' the whole thing Samrath asked to be rid of - so they are gone, not merely unreferenced.
+    ' The SERVICE keeps its own equivalents for a genuine exit (stopMe -> StripHostsBlockAtExpiry
+    ' -> RemoveSafeBootKeys); they are the only ones left, and nothing the CLI runs reaches them.
 
     ' Remove the B2 hosts snapshot so a reinstalled service can't self-heal the
-    ' old block back in. Best-effort.
+    ' old block back in. Best-effort. Kept: the ARM path calls it on a fresh rewrite.
     Public Sub DeleteSnapshot()
         Try
             File.Delete(SnapshotPath())
@@ -3575,24 +3440,13 @@ Module Blocker
         End Try
     End Sub
 
-    ' Remove the B3 SafeBoot leaf keys so no orphaned Safe Mode registration
-    ' lingers for a service that is being deleted. Only MonkMode's own two leaf
-    ' keys are touched (no-data-loss fence). Best-effort, per-key.
-    Public Sub RemoveSafeBootKeys()
-        For Each subKey As String In New String() {SafeBootMinimalKey, SafeBootNetworkKey}
-            Try
-                Registry.LocalMachine.DeleteSubKeyTree(subKey, False)
-            Catch
-            End Try
-        Next
-    End Sub
-
     ' ---- B5a: browser DoH-off policy (snapshot at block start + escape-hatch
     ' restore). The CLI writes the pre-block snapshot and owns the escape-hatch
     ' teardown; the service (its own RemoveDohPolicy) re-asserts + restores at
     ' expiry. The pure decisions live in DohPolicy.vb; the live registry/file I/O
     ' here is the smoke-tested seam. This RemoveDohPolicy is the CLI copy of the
-    ' service's (same shared pure helpers), for the `unblock --force` path. ----
+    ' service's (same shared pure helpers). Ledger 319 deleted the CLI's teardown half; what
+    ' remains here is the ARM-time snapshot the service later restores from. ----
 
     ' Read one policy value (String for REG_SZ, boxed Int32 for a DWORD, or Nothing
     ' if absent). Read-only OpenSubKey.
@@ -3603,19 +3457,9 @@ Module Blocker
         End Using
     End Function
 
-    ' Write one policy value at its Kind (creating the key path if needed).
-    Private Sub SetDohValue(ByVal entry As DohPolicy.DohPolicyEntry, ByVal value As Object)
-        Using rk As RegistryKey = Registry.LocalMachine.CreateSubKey(entry.SubKey)
-            If rk IsNot Nothing Then rk.SetValue(entry.ValueName, value, entry.Kind)
-        End Using
-    End Sub
-
-    ' Delete ONLY our value (never the shared vendor subkey tree). No-op if absent.
-    Private Sub DeleteDohValue(ByVal entry As DohPolicy.DohPolicyEntry)
-        Using rk As RegistryKey = Registry.LocalMachine.OpenSubKey(entry.SubKey, True)
-            If rk IsNot Nothing Then rk.DeleteValue(entry.ValueName, False)
-        End Using
-    End Sub
+    ' Ledger 319: SetDohValue and DeleteDohValue went with the CLI's RemoveDohPolicy - they
+    ' were its only callers, and both WRITE to HKLM policy keys. ReadDohValue stays, because
+    ' WriteDohSnapshot below still needs to read the user's prior policy at arm time.
 
     ' B5a: snapshot the user's CURRENT browser DoH policy values BEFORE the service
     ' forces them off, so teardown can restore the pre-block state with no data
@@ -3699,51 +3543,10 @@ Module Blocker
     ' clobber the user's own value (e.g. a user who already had DoH off) - the
     ' paramount no-data-loss fence. Cost = a rare lingering "off"; fail-safe.
     ' Best-effort, per-entry.
-    Public Sub RemoveDohPolicy()
-        Dim path As String = DohSnapshotPath()
-        Dim haveSnapshot As Boolean = False
-        Dim parsed As Object() = Nothing
-        Try
-            If File.Exists(path) Then
-                parsed = DohPolicy.ParseSnapshot(File.ReadAllText(path))
-                haveSnapshot = True
-            End If
-        Catch
-            haveSnapshot = False
-        End Try
-
-        ' No authoritative snapshot => do nothing (never delete a value we cannot
-        ' prove we created).
-        If Not haveSnapshot Then Return
-
-        Dim ents As DohPolicy.DohPolicyEntry() = DohPolicy.Entries
-        For i As Integer = 0 To ents.Length - 1
-            Dim entry As DohPolicy.DohPolicyEntry = ents(i)
-            Try
-                Dim action = DohPolicy.RestoreActionFor(entry, parsed(i))
-                If action.delete Then
-                    DeleteDohValue(entry)
-                Else
-                    SetDohValue(entry, action.value)
-                End If
-            Catch
-            End Try
-        Next
-
-        Try
-            File.Delete(path)
-        Catch
-        End Try
-    End Sub
-
-    ' Clear the HKCU Run autorun for the notifier. Best-effort.
-    Public Sub ClearNotifierAutorun()
-        Try
-            Using rk As RegistryKey = Registry.CurrentUser.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Run", True)
-                If rk IsNot Nothing Then rk.DeleteValue(RunValueName, False)
-            End Using
-        Catch
-        End Try
-    End Sub
-
+    ' Ledger 319: the CLI's RemoveDohPolicy (and ClearNotifierAutorun beside it) are DELETED
+    ' with the escape hatch they belonged to. The SERVICE keeps its own RemoveDohPolicy and
+    ' runs it at a genuine exit (stopMe), so the user's prior browser DoH policy is still
+    ' restored from the snapshot exactly as before - the restore simply is not something the
+    ' CLI can trigger any more. WriteDohSnapshot and ShouldSnapshotDohPolicy stay: the ARM
+    ' path still takes the snapshot the service later restores from.
 End Module

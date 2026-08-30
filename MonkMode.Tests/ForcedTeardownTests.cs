@@ -16,7 +16,33 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// MonkMode.Tests - F70: THE ESCAPE HATCH MUST NOT LEAVE AN ARMED CONFIG BEHIND.
+// MonkMode.Tests - LEDGER 319 (30/08/2026): THE ESCAPE HATCH IS GONE; ITS ONE SURVIVING
+// WRITER IS PINNED HERE, PLUS THE PROOF THAT `--force` IS NO LONGER A FLAG.
+//
+// `monkmode unblock --force` was an unconditional teardown: SCM recovery disabled, the watchdog
+// pair killed, the deny-DELETE ACE removed, the service DELETED, hosts stripped, the snapshot,
+// the config backup, the SafeBoot keys, the DoH policy and the notifier autorun all removed, and
+// the armed config finally zeroed. It ended any block, at any time, with no partner code. On
+// 30/08/2026 Samrath asked for it to go ("i dont like how i can force unblock it regardless ...
+// i should only be able to unblock with code"), so the verb, the branch and every primitive that
+// existed only to serve it were deleted - Blocker.KillWatchdogProcesses, RestoreHostsFromStrip,
+// RemoveSafeBootKeys, DeleteBackup, RemoveDohPolicy, ClearNotifierAutorun, ServiceTools'
+// DisableRecovery / RestoreDefaultServiceSd / DeleteServiceByName (and the DeleteService P/Invoke
+// with them), and Program's Step_ / RunSdRestoreThenDelete. Most of that is proved by the fact
+// that this file still compiles: a test naming any of them would not.
+//
+// TWO THINGS ARE STILL TESTABLE AND STILL MATTER:
+//   1. `--force` and `--cancel` are not merely ignored - they are UNKNOWN options, so the CLI
+//      says the flag does not exist rather than silently doing nothing (UnblockOptionSurfaceTests
+//      at the foot of this file). A silent no-op would be the dangerous shape: a user could
+//      believe a block was coming down.
+//   2. Blocker.PersistZeroSlotConfig - the writer that produced the "nothing is armed" config -
+//      survives as an assembly-internal seam with NO caller in the shipped CLI (its Public
+//      entry point went with DoUnblock). It is kept, and pinned, because it is the CLI-side
+//      statement of the shape a torn-down config must have, and because its live-block REFUSAL
+//      is the property that stops a config-zeroing writer ever becoming a one-call teardown.
+//
+// The original F70 narrative, kept because it is why the writer exists at all:
 //
 // WHAT SMOKE B FOUND (20/08/2026, logs\2026-08-20-smoke-b.md §3). `monkmode unblock --force`
 // removed the enforcement - watchdog pair killed, service DELETED, hosts stripped, snapshot and
@@ -223,9 +249,8 @@ public class ForcedTeardownTests
     [Fact]
     public void ForcedTeardown_WithNoConfigAtAll_IsANoOp()
     {
-        // A teardown run on a machine that never had a config (or whose config a previous forced
-        // teardown already removed) must not throw - DoUnblock's Step_ would report it as a
-        // "skipped" failure - and must not CREATE an ini where there was none.
+        // Run against a machine that never had a config: must not throw, and must not CREATE an
+        // ini where there was none.
         Wipe();
         try
         {
@@ -270,8 +295,10 @@ public class ForcedTeardownTests
         // PersistZeroSlotConfig cleared a config a RUNNING service was enforcing from, it would
         // BE a one-call teardown - the next tick reads zero slots, classifies TeardownAll and
         // lifts every block. So the live-block answer is a parameter of the writer, and this is
-        // the arm that must change nothing. (The seam is what keeps the SCM out of the tests;
-        // on the real path DoUnblock has already deleted the service before it calls this.)
+        // the arm that must change nothing. Ledger 319 made this the LOAD-BEARING test of the
+        // pair: with DoUnblock's teardown gone there is no caller left to pass True, and this
+        // refusal is the only thing standing between a surviving config-zeroing writer and a
+        // code-free lift if one were ever wired up again.
         Wipe();
         try
         {
@@ -291,5 +318,57 @@ public class ForcedTeardownTests
             Assert.True(MacValid());                                        // and it was not re-stamped over
         }
         finally { Wipe(); }
+    }
+}
+// ---- LEDGER 319: `unblock`'s option surface, which is now the whole exit surface ----
+//
+// DoUnblock is Private (like every CLI verb body), so what is drivable from a unit test is the
+// list it validates against and the shared typo detector it feeds. That is enough to pin the
+// property that matters: `--force` and `--cancel` are ABSENT from the accepted set, so they land
+// in UnknownOptions and the CLI reports them as options that do not exist. They were deliberately
+// NOT kept as accepted-and-ignored flags - a flag that used to tear a block down and now silently
+// succeeds is the worst of both worlds.
+public class UnblockOptionSurfaceTests
+{
+    [Fact]
+    public void UnblockAccepts_OnlyIdAndCode()
+    {
+        Assert.Equal(new[] { "--id", "--code" }, MonkMode.Program.UnblockOptionNames());
+    }
+
+    [Theory]
+    [InlineData("--force")]
+    [InlineData("--FORCE")]
+    [InlineData("--cancel")]
+    [InlineData("--force=yes")]
+    public void TheRetiredFlags_AreReportedAsUnknown_NotSilentlyIgnored(string flag)
+    {
+        var unknown = MonkMode.Program.UnknownOptions(new[] { "unblock", flag },
+                                                      MonkMode.Program.UnblockOptionNames());
+        Assert.Single(unknown);
+        // A "--flag=value" form is reported by its head, so the user sees the flag they typed.
+        Assert.Equal(flag.Split('=')[0], unknown[0]);
+    }
+
+    [Fact]
+    public void TheTwoRealFlags_AreNotReportedAsUnknown()
+    {
+        Assert.Empty(MonkMode.Program.UnknownOptions(new[] { "unblock", "--id", "2", "--code", "ABCD-EFGH" },
+                                                     MonkMode.Program.UnblockOptionNames()));
+    }
+
+    [Fact]
+    public void BlockStillAccepts_TheInertCommitAndCoolOffFlags()
+    {
+        // The other half of the compatibility decision. `--commit` and `--cooloff` no longer DO
+        // anything (every block is committed; there is no cooling-off), but they are still
+        // ACCEPTED, so an old script or a habit-typed invocation keeps working and draws no
+        // "unknown flag" warning. Only the flags that used to END a block were made unknown.
+        Assert.Contains("--commit", MonkMode.Program.BlockOptionNames());
+        Assert.Contains("--cooloff", MonkMode.Program.BlockOptionNames());
+        Assert.Empty(MonkMode.Program.UnknownOptions(new[] { "block", "--commit", "--cooloff", "2h" },
+                                                     MonkMode.Program.BlockOptionNames()));
+        // ...and `--force` is not smuggled in through the `block` list either.
+        Assert.DoesNotContain("--force", MonkMode.Program.BlockOptionNames());
     }
 }

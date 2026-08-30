@@ -482,121 +482,30 @@ Public Class Service1
         End Try
     End Sub
 
-    ' C2b live wiring: the per-tick cooling-off request/cancel poll. Runs INSIDE
-    ' tickLock and only while TimeChanging="no" (the caller gates both), so a
-    ' request/cancel can never race the heartbeat's read-modify-write or
-    ' interleave with a clock-change. currentCoolOffUntil/highWaterText/macValid
-    ' are this tick's already-loaded state; returns the EFFECTIVE decrypted
-    ' CoolOffUntil after any transition so the SAME tick's heartbeat decides off
-    ' the post-signal state - that ordering is what makes "cancel wins" hold in
-    ' the cancel-vs-elapse race (a cancel processed here clears the deadline
-    ' before the heartbeat ever sees it; tickLock serialises the two).
+    ' ---- LEDGER 319 (30/08/2026): THE COOLING-OFF CHANNEL IS DELETED ----
     '
-    ' Consume-after-persist (crash-safe): on Start the ini (with the new
-    ' deadline) is SAVED before the request trigger is deleted - a crash between
-    ' the two leaves the trigger, and the next tick classifies it Ignore
-    ' (already pending) and just deletes it: no lost request, no double-set. On
-    ' Cancel the cleared ini is saved before BOTH triggers are deleted (a torn
-    ' cancel leaves the deadline standing - cooling-off continues, the user
-    ' re-cancels; never an early lift). Both write paths re-validate the MAC on
-    ' the RELOADED object before touching it (the heartbeat's #4 TOCTOU rule:
-    ' never re-stamp bytes you didn't just verify) and re-stamp with the
-    ' EXISTING key - this modifies an existing block; only the CLI mints keys.
-    ' Every successful write refreshes the C1b shadow backup so a later
-    ' corrupt-then-restore carries the cooling-off state. Best-effort throughout;
-    ' a throw never crashes the tick (the tick continues off the returned state).
-    ' v1.1 S3b: the poll is now SLOT-ADDRESSED (P40). It walks the trigger names this tick
-    ' selected, groups them by the slot id they address, and runs the UNCHANGED pure
-    ' ClassifyCoolOffSignal matrix once per addressed slot - so slot A's request sets slot
-    ' A's own deadline and slot B is not touched. That is what kills the S2 under-block:
-    ' arming a second block while a cooling-off was pending used to subject the NEW block to
-    ' the OLD machine-wide deadline, so `arm 30d; unblock; arm 30d` lifted BOTH at ~1h.
-    ' There is no machine-wide deadline left to inherit.
+    ' What stood here was C2b's per-tick cooling-off poll - ProcessCoolOffSignals and its
+    ' testable core ProcessCoolOffSignalsAt - which read a monkmode_cooloff.request.<id>
+    ' trigger, computed a floor-clamped deadline off the trusted HighWater and wrote it to
+    ' that slot's MAC-covered CoolOffUntil. When the deadline elapsed the block LIFTED, with
+    ' no code and nobody's permission. That was the second of the two no-code exits Samrath
+    ' asked to be rid of on 30/08/2026 ("i should only be able to unblock with code"); the
+    ' first, `unblock --force`, is gone from the CLI in the same slice.
     '
-    ' An unknown/retired/garbage id deletes the trigger and changes nothing (P40) - a
-    ' routing hint carries zero authority, and freezing on junk would hand anyone a wedge.
-    ' The write goes through PersistSlotField (P36, the ONE per-slot writer), which reloads,
-    ' re-validates the MAC (never re-stamp bytes you did not just verify - the B7 rule) and
-    ' RE-LOCATES the slot by Id, so a retire landing between this tick's read and the write
-    ' cannot make it land in another block's section. Consume-after-persist is preserved: the
-    ' trigger is deleted only after a successful write, so a crash between them leaves the
-    ' trigger and the next tick classifies it Ignore (already pending) and just deletes it.
-    ' In-memory SlotState is updated on success so THIS tick's retire pass decides off the
-    ' post-signal state. Best-effort throughout; never throws (it runs inside the tick).
-    Private Sub ProcessCoolOffSignals(ByVal slots As List(Of SlotState), ByVal highWaterText As String, ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
-        ProcessCoolOffSignalsAt(Application.StartupPath, Application.StartupPath + "\monkmode_settings.ini",
-                                slots, highWaterText, macValid, triggerNames)
-    End Sub
-
-    ' The testable core with the state directory and config path made explicit (the
-    ' PersistSlotFieldAt / ProcessAddToHosts pattern), so unit tests drive the REAL channel
-    ' against test-owned files and never the deployed state zone.
-    Friend Sub ProcessCoolOffSignalsAt(ByVal stateDir As String, ByVal iniPath As String, ByVal slots As List(Of SlotState), ByVal highWaterText As String, ByVal macValid As Boolean, ByVal triggerNames As List(Of String))
-        Try
-            If slots Is Nothing OrElse triggerNames Is Nothing OrElse triggerNames.Count = 0 Then Return
-            ' Group first: ClassifyCoolOffSignal decides on request AND cancel together
-            ' ("cancel wins" is only expressible if both are seen at once), so a per-file
-            ' loop would let a cancel lose to a request that happened to sort first.
-            Dim requested As New HashSet(Of String)(StringComparer.Ordinal)
-            Dim cancelled As New HashSet(Of String)(StringComparer.Ordinal)
-            Dim addressed As New List(Of String)
-            For Each name As String In triggerNames
-                Dim id As String = TriggerIdFromName(name, CoolOffRequestPrefix)
-                If id <> "" Then
-                    If requested.Add(id) AndAlso Not cancelled.Contains(id) Then addressed.Add(id)
-                    Continue For
-                End If
-                id = TriggerIdFromName(name, CoolOffCancelPrefix)
-                If id <> "" Then
-                    If cancelled.Add(id) AndAlso Not requested.Contains(id) Then addressed.Add(id)
-                End If
-            Next
-            For Each id As String In addressed
-                Dim requestPath As String = System.IO.Path.Combine(stateDir, CoolOffRequestPrefix + id)
-                Dim cancelPath As String = System.IO.Path.Combine(stateDir, CoolOffCancelPrefix + id)
-                Dim slot As SlotState = FindSlotById(slots, id)
-                If slot Is Nothing Then
-                    ' P40: unknown / retired / garbage id. Delete both, change NOTHING, do
-                    ' not freeze - the id never had authority, only routing.
-                    DeleteTriggerFile(requestPath)
-                    DeleteTriggerFile(cancelPath)
-                    Continue For
-                End If
-                Select Case ClassifyCoolOffSignal(requested.Contains(id), cancelled.Contains(id),
-                                                  slot.CoolOffUntil <> "", IsCommitted(slot.Committed), macValid)
-                    Case CoolOffAction.Start
-                        ' The service is the SOLE deadline writer: this slot's trusted
-                        ' HighWater at the request + max(its OWN configured duration, the
-                        ' compile-time floor). The floor clamp means a configured 0 can only
-                        ' ever EXTEND the wait. An uncomputable deadline (unparseable mark)
-                        ' writes nothing and leaves the trigger for the next tick.
-                        Dim deadline As String = ComputeCoolOffDeadline(highWaterText,
-                                                                        ParseConfiguredCoolOffSeconds(slot.CoolOffDuration, MinCoolOffFloorSeconds),
-                                                                        MinCoolOffFloorSeconds)
-                        If deadline = "" Then Continue For
-                        If PersistSlotFieldAt(iniPath, slot.Id, "CoolOffUntil", deadline, True) Then
-                            slot.CoolOffUntil = deadline
-                            DeleteTriggerFile(requestPath)
-                        End If
-                    Case CoolOffAction.Cancel
-                        ' A torn cancel leaves the deadline standing - cooling-off continues
-                        ' and the user re-cancels. Never an early lift.
-                        If PersistSlotFieldAt(iniPath, slot.Id, "CoolOffUntil", "", True) Then
-                            slot.CoolOffUntil = ""
-                            DeleteTriggerFile(requestPath)
-                            DeleteTriggerFile(cancelPath)
-                        End If
-                    Case Else
-                        ' Ignore: no write. Delete the stale triggers (a request while one is
-                        ' already pending, a consumed request whose delete crashed, a trigger
-                        ' against a frozen config) so they don't re-classify forever.
-                        DeleteTriggerFile(requestPath)
-                        DeleteTriggerFile(cancelPath)
-                End Select
-            Next
-        Catch ex As Exception
-        End Try
-    End Sub
+    ' Deleted with it: ClassifyCoolOffSignal (the request/cancel matrix), the CoolOffAction
+    ' enum, ComputeCoolOffDeadline, ParseConfiguredCoolOffSeconds and MinCoolOffFloorSeconds.
+    ' There is now NO writer for any slot's CoolOffUntil anywhere in the four assemblies.
+    '
+    ' What deliberately REMAINS, and why:
+    '   * the CoolOffUntil / CoolOffDuration fields in the v12 canonical, and the four
+    '     CanonicalFromIni wrappers that feed them. Removing a MAC-covered field means a
+    '     schema bump and a four-copy parity edit, and v12 (F77) is about to deploy - so the
+    '     fields stay, written empty by the CLI, and mean nothing.
+    '   * CoolOffElapsedTime, hard-wired to False in both its copies (see its own comment).
+    '     It is still called from EffectiveExit, so even a config carrying a forged, elapsed
+    '     CoolOffUntil cannot lift: the reader ignores the value rather than trusting it.
+    '   * CoolOffRequestPrefix / CoolOffCancelPrefix, so the enumeration glob still finds a
+    '     stale trigger from an older dist and PurgeUnaddressedTriggers can delete it.
 
     ' The slot carrying this id, or Nothing. Ordinal Id comparison, matching
     ' FindSlotPositionById's - the two must agree or a trigger could route to a slot the
@@ -651,10 +560,17 @@ Public Class Service1
     End Function
 
     ' Does this enumerated name address ANY trigger family? Pure + Shared.
+    '
+    ' Ledger 319: the two COOLING-OFF prefixes were REMOVED from this list. That is the whole
+    ' mechanism by which a stray monkmode_cooloff.request.<id> / .cancel.<id> is now disposed
+    ' of: it still matches the enumeration glob (EnumerateTriggerFilesIn keeps both patterns on
+    ' purpose), it now addresses no family, and PurgeUnaddressedTriggers therefore deletes it
+    ' before either poller runs. Nothing reads it, so it cannot start a wait; and it is not left
+    ' on disk to squat the per-tick budget for ever, which is the failure PurgeUnaddressedTriggers
+    ' was written for. Adding these prefixes back would resurrect nothing (there is no cooling-off
+    ' reader any more) but WOULD strand the files - do not.
     Friend Shared Function TriggerAddressesAnyFamily(ByVal fileName As String) As Boolean
-        Return TriggerIdFromName(fileName, CoolOffRequestPrefix) <> "" OrElse
-               TriggerIdFromName(fileName, CoolOffCancelPrefix) <> "" OrElse
-               TriggerIdFromName(fileName, PartnerCodePrefix) <> "" OrElse
+        Return TriggerIdFromName(fileName, PartnerCodePrefix) <> "" OrElse
                TriggerIdFromName(fileName, AddRequestPrefix) <> ""
     End Function
 
@@ -870,7 +786,7 @@ Public Class Service1
     End Function
 
     ' C5b (b2) live wiring: the per-tick schedule window step - the sibling of
-    ' ProcessCoolOffSignals/ProcessPartnerCodeSignal, polled AFTER them (inside tickLock
+    ' ProcessPartnerCodeSignal, polled AFTER it (inside tickLock
     ' while TimeChanging="no", the caller gates both), returning the post-step [Schedule]
     ' ActiveUntil so THIS tick's heartbeat (its SD1 schedule-hold arm) decides off it. This
     ' is the FIRST code that ever WRITES a non-empty ActiveUntil: it runs the window->
@@ -890,7 +806,7 @@ Public Class Service1
     ' tick's load and the persist below (issue #2). Persist ONLY on change, via
     ' PersistScheduleActiveUntil (RELOAD + TOCTOU re-validate + Spec-unchanged re-check
     ' against THIS tick's snapshot spec + re-stamp with the existing key + Save + refresh the
-    ' C1b backup) - the ProcessCoolOffSignals discipline; a changed Spec aborts the write and
+    ' C1b backup) - the ProcessPartnerCodeSignal discipline; a changed Spec aborts the write and
     ' the next tick re-evaluates off the fresh Spec (ScheduleSpecUnchangedSinceSnapshot).
     ' Best-effort throughout; a throw never crashes the tick (it continues off
     ' the returned value). No CLI writes a Spec until sub-slice (c), so in production this
@@ -921,7 +837,7 @@ Public Class Service1
         End Try
     End Function
 
-    ' Persist [Schedule] ActiveUntil = newValue ("" clears it), the ProcessCoolOffSignals
+    ' Persist [Schedule] ActiveUntil = newValue ("" clears it), the ProcessPartnerCodeSignal
     ' write discipline: RELOAD the ini, TOCTOU re-validate its MAC (only re-stamp bytes just
     ' re-verified - never re-bless a swap in the read->reload window), re-check the [Schedule]
     ' Spec is still the one newValue was DERIVED from (issue #2: the CLI clearing/re-arming the
@@ -1980,14 +1896,14 @@ Public Class Service1
             Dim triggerNames As List(Of String) = EnumerateTriggerFiles()
             ' Clear anything the glob picked up that addresses no slot at all (legacy
             ' unsuffixed names), or it occupies the per-tick budget for ever.
+            ' Ledger 319: PurgeUnaddressedTriggers is now what handles a cooling-off trigger.
+            ' ProcessCoolOffSignals is DELETED, and CoolOffRequestPrefix/CoolOffCancelPrefix
+            ' were dropped from TriggerAddressesAnyFamily, so a monkmode_cooloff.request.<id>
+            ' left by an older dist resolves to NO family and is deleted here, unread. It can
+            ' never start a wait, and it cannot squat the P41 budget either.
             PurgeUnaddressedTriggers(Application.StartupPath, triggerNames)
-            ProcessCoolOffSignals(slots, newHw, macValid, triggerNames)
-            ' C3b: poll the partner-code trigger AFTER cooling-off (still inside
-            ' tickLock + the TimeChanging="no" guard). Running it after ProcessCoolOff-
-            ' Signals is what makes a valid code beat a same-tick --cancel: UnlockedAt
-            ' is never cleared by cancel, so a correct code lifts even if a cooling-off
-            ' cancel landed the same tick (a partner-authorised exit is authoritative
-            ' over the user's own change-of-mind about the slow path). Returns the
+            ' C3b: poll the partner-code trigger - since ledger 319 the ONLY exit channel
+            ' there is (still inside tickLock + the TimeChanging="no" guard). Returns the
             ' post-verify UnlockedAt so THIS tick's heartbeat decides off it.
             ProcessPartnerCodeSignal(slots, macValid, triggerNames)
             ' P42 (v1.1 S5): apply any `add` requests AFTER both exit families, so a tick that
@@ -2409,8 +2325,9 @@ Public Class Service1
                     ' macValid=False: a tampered or unstamped (WriteDefaultBlock) config.
                     ' Fail CLOSED - do NOT re-stamp (that would re-bless the tamper and
                     ' let it lift next tick: the B7 bypass), do NOT retire any slot and do
-                    ' NOT tear down. Frozen until re-armed from the CLI / removed via
-                    ' unblock --force.
+                    ' NOT tear down. Frozen until re-armed from the CLI. Ledger 319 removed
+                    ' `unblock --force`, so there is no in-band recovery from this state at
+                    ' all any more - not even the partner code, which needs a valid MAC.
             End Select
         End If
         Finally
@@ -2439,8 +2356,8 @@ Public Class Service1
     ' (`taskkill /f` is the documented B1 move, and it skips the AppDomain backstop that
     ' would have lowered the flag) and the raise is ORPHANED: the flag is outside the
     ' canonical so nothing detects it, it survives a reboot, and every intended exit -
-    ' natural expiry, cooling-off, partner code - is gated off FOR EVER. `unblock --force`
-    ' becomes the only way out of a block that has genuinely finished. Reachable
+    ' natural expiry and partner code - is gated off FOR EVER, and since ledger 319 there is
+    ' no escape hatch left behind it: nothing gets a genuinely finished block out. Reachable
     ' NON-elevated: changing the time zone is a default user right and broadcasts
     ' WM_TIMECHANGE. The same wedge follows from a config that simply has no [Time]
     ' TimeChanging key at all, since the gate tests for the literal "no".
@@ -2664,91 +2581,37 @@ Public Class Service1
     ' the content-bearing `partner.code.<id>` and `add.request.<id>` channels are capped by
     ' one constant instead of two that could drift.
 
-    ' The compile-time FLOOR: the shortest cooling-off the service will ever
-    ' grant, in seconds - THE one new C2b security parameter, pinned by a unit
-    ' test exactly like HighWaterJumpCeilingSeconds. Load-bearing because the
-    ' C6b configured duration ([CoolOff] Duration) is a CLI-written MAC-covered
-    ' field, so an attacker running the CLI could set it to 0 under a valid MAC;
-    ' the service clamps to this floor via max(configured, floor), and the floor
-    ' is compile-time - not attacker-settable. A configured duration can only ever
-    ' EXTEND the wait, never shorten below this floor. D1: 1 hour (recommended
-    ' default; 15 min = light, 3 h = strict).
-    Friend Const MinCoolOffFloorSeconds As Long = 3600
+    ' Ledger 319: MinCoolOffFloorSeconds, ComputeCoolOffDeadline and
+    ' ParseConfiguredCoolOffSeconds are DELETED. Between them they turned a request trigger
+    ' into a deadline; with no request channel and no writer there is no deadline to compute,
+    ' and a compile-time "shortest wait we will grant" describes a wait that no longer exists.
 
-    ' Has the pending cooling-off deadline been reached? coolOffUntilText is the
-    ' decrypted [Time] CoolOffUntil ("" = none pending); highWaterText is the
-    ' trusted B4 mark the deadline is measured against - NEVER DateTime.Now, so a
-    ' clock-forward can't reach the deadline early (HighWater refuses the jump)
-    ' and a reboot pauses the countdown (downtime is never credited). Fail-closed
-    ' on every axis: empty (none pending) and any unparseable input read as NOT
-    ' elapsed - a corrupted deadline or mark can only ever hold the block, never
-    ' lift it. The caller folds macValid, exactly as expiry does (mirrors
-    ' EffectiveBlockHasExpired's split). Pure + Shared so it is unit tested;
-    ' byte-for-byte the same semantics as the guardian copy (parity-pinned).
+    ' THE COOLING-OFF LIFT ARM, PERMANENTLY DISARMED (ledger 319, 30/08/2026).
+    '
+    ' This used to answer "has the pending cooling-off deadline been reached?" from the stored
+    ' CoolOffUntil against the trusted B4 mark, and a True here LIFTED the block through
+    ' EffectiveExit / ClassifyHeartbeat. Cooling-off was removed as an exit, so the honest
+    ' answer is now always NO - and it is returned WITHOUT LOOKING at either argument.
+    '
+    ' Why this shape rather than deleting the function and its parameter:
+    '   * it is the single choke point. Both callers (EffectiveExit here, and the guardian's
+    '     byte-identical copy) get their cool-off term from this one function, so hard-wiring
+    '     it False is what makes a forged, already-elapsed CoolOffUntil in a MAC-valid config
+    '     unable to lift anything. The value is not merely unwritten - it is unread.
+    '   * removing the parameter would mean re-shaping EffectiveExit / ClassifyHeartbeat /
+    '     ClassifySlot across two assemblies and ~130 positional call sites in the test suite.
+    '     Positional booleans shifted by hand is exactly how a lift gate gets silently
+    '     inverted, and the safety gained over "always False" is zero.
+    ' Parity: the guardian's copy carries the same body and the same comment. Pure + Shared.
+    ' Pinned by CoolOffTests (an elapsed deadline never lifts, through the real gates).
     Friend Shared Function CoolOffElapsedTime(ByVal coolOffUntilText As String, ByVal highWaterText As String) As Boolean
-        If coolOffUntilText = "" Then Return False
-        Dim ca As New CultureInfo("en-CA")
-        Dim coolOffUntil As DateTime, highWater As DateTime
-        If Not DateTime.TryParse(coolOffUntilText, ca, DateTimeStyles.None, coolOffUntil) Then Return False
-        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
-        Return coolOffUntil <= highWater
+        Return False
     End Function
 
-    ' The deadline the service (the SOLE writer) persists on a Start: the trusted
-    ' HighWater at the request plus max(configured duration, floor). The deadline
-    ' therefore lives in the HighWater frame - reached only after that much
-    ' genuine ON-machine elapsed time - and can never be shorter than the
-    ' compile-time floor even if the C6b configured duration says 0.
-    ' Returns "" when the stored HighWater doesn't parse (fail-closed: no
-    ' deadline computable => no write; the trigger stays for the next tick).
-    ' Pure + Shared so it is unit tested.
-    Friend Shared Function ComputeCoolOffDeadline(ByVal highWaterText As String, ByVal configuredDurationSeconds As Long, ByVal floorSeconds As Long) As String
-        Dim ca As New CultureInfo("en-CA")
-        Dim highWater As DateTime
-        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return ""
-        Return highWater.AddSeconds(Math.Max(configuredDurationSeconds, floorSeconds)).ToString(ca)
-    End Function
-
-    ' C6b: interpret the CLI-configured [CoolOff] Duration field (plaintext seconds,
-    ' MAC-covered) into a duration in seconds. A usable positive value is returned as
-    ' is (ComputeCoolOffDeadline then clamps it up to the floor if it is below);
-    ' absent/blank/unparseable/non-positive => the floor, so an unset or garbage field
-    ' simply yields the default floor wait. Under a valid MAC this value is authentic
-    ' (the CLI wrote it at arm and it never changes); a raw edit to shorten it fails
-    ' the MAC -> the block freezes, and even absent the freeze the floor clamp in
-    ' ComputeCoolOffDeadline means it can only ever EXTEND the wait. Pure + Shared so
-    ' it is unit tested (the caller reads the raw [CoolOff] Duration off a MAC-validated
-    ' ini and passes it here).
-    Friend Shared Function ParseConfiguredCoolOffSeconds(ByVal rawDuration As String, ByVal floorSeconds As Long) As Long
-        Dim seconds As Long
-        If Long.TryParse(If(rawDuration, "").Trim(), seconds) AndAlso seconds > 0 Then Return seconds
-        Return floorSeconds
-    End Function
-
-    ' What the per-tick trigger poll should do.
-    Friend Enum CoolOffAction
-        Start    ' write the service-computed CoolOffUntil, consume the request
-        Cancel   ' clear CoolOffUntil (back into the block), consume both triggers
-        Ignore   ' no ini write; delete any stale trigger
-    End Enum
-
-    ' The pure trigger classifier (the R2 processing matrix + the C4 seam):
-    '   * macValid REQUIRED to act: never modify/re-stamp an unverified config
-    '     (mirrors the `add` fail-open fix) - a frozen config ignores triggers.
-    '   * cancel WINS when both files are present: the safe outcome is "stay
-    '     blocked".
-    '   * Start only when nothing is pending: CoolOffUntil is IMMUTABLE once set
-    '     (except by cancel), so a replayed/re-dropped request can never reset or
-    '     extend a running deadline.
-    '   * committed (C4, future): a committed block ignores cooling-off requests
-    '     (code-only exit). C2b callers pass False until C4 wires the flag.
-    ' Pure + Shared so the full matrix is unit tested.
-    Friend Shared Function ClassifyCoolOffSignal(ByVal requestPresent As Boolean, ByVal cancelPresent As Boolean, ByVal coolOffPending As Boolean, ByVal committed As Boolean, ByVal macValid As Boolean) As CoolOffAction
-        If Not macValid Then Return CoolOffAction.Ignore
-        If cancelPresent Then Return CoolOffAction.Cancel
-        If requestPresent AndAlso Not committed AndAlso Not coolOffPending Then Return CoolOffAction.Start
-        Return CoolOffAction.Ignore
-    End Function
+    ' Ledger 319: the CoolOffAction enum and ClassifyCoolOffSignal (the request/cancel/commit/
+    ' macValid matrix) are DELETED with the poll that consumed them. There is no trigger left
+    ' to classify - a stale cooling-off file is unaddressed junk that PurgeUnaddressedTriggers
+    ' deletes unread.
 
     ' C4: interpret the [Commit] Committed flag. "yes" (case-insensitive, trimmed) =
     ' committed; "no"/absent/Nothing/anything else = not committed. The flag is
@@ -2828,15 +2691,15 @@ Public Class Service1
     ' The pure partner-code trigger classifier (the R2/R6 processing matrix):
     '   * macValid REQUIRED to even attempt a verify (R6): a frozen/untrusted config
     '     never verifies against a hash it can't trust - it ignores the channel
-    '     (mirrors ClassifyCoolOffSignal + the `add` fail-open fix).
+    '     (mirrors the `add` fail-open fix; ledger 319 deleted the cooling-off sibling).
     '   * alreadyUnlocked (UnlockedAt already set) => Ignore: the block is ending,
     '     nothing to re-verify (this is also what makes consume-after-persist
     '     crash-safe: a crash between the UnlockedAt write and the trigger delete
     '     re-classifies here as Ignore and just deletes the stale trigger).
     '   * a present trigger with a non-blank candidate => Verify; otherwise Ignore
     '     (no/blank candidate = a no-op that just deletes the stale trigger).
-    '   * deliberately does NOT read `committed` (contrast ClassifyCoolOffSignal): a
-    '     committed block (C4) keeps the partner code as its ONE intended exit.
+    '   * deliberately does NOT read `committed`: since ledger 319 every block is committed
+    '     and the partner code is its ONE intended exit, so the flag decides nothing here.
     '   * Verify != lift - only a MATCH inside the Verify branch sets UnlockedAt.
     ' Pure + Shared so the full matrix is unit tested.
     Friend Shared Function ClassifyPartnerCodeSignal(ByVal codePresent As Boolean, ByVal candidateNonEmpty As Boolean, ByVal alreadyUnlocked As Boolean, ByVal macValid As Boolean) As PartnerCodeAction
@@ -2968,7 +2831,7 @@ Public Class Service1
     ' therefore lives in the HighWater frame - reached only after that much genuine
     ' ON-machine elapsed time - so it can never be clock-skipped. Returns "" when the
     ' stored HighWater doesn't parse (fail-closed: no deadline computable => no write;
-    ' retry next tick). The schedule sibling of ComputeCoolOffDeadline. Pure + Shared.
+    ' retry next tick). Same frame + fail-closed shape as ActivationUntil. Pure + Shared.
     ' remainingSeconds is produced by EvaluateWindows (always > 0 for an open window); a
     ' non-positive value would yield a deadline <= HighWater (immediately elapsed), but
     ' EvaluateWindows never emits one for an open window.
@@ -3014,8 +2877,8 @@ Public Class Service1
     '     window (its ActiveUntil runs to close).
     '   * STEADY: otherwise return current unchanged (no write).
     ' Pure + Shared (no DPAPI/filesystem) so the whole open/extend/clear/steady decision is
-    ' unit- and e2e-testable through the real gates - exactly as ClassifyCoolOffSignal
-    ' relates to ProcessCoolOffSignals. Fail-closed throughout: an unparseable HighWater
+    ' unit- and e2e-testable through the real gates - exactly as ClassifyPartnerCodeSignal
+    ' relates to ProcessPartnerCodeSignal. Fail-closed throughout: an unparseable HighWater
     ' yields "" ends (no extend) and ScheduleElapsed=False (no clear) => the window holds
     ' and the tick retries; the extend branch out-ranks clear (an open later window wins).
     Friend Shared Function NextScheduleActiveUntil(ByVal currentActiveUntil As String, ByVal openNow As List(Of ScheduleOpen), ByVal highWaterText As String) As String
@@ -3050,7 +2913,7 @@ Public Class Service1
     ' gate - safe, because the derived ActiveUntil depends only on the Spec CONTENT, which is
     ' once again the armed content. Nothing/absent normalise to "" (IniFile.GetKeyValue returns
     ' String.Empty for a missing key). Pure + Shared so the decision is unit-tested; the file-I/O
-    ' wrapper stays smoke-only (the ClassifyCoolOffSignal/ProcessCoolOffSignals discipline).
+    ' wrapper stays smoke-only (the ClassifyPartnerCodeSignal/ProcessPartnerCodeSignal discipline).
     Friend Shared Function ScheduleSpecUnchangedSinceSnapshot(ByVal snapshotSpec As String, ByVal reloadedSpec As String) As Boolean
         Return String.Equals(If(snapshotSpec, ""), If(reloadedSpec, ""), StringComparison.Ordinal)
     End Function
@@ -3430,8 +3293,8 @@ Public Class Service1
     End Function
 
     ' The Until an activation persists: HighWater_now + DurationSeconds, in the SHAPE of
-    ' ComputeCoolOffDeadline (same frame, same fail-closed "" on an unparseable mark) so the
-    ' two service-computed deadlines are derived identically. "" means "no deadline
+    ' ScheduleActiveUntil (same frame, same fail-closed "" on an unparseable mark) so the
+    ' service-computed deadlines are derived identically. "" means "no deadline
     ' computable" => write NOTHING => the slot stays PENDING and is retried next tick, which
     ' over-blocks (a pending slot's sites are already enforced) and never lifts. Pure +
     ' Shared.
@@ -3679,7 +3542,7 @@ Public Class Service1
     ' Leaves, so a frozen/tampered config's snapshot is never deleted. Pure + Shared (the full
     ' matrix is unit-tested; ProcessScheduleSnapshot is the thin file-I/O wrapper around it,
     ' exactly as ClassifyScheduleSnapshot relates to ProcessScheduleSnapshot mirrors
-    ' ClassifyCoolOffSignal/ProcessCoolOffSignals).
+    ' ClassifyPartnerCodeSignal/ProcessPartnerCodeSignal).
     Friend Shared Function ClassifyScheduleSnapshot(ByVal scheduleActive As Boolean, ByVal manualHold As Boolean, ByVal hasScheduleSites As Boolean, ByVal snapshotExists As Boolean) As ScheduleSnapshotAction
         ' A manual hold OWNS the snapshot (the CLI wrote it): never overwrite it with the
         ' schedule union, never delete it. Also the fail-closed catch-all (macValid=False =>
@@ -5083,8 +4946,9 @@ Public Class Service1
     ' FAIL-CLOSED ON FAILURE: the attribute is cleared only AFTER the strip has been written.
     ' If the write throws, hosts still carries the block, so it is re-locked (best-effort) and
     ' the exception is rethrown exactly as before - a still-blocked, WRITABLE hosts is the one
-    ' state this must never leave behind. The no-marker branch is untouched (there is nothing of
-    ' ours to strip, so today's re-assert stands).
+    ' state this must never leave behind. Ledger 319 finished the job on the NO-MARKER branch:
+    ' it used to re-assert read-only, which left an unblocked machine with a permanently
+    ' read-only hosts file. Both exit branches now end vbNormal.
     '
     ' Returns True when the marker block was found and stripped - the caller then marks the
     ' config Done, exactly as before.
@@ -5125,7 +4989,14 @@ Public Class Service1
             Return True
         End If
 
-        SetAttr(hostsPath, vbReadOnly)
+        ' F78 residual (ledger 319 rider): vbNormal, NOT vbReadOnly. This is the no-marker
+        ' branch of the EXPIRY strip - the block is ending and there is nothing of ours in
+        ' hosts to remove. Re-asserting read-only here left a machine with no block holding a
+        ' read-only hosts file for ever (nothing ever clears it again), which is the same
+        ' leftover 313(b) removed from the stripped branch. Leaving hosts an ordinary file is
+        ' the correct end state on BOTH exit branches. The failed-strip branch above still
+        ' re-locks and rethrows: there, the block is still enforced and must stay that way.
+        SetAttr(hostsPath, vbNormal)
         Return False
     End Function
 
@@ -5221,9 +5092,10 @@ Public Class Service1
         ' BEFORE Me.Stop()/End below, so no live guardian (or another tick of
         ' this service) can re-assert the deny in the gap between removing it and
         ' the process exiting. Best-effort; if it somehow fails, the service is
-        ' still removable via `monkmode unblock --force` (which restores the SD
-        ' itself). Without this, an expired block would leave a service that
-        ' resists sc-delete until the next install rewrote the DACL.
+        ' left DELETE-denied until the next install rewrites the DACL - ledger 319 removed
+        ' the CLI's `RestoreDefaultServiceSd`, so this call is now the ONLY thing that
+        ' re-grants DELETE. Without it, an expired block leaves a service that resists
+        ' sc-delete indefinitely.
         Try
             RestoreDefaultServiceSd()
         Catch ex As Exception

@@ -28,13 +28,14 @@
 //   - P32's TABLE, BY LITERAL. The layout is a fixed-width contract, and the exit sentences
 //     under it are the only place a user learns how to get out of a particular block. A
 //     silent reflow or reworded exit line is invisible in review and fatal in a smoke.
-//   - THE THREE cv-d SUBSTRINGS (P31). tools\smoke\cv-d-smoke.ps1 matches "Emergency unlock
-//     code" (:113-118, with the code on the NEXT indented line), "committed block" (:141)
-//     and "cooling-off pending" (:165) against the live CLI. Drifting any of them turns an
-//     elevated sitting into a false FAIL, so all three are asserted here where a builder
-//     editing the wording cannot miss them.
-//   - P33/P34: a bare `unblock` never guesses which block it means, and the cap refusal
-//     LISTS what is in the way rather than just saying no. Exit codes stay 0/1/2/3/4.
+//   - THE cv-d SUBSTRINGS (P31). tools\smoke\cv-d-smoke.ps1 matches "Emergency unlock code"
+//     (with the code on the NEXT indented line) against the live CLI. Drifting it turns an
+//     elevated sitting into a false FAIL, so it is asserted here where a builder editing the
+//     wording cannot miss it. LEDGER 319 retired the other two ("committed block" and
+//     "cooling-off pending"): both described exits that no longer exist.
+//   - P34: the cap refusal LISTS what is in the way rather than just saying no. Exit codes
+//     stay 0/1/2/3/4. (P33's bare-`unblock` ambiguity rule went with the cooling-off it
+//     guarded - a bare `unblock` now refuses outright, so there is nothing to disambiguate.)
 //   - P27: every --start refusal, on the ENFORCEMENT window rather than the wall clock.
 //   - P42: `add` is service-adjudicated and GROWTH-ONLY - a trigger can add sites to the one
 //     slot it names and can do nothing else at all: no lift, no shorten, no other slot, no
@@ -57,13 +58,15 @@ public class SlotTableFormatTests
     // ledger 313(a), the TRAILING remaining cell an ACTIVE row now carries. The columns up to
     // and including Exit are byte-identical to the sample: the new cell rides on the END of the
     // row precisely so nothing above it moves.
+    // Ledger 319: the Exit token on an ACTIVE row is "code" - the one exit there is - where the
+    // sample used to show "code+wait" (self-serve) or "committed". The columns are otherwise
+    // byte-identical to the P32 sample; only the token's text changed.
     private const string SampleHeader = " Id  State     Ends / Starts             Sites Apps URLs  Exit";
-    private const string SampleActive = "  2  ACTIVE    2026-08-09 21:00              7    1    0  code+wait  (~2h 10m of active time left)";
-    private const string SampleCommitted = "  3  ACTIVE    2026-08-09 23:59              2    0    3  committed  (~59m of active time left)";
+    private const string SampleActive = "  2  ACTIVE    2026-08-09 21:00              7    1    0  code  (~2h 10m of active time left)";
+    private const string SampleActive2 = "  3  ACTIVE    2026-08-09 23:59              2    0    3  code  (~59m of active time left)";
     private const string SampleSchedule = "  6  SCHEDULE  window OPEN until 04:00       3    0    0  window";
 
     private static MonkMode.Blocker.SlotView Active(string id, DateTime ends, int sites, int apps, int urls,
-                                                    bool committed = false, TimeSpan? coolOff = null,
                                                     DateTime? mark = null)
         => new()
         {
@@ -73,8 +76,6 @@ public class SlotTableFormatTests
             Sites = sites,
             Apps = apps,
             Urls = urls,
-            Committed = committed,
-            CoolOffRemaining = coolOff,
             // 313(a): the monotonic [Time] HighWater the row was read against. Default MinValue
             // = unreadable/MAC-invalid, which renders the placeholder.
             Mark = mark ?? DateTime.MinValue,
@@ -95,10 +96,12 @@ public class SlotTableFormatTests
     }
 
     [Fact]
-    public void CommittedRow_MatchesTheP32Sample()
+    public void SecondActiveRow_MatchesTheP32Sample()
     {
-        Assert.Equal(SampleCommitted,
-            MonkMode.Program.FormatSlotRow(Active("3", new DateTime(2026, 8, 9, 23, 59, 0), 2, 0, 3, committed: true,
+        // Was CommittedRow_MatchesTheP32Sample: every block is committed since ledger 319, so
+        // the row that used to differ ("committed") is now just another ACTIVE row.
+        Assert.Equal(SampleActive2,
+            MonkMode.Program.FormatSlotRow(Active("3", new DateTime(2026, 8, 9, 23, 59, 0), 2, 0, 3,
                                                   mark: new DateTime(2026, 8, 9, 23, 0, 0))));
     }
 
@@ -134,19 +137,14 @@ public class SlotTableFormatTests
             DurationSeconds = 7200,
             Sites = 4,
         };
-        Assert.Equal("  5  PENDING   starts 2026-08-10 07:00 (2h)      4    0    0  cancel",
+        // Ledger 319: "code", not "cancel" - a PENDING block cannot be cancelled (it never
+        // actually could; --cancel only ever cleared a cooling-off deadline, which a pending
+        // slot has none of), so it advertises the same exit as a running one.
+        Assert.Equal("  5  PENDING   starts 2026-08-10 07:00 (2h)      4    0    0  code",
                      MonkMode.Program.FormatSlotRow(v));
         // The part that is load-bearing rather than cosmetic: the whole start moment and the
         // planned length both survive.
         Assert.Equal("starts 2026-08-10 07:00 (2h)", MonkMode.Program.FormatSlotWhenCell(v));
-    }
-
-    [Fact]
-    public void CoolingOffRow_ShowsTheCoolingOffToken()
-    {
-        var v = Active("2", new DateTime(2026, 8, 9, 21, 0, 0), 7, 1, 0, coolOff: TimeSpan.FromMinutes(58));
-        Assert.Equal("cooling-off", MonkMode.Program.SlotExitToken(v));
-        Assert.Contains("  cooling-off", MonkMode.Program.FormatSlotRow(v));
     }
 
     [Fact]
@@ -182,19 +180,18 @@ public class SlotTableFormatTests
     [Fact]
     public void ExitLine_Active_NamesTheBlockInTheCommandHint()
     {
-        Assert.Equal("Exit:  run 'monkmode unblock --id 2' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
+        Assert.Equal("Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --id 2 --code <CODE>'. There is no other way out.",
             MonkMode.Program.FormatSlotExitLine(Active("2", new DateTime(2026, 8, 9, 21, 0, 0), 7, 1, 0)));
     }
 
+    // LEDGER 319 (30/08/2026): the PENDING exit line was a documented LIE and is now corrected.
+    // It read "'monkmode unblock --id 5 --cancel' cancels it freely until it starts", but
+    // --cancel only ever dropped a cooling-off CANCEL trigger, which cleared a pending
+    // CoolOffUntil - and a PENDING slot has none, so the command did nothing and the block
+    // started anyway. docs\USER-GUIDE.md §"A waiting block cannot be cancelled" recorded the
+    // discrepancy rather than fixing it. --cancel is gone, and so is the promise.
     [Fact]
-    public void ExitLine_Committed_IsTheCodeOnlyExit()
-    {
-        Assert.Equal("Exit:  committed block - the accountability code (shown at block start) is the only early exit, or wait for the timer.",
-            MonkMode.Program.FormatSlotExitLine(Active("3", new DateTime(2026, 8, 9, 23, 59, 0), 2, 0, 3, committed: true)));
-    }
-
-    [Fact]
-    public void ExitLine_Pending_OffersTheFreeCancel()
+    public void ExitLine_Pending_SaysItCannotBeCancelled()
     {
         var v = new MonkMode.Blocker.SlotView
         {
@@ -203,8 +200,9 @@ public class SlotTableFormatTests
             StartAt = new DateTime(2026, 8, 10, 7, 0, 0),
             DurationSeconds = 7200,
         };
-        Assert.Equal("Exit:  not started yet - 'monkmode unblock --id 5 --cancel' cancels it freely until it starts.",
+        Assert.Equal("Exit:  not started yet, and it cannot be cancelled. Once it starts it ends at its end time, or earlier with the partner code.",
                      MonkMode.Program.FormatSlotExitLine(v));
+        Assert.DoesNotContain("--cancel", MonkMode.Program.FormatSlotExitLine(v));
     }
 
     [Fact]
@@ -216,35 +214,28 @@ public class SlotTableFormatTests
     }
 
     [Fact]
-    public void ExitLine_CoolingOff_NamesTheBlockInTheCancelHint()
-    {
-        var v = Active("2", new DateTime(2026, 8, 9, 21, 0, 0), 7, 1, 0, coolOff: TimeSpan.FromHours(1));
-        Assert.Equal("Exit:  cooling-off pending - lifts in about 1h of active time. Run 'monkmode unblock --id 2 --cancel' to stay blocked.",
-                     MonkMode.Program.FormatSlotExitLine(v));
-    }
-
-    [Fact]
     public void ExitLine_WithNoUsableId_DropsTheIdFlagRatherThanPrintAnUntypableCommand()
     {
-        // "?" is the unreadable-id placeholder. A hint of "monkmode unblock --id ?" would be
-        // worse than the v1.0 wording, so the flag is simply omitted.
-        Assert.Equal("Exit:  run 'monkmode unblock' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
-                     MonkMode.Program.FormatCoolOffStatusLine(false, null, "?"));
-        Assert.Equal("Exit:  run 'monkmode unblock' to start a cooling-off wait, or the accountability code (shown at block start) lifts it now.",
-                     MonkMode.Program.FormatCoolOffStatusLine(false, null, ""));
+        // "?" is the unreadable-id placeholder. A hint of "monkmode unblock --id ? --code X"
+        // would be worse than the un-named wording, so the flag is simply omitted.
+        Assert.Equal("Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --code <CODE>'. There is no other way out.",
+                     MonkMode.Program.FormatExitStatusLine("?"));
+        Assert.Equal("Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --code <CODE>'. There is no other way out.",
+                     MonkMode.Program.FormatExitStatusLine(""));
     }
 
+    // Ledger 319: the truth table collapsed from five tokens to two. "code+wait" (self-serve),
+    // "committed" and "cooling-off" all described the cooling-off exit or the absence of it, and
+    // PENDING's "cancel" described a cancel that never worked. A manual block - running or
+    // waiting to start - is "code"; only a schedule window differs, because it genuinely has no
+    // early exit at all.
     [Fact]
     public void ExitToken_TruthTable()
     {
-        Assert.Equal("code+wait", MonkMode.Program.SlotExitToken(Active("1", DateTime.Now, 1, 0, 0)));
-        Assert.Equal("committed", MonkMode.Program.SlotExitToken(Active("1", DateTime.Now, 1, 0, 0, committed: true)));
-        Assert.Equal("cooling-off", MonkMode.Program.SlotExitToken(Active("1", DateTime.Now, 1, 0, 0, coolOff: TimeSpan.FromHours(1))));
-        // A committed block has no self-serve cooling-off at all, so a stored deadline on one
-        // is stale by construction: "committed" wins, matching FormatCoolOffStatusLine.
-        Assert.Equal("committed", MonkMode.Program.SlotExitToken(Active("1", DateTime.Now, 1, 0, 0, committed: true, coolOff: TimeSpan.FromHours(1))));
-        Assert.Equal("cancel", MonkMode.Program.SlotExitToken(new MonkMode.Blocker.SlotView { State = MonkMode.Blocker.SlotStatePending }));
+        Assert.Equal("code", MonkMode.Program.SlotExitToken(Active("1", DateTime.Now, 1, 0, 0)));
+        Assert.Equal("code", MonkMode.Program.SlotExitToken(new MonkMode.Blocker.SlotView { State = MonkMode.Blocker.SlotStatePending }));
         Assert.Equal("window", MonkMode.Program.SlotExitToken(new MonkMode.Blocker.SlotView { State = MonkMode.Blocker.SlotStateSchedule }));
+        Assert.Equal("", MonkMode.Program.SlotExitToken(null));
     }
 
     [Fact]
@@ -273,42 +264,25 @@ public class CvDSmokeWordingTests
         Assert.DoesNotContain("\n", header);   // one line: the code is the NEXT one
     }
 
+    // LEDGER 319: the two substrings tools\smoke\cv-d-smoke.ps1 used to match - 'committed
+    // block' (:141) and 'cooling-off pending' (:165/:170) - are RETIRED with the branches that
+    // produced them. The smoke was updated in the same slice. What replaces them is the one
+    // substring every armed manual row now carries, and the guarantee that `status` never again
+    // advertises an exit that does not exist.
     [Fact]
-    public void StatusCommittedLine_KeepsTheCommittedBlockSubstring()
+    public void StatusExitLine_AdvertisesTheCodeAndNothingElse()
     {
-        // cv-d-smoke.ps1:141 asserts `monkmode status` matches 'committed block' while a
-        // committed block is armed. It reaches the user through the table's Exit sentence.
         var line = MonkMode.Program.FormatSlotExitLine(new MonkMode.Blocker.SlotView
         {
             Id = "1",
             State = MonkMode.Blocker.SlotStateActive,
             Ends = DateTime.Now.AddHours(1),
-            Committed = true,
         });
-        Assert.Contains("committed block", line);
-    }
-
-    [Fact]
-    public void StatusCoolingOffLine_KeepsTheCoolingOffPendingSubstring()
-    {
-        // cv-d-smoke.ps1:165 asserts 'cooling-off pending' appears while one is pending, and
-        // :170 asserts it is GONE after --cancel - so it must appear only on that branch.
-        var pending = MonkMode.Program.FormatSlotExitLine(new MonkMode.Blocker.SlotView
-        {
-            Id = "1",
-            State = MonkMode.Blocker.SlotStateActive,
-            Ends = DateTime.Now.AddHours(1),
-            CoolOffRemaining = TimeSpan.FromMinutes(59),
-        });
-        Assert.Contains("cooling-off pending", pending);
-
-        var cancelled = MonkMode.Program.FormatSlotExitLine(new MonkMode.Blocker.SlotView
-        {
-            Id = "1",
-            State = MonkMode.Blocker.SlotStateActive,
-            Ends = DateTime.Now.AddHours(1),
-        });
-        Assert.DoesNotContain("cooling-off pending", cancelled);
+        Assert.Contains("--code <CODE>", line);
+        Assert.Contains("There is no other way out.", line);
+        Assert.DoesNotContain("cooling-off", line);
+        Assert.DoesNotContain("--cancel", line);
+        Assert.DoesNotContain("--force", line);
     }
 }
 
@@ -480,8 +454,6 @@ public class SlotCliLiveTests
             Assert.Equal(1, views[0].Apps);
             Assert.Equal(1, views[0].Urls);
             Assert.Equal(Ends, views[0].Ends);
-            Assert.False(views[0].Committed);
-            Assert.Null(views[0].CoolOffRemaining);
 
             // P16: StartAt set with no Until yet = PENDING (the service computes its end at
             // activation), and the planned length is carried so the row can show it.
@@ -522,9 +494,10 @@ public class SlotCliLiveTests
     [Fact]
     public void ReadSlotViews_OnATamperedConfig_ShowsNoReassuringExit()
     {
-        // B7: a forged Committed/CoolOffUntil must never render an exit story. With the MAC
-        // invalid both fields are suppressed, so the Exit column falls back to its most
-        // conservative value and the caller says the config is frozen.
+        // B7: a tampered config must never render a reassuring exit story. Ledger 319 removed
+        // the two fields this used to check (Committed, CoolOffRemaining) from SlotView - the
+        // Exit column is now a constant "code" - so the MAC-gated field left to pin is the
+        // monotonic Mark, which is the one that could still show a comforting number.
         Wipe();
         try
         {
@@ -537,9 +510,7 @@ public class SlotCliLiveTests
             var views = MonkMode.Blocker.ReadSlotViews(ref macValid);
             Assert.False(macValid);
             Assert.Single(views);
-            Assert.False(views[0].Committed);
-            Assert.Null(views[0].CoolOffRemaining);
-            // 313(a): the monotonic mark is MAC-gated for the same reason - a forged HighWater
+            // 313(a): the monotonic mark is MAC-gated - a forged HighWater
             // would otherwise render a countdown, and a frozen config has none (it never lifts
             // by itself). The row says so rather than showing a number.
             Assert.Equal(DateTime.MinValue, views[0].Mark);
@@ -623,11 +594,12 @@ public class SlotCliLiveTests
 
     // ---- P33: bare `unblock` with two blocks armed ----
 
+    // Ledger 319: P33's BareUnblockIsAmbiguous is gone - a bare `unblock` no longer starts
+    // anything to be ambiguous ABOUT, it just refuses - so what is left to pin here is the
+    // listing itself, which `status` and the cap refusal still use to let the user pick a block.
     [Fact]
-    public void BareUnblock_TwoSlots_Exit1_ListsSlots()
+    public void ArmedSlotLines_LetTheUserTellTwoBlocksApart()
     {
-        // The refusal is only useful if the listing lets the user pick: both ids, both
-        // states, and enough about each block to tell them apart.
         Wipe();
         try
         {
@@ -635,10 +607,6 @@ public class SlotCliLiveTests
             Assert.True(Arm("b.com").Ok);
             var armed = MonkMode.Blocker.ArmedSlotIds();
             Assert.Equal(new[] { 1, 2 }, armed);
-
-            // Exit code 1 is what the refusal returns, and the rule that reaches it.
-            Assert.True(MonkMode.Program.BareUnblockIsAmbiguous(false, armed.Count));
-            Assert.False(MonkMode.Program.BareUnblockIsAmbiguous(true, armed.Count));
 
             var lines = MonkMode.Blocker.ArmedSlotLines();
             Assert.Equal(2, lines.Count);

@@ -13,7 +13,54 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 ## [Unreleased]
 
 Three defects found on and just after tag day, all outside enforcement, plus one usability fix
-— and F77, which changes what a block's end time *means*.
+— F77, which changes what a block's end time *means*, and a **removal** that changes what
+MonkMode *is*: a block can now only be ended by its partner code or its own end time.
+
+### Removed
+
+- **The `unblock --force` escape hatch is gone.** It tore any block down unconditionally —
+  SCM recovery disabled, the watchdog pair killed, the deny-DELETE ACE removed, the service
+  deleted, the hosts block stripped, the snapshot, the config backup, the SafeBoot keys, the
+  browser DoH policy and the notifier autorun all removed — with no code and no waiting. It
+  had been retained for four releases as brick-insurance. Samrath, 30/08/2026: *"i dont like
+  how i can force unblock it regardless ... i should only be able to unblock with code."*
+
+  The removal is a removal, not a hiding. The flag, the teardown branch and every primitive
+  that existed only to serve it were deleted from the source: `KillWatchdogProcesses`,
+  `RestoreHostsFromStrip`, `RemoveSafeBootKeys`, `DeleteBackup`, the CLI's `RemoveDohPolicy`
+  and `ClearNotifierAutorun`, `ServiceTools`' `DisableRecovery` / `RestoreDefaultServiceSd` /
+  `DeleteServiceByName` — and the `DeleteService` P/Invoke with them, so `monkmode.exe` now
+  has no code path at all that can delete a Windows service. `--force` is reported as an
+  option that does not exist.
+
+- **The self-serve cooling-off wait is gone.** A bare `monkmode unblock` used to drop a
+  request trigger; the service computed a MAC-covered deadline of about an hour of machine-on
+  time and then lifted the block itself. That was the second exit needing no partner code, so
+  it went with the first. The whole channel is deleted: the request/cancel writers, the
+  service's per-tick poll, the deadline computation, the request/cancel classifier and the
+  compile-time floor. A stale `monkmode_cooloff.request.<id>` left by an older build is now
+  unaddressed junk that the tick deletes unread — it can never start anything.
+
+  `unblock --cancel` went with it (it only ever cleared a pending cooling-off deadline).
+  That also closes **F24** by fixing the wording rather than the behaviour: `status` and
+  `help` claimed `--cancel` cancelled a delayed block "freely until it starts", which was
+  never true — a PENDING block has no cooling-off deadline, so the cancel did nothing and the
+  block armed anyway. Both surfaces now say plainly that a waiting block cannot be cancelled.
+
+- **Every block is committed; there is no lesser mode.** `--commit` and `--cooloff` are still
+  *accepted* so existing scripts and muscle memory keep working, but they do nothing: the
+  arm always records a committed block with no cooling-off duration. They are gone from
+  `help`. The MAC-covered `Committed` / `CoolOffUntil` / `CoolOffDuration` fields stay in the
+  v12 canonical, written `yes` / empty / empty, so the schema is untouched.
+
+  **What this costs, stated rather than buried.** With no escape hatch, a fail-closed corner
+  is now genuinely unrecoverable in-band. A config that fails its integrity check (the B7
+  freeze — caused by hand-editing MonkMode's files, or by arming a block and then upgrading
+  the binaries underneath it) can be lifted by *nothing*: not its end time, and not the
+  partner code either, because the code is verified against a config the service will not
+  trust. Such a block holds indefinitely and only the offline route (B10 — boot elsewhere,
+  edit the disk) gets out. The honest ceiling therefore reads: **impulse-proof, not
+  admin-proof, and there is no built-in escape.**
 
 ### Added
 
@@ -68,8 +115,9 @@ Three defects found on and just after tag day, all outside enforcement, plus one
   installed binary has no reason to have on disk. `monkmode help` gained an **"If something
   looks wrong"** section naming the four things that look like breakage and are not (a
   non-elevated run printing nothing; `service installed but idle`; the service not running;
-  the FROZEN integrity message), and stating plainly that `unblock --force` always works —
-  no code, no waiting, no readable config required. It also gained the one exit the help had
+  the FROZEN integrity message), and stating plainly what the way out is. (That section named
+  `unblock --force` when it shipped; the removal above rewrote it to say the opposite — that a
+  lost code means you wait, and that a frozen config holds indefinitely.) It also gained the one exit the help had
   never actually named: **a block ends by itself when the timer runs out.** New `monkmode
   version` reports the release, the install directory and the build's own timestamp, because
   the assembly's `FileVersion` is still the inherited Cold Turkey `0.7.0.0` and Windows'
@@ -91,9 +139,15 @@ Three defects found on and just after tag day, all outside enforcement, plus one
   re-asserted it one last time *after* stripping the MonkMode block, so a block that ended on
   its own timer left hosts locked with nothing left to enforce, and the next writer (Tailscale,
   a DNS tool) failed until a manual `attrib -r`. A genuine expiry now leaves hosts as an
-  ordinary writable file, exactly as `monkmode unblock` always has. Only that one path changed:
-  the per-tick self-heal, `OnStart` and the crash backstop still lock hosts while a block
-  stands, and a strip that *fails* still ends read-only — the block is still in the file.
+  ordinary writable file. Only that one path changed: the per-tick self-heal, `OnStart` and
+  the crash backstop still lock hosts while a block stands, and a strip that *fails* still ends
+  read-only — the block is still in the file.
+
+  Follow-up (30/08/2026): the fix originally covered only the branch that actually *found*
+  something to strip. The other branch — expiry running against a hosts file with no MonkMode
+  marker in it, because a previous teardown had already cleaned it — still re-asserted
+  read-only on its way out, leaving a machine with no block holding a locked hosts file that
+  nothing would ever unlock again. Both branches of the expiry strip now end writable.
 - **`status` could report "no active block" over a block it was fully enforcing.** On a machine
   with no slots armed (a pre-v10 config), the fallback line asked whether the stored end was in
   the wall-clock past. After an overnight shutdown it always was, while the mark the service

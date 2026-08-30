@@ -48,7 +48,7 @@
 #     without the DPAPI key), and fail-closed means the block then never lifts,
 #     which would hang this script. Prove it in a DEDICATED run: block, corrupt
 #     [Integrity] Mac, set --for to ~1 min, confirm it does NOT lift after the
-#     minute, then 'monkmode unblock --force'. The 310-line ConfigIntegrity unit
+#     minute, then a partner-code lift. The 310-line ConfigIntegrity unit
 #     tests are the authoritative coverage.
 #
 # Expected result: 69 passed, 0 failed (15 original + 12 B2 + 20 B1 + 5 B3 +
@@ -201,7 +201,8 @@ function Get-ServiceSddl {
 # Strip the B6 deny-DELETE ACE from the live service SD so 'sc delete' (which
 # opens with DELETE — denied to BA by that ACE) can proceed. We always hold
 # WRITE_DAC (B6 NEVER denies it), so sdset always succeeds. No-op if absent.
-# Used by the teardown rescue path (and the same logic lives in cleanup.ps1).
+# Used by the teardown rescue path (cleanup.ps1, which held the same logic, was
+# deleted by ledger 319 along with the escape hatch it wrapped).
 function Remove-ServiceDenyDelete {
   $sd = Get-ServiceSddl
   if ($sd -and $sd.Contains($denyAce)) {
@@ -232,7 +233,7 @@ if (-not (Test-Path $setupIni)) {
 if (-not (Test-Path $backup)) { Copy-Item $hosts $backup -Force }
 
 if (Get-Service MONKMODE -ErrorAction SilentlyContinue) {
-  Write-Host "MONKMODE service already exists. Run cleanup.ps1 first." -ForegroundColor Yellow
+  Write-Host "MONKMODE service already exists. Let any block end, then 'sc.exe delete MONKMODE' while idle." -ForegroundColor Yellow
   exit 1
 }
 
@@ -624,7 +625,12 @@ Write-Host "`n=== 4b. B5a NO-DATA-LOSS: a user's own DoH-off must survive a no-s
 $edge0 = $dohEntries[0]
 New-Item -Path $edge0.Path -Force -ErrorAction SilentlyContinue | Out-Null
 Set-ItemProperty -LiteralPath $edge0.Path -Name $edge0.Name -Value 'off' -Type String -ErrorAction SilentlyContinue
-& $monk unblock --force | Out-Null
+# BROKEN BY 319: `unblock --force` no longer exists. This teardown must become a
+# partner-code lift (capture the arm output, parse the line after "Emergency unlock
+# code", `unblock --code <CODE>`, wait Stopped-or-gone per RUNBOOK E9, then
+# `sc.exe delete MONKMODE`). Throwing rather than silently continuing, so a run
+# cannot report a clean teardown it did not perform.
+throw 'BROKEN BY 319: this teardown needs rewriting as a partner-code lift.'
 Check "B5a user's own DoH-off survived the no-snapshot teardown" ((DohVal $edge0.Path $edge0.Name) -ceq 'off')
 
 # 5. teardown ---------------------------------------------------------------
@@ -671,7 +677,7 @@ Write-Host "    Stripped B6 deny-DELETE ACE, restored hosts from backup, deleted
 
 Write-Host "`n================ RESULT: $pass passed, $fail failed ================" -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})
 if ($fail -ne 0) {
-  Write-Host "If something is stuck, run cleanup.ps1 (elevated)." -ForegroundColor Yellow
+  Write-Host "If something is stuck: there is no rescue script any more (ledger 319). Wait for the block's timer, or use its partner code." -ForegroundColor Yellow
 }
 "SMOKETEST_RESULT pass=$pass fail=$fail"
 try { Stop-Transcript | Out-Null }
