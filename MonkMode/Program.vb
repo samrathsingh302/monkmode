@@ -22,7 +22,7 @@
 '      monkmode setup  [--partner "Alex (alex@example.com)"] [--default-sites a.com,b.com] [--default-preset social] [--default-apps a.exe,b.exe] [--default-app-preset games]  (required first-run onboarding)
 '      monkmode block  [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat]
 '                      (--for 2h30m | --until "2026-06-11 18:00") [--file list.txt]
-'                      [--urls "*/watch*"] [--start +90m]
+'                      [--urls "youtube.com/shorts"] [--start +90m]   (substring match - NO wildcards)
 '      monkmode status                     (a row per armed block, with each one's exit)
 '      monkmode stats                      (read-only summary of your block history)
 '      monkmode add    --sites c.com[,d.com] [--id N]
@@ -245,6 +245,12 @@ Module Program
             Console.Error.WriteLine(urlErr)
             Return 1
         End If
+        ' The glob footgun (26/08/2026): a "*" in a pattern matches nothing, silently, because
+        ' the P57 matcher is ordinal substring. WARN and CARRY ON - never refuse (see
+        ' Blocker.UrlGlobWarningLine for why). Printed here, before the first side effect, so
+        ' it is not buried under the arm's own output.
+        Dim globWarning As String = Blocker.UrlGlobWarningLine(GetOption(args, "--urls"))
+        If globWarning <> "" Then Console.Error.WriteLine(globWarning)
 
         ' D1b/D2b: inherit the account-default blocklist / app list when this block names NO explicit
         ' source of its own (--sites/--preset/--file produced nothing; --apps/--app-preset produced
@@ -482,7 +488,13 @@ Module Program
         ' step is therefore guarded and best-effort; each one that fails says so and the
         ' block continues, because the block IS armed and saying otherwise would be a lie.
         Dim hostsWarning As String = ""
-        If Not Blocker.TryWriteArmHostsBlock(domains, arm.FreshRewrite, hostsWarning) Then
+        ' Kept as a local (FX5 leftover, 19/08/2026): the service-install warning below used to
+        ' promise unconditionally that "the blocked sites stay in your hosts file meanwhile",
+        ' which is a lie in the double-failure case - hosts write failed AND the service could
+        ' not start means nothing is blocking right now. The answer differs, so the fact has to
+        ' survive down to it.
+        Dim hostsWritten As Boolean = Blocker.TryWriteArmHostsBlock(domains, arm.FreshRewrite, hostsWarning)
+        If Not hostsWritten Then
             Console.Error.WriteLine(hostsWarning)
         End If
         Dim partnerCode As String = arm.PartnerCode
@@ -513,8 +525,9 @@ Module Program
         Try
             ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
         Catch ex As Exception
-            Console.Error.WriteLine("Warning: the block IS armed, but the MonkMode service could not be installed or started (" & ex.Message & ").")
-            Console.Error.WriteLine("App-kill, self-repair and the countdown are paused until it starts; the blocked sites stay in your hosts file meanwhile - unless the hosts write above also failed, in which case they are not blocked until it does.")
+            For Each line As String In FormatServiceInstallFailureLines(ex.Message, hostsWritten)
+                Console.Error.WriteLine(line)
+            Next
         End Try
         ' D4d rider: a FRESH manual arm clears an orphaned notifier first, so this block's
         ' spawn wins D4c's single-instance claim instead of standing down behind a leftover
@@ -576,6 +589,14 @@ Module Program
     End Function
 
     Private Function DoStatus() As Integer
+        ' Deploy-gap + two-installs visibility (backlog, 30/08/2026): say WHICH install is
+        ' answering, and which build is in it, before saying anything about blocks. `dist\`
+        ' and `C:\Program Files\MonkMode\` keep SEPARATE config and setup state, so the same
+        ' question genuinely has two different true answers on this machine and "dist\ says
+        ' it isn't set up while Program Files is" read as a bug rather than as two installs.
+        ' First, unconditionally - including on the never-installed path below, which is the
+        ' exact message that gets attributed to the wrong install.
+        Console.WriteLine(ReadBuildIdentityLine())
         If Not Blocker.ServiceIsInstalled() Then
             Console.WriteLine("MonkMode: no block has ever been installed on this machine.")
             Return 0
@@ -1239,37 +1260,75 @@ Module Program
     ' re-plumbing, and a constant is the one thing a `CHANGELOG.md` bump can keep in step.
     Friend Const AppVersion As String = "1.1.0"
 
-    ' F75: what `monkmode version` prints, as lines, so the wording is pinned by test. Pure:
-    ' the caller supplies the facts, because the point of this command is to tell the truth
-    ' about a MACHINE, and a function that read the machine itself could not be tested.
-    Friend Function FormatVersionLines(ByVal installDir As String, ByVal builtUtc As DateTime?) As List(Of String)
-        Dim lines As New List(Of String)
-        lines.Add("MonkMode " & AppVersion)
-        lines.Add("  Installed at: " & If(String.IsNullOrWhiteSpace(installDir), "(unknown)", installDir.TrimEnd(CChar("\"))))
-        ' The binary's own timestamp, not a compile-time stamp: it is what actually
-        ' distinguishes two installs of the same release, which is the question being asked.
-        If builtUtc.HasValue Then
-            lines.Add("  This build:   " & builtUtc.Value.ToLocalTime().ToString("dd/MM/yyyy HH:mm", CultureInfo.InvariantCulture))
+    ' F75, extended for the DEPLOY GAP + TWO INSTALLS (backlog, 30/08/2026): the ONE line
+    ' that says which install this is and which build is in it. Pure - the caller supplies
+    ' the facts, because the point of this line is to tell the truth about a MACHINE, and a
+    ' function that read the machine itself could not be tested.
+    '
+    ' `dist\` and `C:\Program Files\MonkMode\` are two separate live installs with SEPARATE
+    ' setup/config state, and the release constant alone cannot tell two builds of 1.1.0
+    ' apart - which is exactly how both sat on a stale build for two days after a fix
+    ' shipped. So the line carries all three facts at once: release, commit, and where this
+    ' exe actually lives.
+    '
+    '   MonkMode 1.1.0 (850f1ef, built 30/08/2026 16:31) at C:\Program Files\MonkMode
+    '
+    ' Unknowns are NAMED rather than dropped - a developer build reads "dev", an unstamped
+    ' one with an unreadable exe reads "built unknown" - because a line with a hole in it is
+    ' still more use than no line, and this is what someone runs when things look broken.
+    Friend Function FormatVersionLine(ByVal installDir As String, ByVal revision As String, ByVal builtUtc As DateTime?) As String
+        Dim rev As String = If(revision, "").Trim()
+        If rev = "" Then rev = "dev"
+        Dim built As String = "unknown"
+        ' Rendered in LOCAL time: the reader is comparing it against "when did I last build",
+        ' which they remember in their own clock, not UTC.
+        If builtUtc.HasValue Then built = builtUtc.Value.ToLocalTime().ToString("dd/MM/yyyy HH:mm", CultureInfo.InvariantCulture)
+        Dim dir As String = If(installDir, "").Trim()
+        If dir = "" Then
+            dir = "(unknown)"
         Else
-            lines.Add("  This build:   (unknown)")
+            dir = dir.TrimEnd(CChar("\"))
         End If
-        Return lines
+        Return "MonkMode " & AppVersion & " (" & rev & ", built " & built & ") at " & dir
+    End Function
+
+    ' The build instant this exe was STAMPED with at compile time (Directory.Build.props ->
+    ' MonkMode.vbproj's StampBuildInfo target), parsed. Nothing/"" on a developer build, and
+    ' on anything unparseable - the caller then falls back to the exe's own timestamp. Pure.
+    Friend Function ParseStampedBuildUtc(ByVal stamp As String) As DateTime?
+        Dim s As String = If(stamp, "").Trim()
+        If s = "" Then Return Nothing
+        Dim parsed As DateTime
+        If DateTime.TryParse(s, CultureInfo.InvariantCulture,
+                             DateTimeStyles.AdjustToUniversal Or DateTimeStyles.AssumeUniversal, parsed) Then
+            Return DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
+        End If
+        Return Nothing
+    End Function
+
+    ' The live reader behind that line, shared by `version` and the top of `status`.
+    '
+    ' Best-effort throughout: this must never be the thing that throws. The stamped build
+    ' instant is preferred over the exe's timestamp because it is the instant the code was
+    ' COMPILED (a file timestamp can be rewritten by any copy that does not preserve it);
+    ' the timestamp remains the fallback for a developer build, where it is the only answer
+    ' there is.
+    Private Function ReadBuildIdentityLine() As String
+        Dim dir As String = ""
+        Dim built As DateTime? = ParseStampedBuildUtc(BuildStamp.BuiltUtc)
+        Try
+            dir = Blocker.AppDir()
+            If Not built.HasValue Then
+                Dim exe As String = Path.Combine(dir, "monkmode.exe")
+                If File.Exists(exe) Then built = File.GetLastWriteTimeUtc(exe)
+            End If
+        Catch
+        End Try
+        Return FormatVersionLine(dir, BuildStamp.Revision, built)
     End Function
 
     Private Sub PrintVersion()
-        Dim dir As String = ""
-        Dim built As DateTime? = Nothing
-        ' Best-effort: `version` must never be the command that throws. A machine whose own
-        ' paths cannot be read still gets the release number, which is most of the answer.
-        Try
-            dir = Blocker.AppDir()
-            Dim exe As String = Path.Combine(dir, "monkmode.exe")
-            If File.Exists(exe) Then built = File.GetLastWriteTimeUtc(exe)
-        Catch
-        End Try
-        For Each line As String In FormatVersionLines(dir, built)
-            Console.WriteLine(line)
-        Next
+        Console.WriteLine(ReadBuildIdentityLine())
     End Sub
 
     ' F74: the "send it to X" line printed under the one-time code, or "" when there is no
@@ -1425,9 +1484,38 @@ Module Program
 
     ' 313(a): the ONE caveat under the table. Printed whenever something is ACTIVE, because the
     ' "Ends" stamp on those rows is the one number a user acts on and it is NOT a promise about
-    ' the wall clock - a block armed for 2h that spends 8h shut down ends 8h later than it says.
+    ' the wall clock - a block armed for 2h that spends 8h shut down ends 8h later than it says
+    ' UNTIL the service can corroborate the real time online and credit that downtime back
+    ' (F77/v12; offline the old arithmetic still stands, which is why the note says both).
     Friend Function FormatMonotonicNoteLine() As String
-        Return "  Note: the end time counts machine-ON time only - sleep or shutdown pushes it later by the same amount."
+        ' F77 (v12, deployed 30/08/2026) made the old wording only half true. The end stamp
+        ' still advances on machine-ON time, but downtime is no longer LOST: on the next tick
+        ' after the machine comes back, the service credits the gap against an EXTERNALLY
+        ' corroborated clock (>= 2 agreeing HTTPS witnesses, MonkMode_srv\TrustedTime.vb).
+        ' With no network - or fewer than two agreeing witnesses - there is no credit and the
+        ' pre-F77 behaviour stands, so both halves have to be said.
+        Return "  Note: the end time counts machine-ON time; time spent off or asleep is credited back once the service can confirm the real time online (otherwise it pushes the end later)."
+    End Function
+
+    ' FX5 leftover (19/08/2026): what a FAILED service install/start says, as lines, pinned by
+    ' test rather than left inside a Catch nothing can see.
+    '
+    ' The block IS armed by this point (ArmSlot has committed and stamped the slot), and a
+    ' failed install lifts NOTHING - the service is registered AUTO_START, so it comes up at
+    ' the next boot. What differs is whether anything is blocking RIGHT NOW, and that is
+    ' exactly the hosts write: with it the sites are already dead in the hosts file and only
+    ' app-kill/self-repair/the countdown are paused; without it BOTH halves failed and nothing
+    ' is blocking until the service starts and runs its own hosts self-heal. The old single
+    ' literal promised the first case in both, which is the one thing this must not do.
+    Friend Function FormatServiceInstallFailureLines(ByVal exMessage As String, ByVal hostsWritten As Boolean) As List(Of String)
+        Dim lines As New List(Of String)
+        lines.Add("Warning: the block IS armed, but the MonkMode service could not be installed or started (" & If(exMessage, "") & ").")
+        If hostsWritten Then
+            lines.Add("App-kill, self-repair and the countdown are paused until it starts; the blocked sites stay in your hosts file meanwhile.")
+        Else
+            lines.Add("The hosts write above ALSO failed, so nothing is being blocked at the moment: app-kill, self-repair and the countdown are paused, and the sites only go down when the service starts and repairs the hosts file itself (it is registered to start at the next boot).")
+        End If
+        Return lines
     End Function
 
     ' The frozen-config NOTE, one literal for both `status` paths. B7: never render a reassuring
@@ -1572,7 +1660,7 @@ Module Program
         Console.WriteLine("")
         Console.WriteLine("Usage:")
         Console.WriteLine("  monkmode setup [--partner ""Alex (alex@example.com)""] [--default-sites a.com,b.com] [--default-preset social] [--default-apps chrome.exe] [--default-app-preset games]   (first-run onboarding; required before the first block)")
-        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--all-session-kill] [--urls ""*/watch*""] [--start +90m]")
+        Console.WriteLine("  monkmode block [--sites a.com,b.com] [--preset social,video] [--apps chrome.exe,foo.exe] [--app-preset games,chat] (--for 2h30m | --until ""2026-06-11 18:00"") [--file list.txt] [--all-session-kill] [--urls ""youtube.com/shorts""] [--start +90m]")
         Console.WriteLine("  monkmode status  (one row per armed block - time left, what it covers, and how to exit each one)")
         Console.WriteLine("  monkmode stats   (read-only summary of your block history: counts, total focus time, longest block)")
         Console.WriteLine("  monkmode add --sites c.com [--id N]   (adds sites to ONE block; --id is required when more than one is running)")
@@ -1597,7 +1685,8 @@ Module Program
         Console.WriteLine("  - --for accepts forms like 45 (minutes), 90m, 2h, 1d12h.")
         Console.WriteLine("  - You can run up to " & MonkMode.ConfigIntegrity.MaxSlots & " blocks at once: 'monkmode block' starts a NEW one beside the others, and 'monkmode status' lists them with their ids. Use --id <N> to add to, or exit, a particular one.")
         Console.WriteLine("  - --start delays a block: '--start +90m' / '--start 2h' / '--start ""2026-08-10 07:00""'. --for then measures from the START (so '--start +90m --for 2h' blocks for 2h, beginning in 90 minutes), and it can be at most " & MaxStartDelayDays & " days ahead. A delayed block CANNOT be cancelled while it waits - its sites are already blocked and it starts on schedule.")
-        Console.WriteLine("  - --urls attaches URL patterns to a block (e.g. --urls ""*/watch*,*reddit.com/r/*""), for pages rather than whole sites.")
+        Console.WriteLine("  - --urls attaches URL patterns to a block (e.g. --urls ""youtube.com/shorts,reddit.com/r/all""), for pages rather than whole sites.")
+        Console.WriteLine("    A pattern is PLAIN TEXT that must appear in the web address - there are NO wildcards. A '*' is matched literally, so a pattern containing one (""*/shorts*"") matches nothing at all; write ""youtube.com/shorts"" instead. A pattern ending in '/' means only that site's front page.")
         Console.WriteLine("  - --preset blocks a whole category of well-known sites at once (comma-separate several): " & String.Join(", ", Blocker.KnownPresetNames()) & ". Combine it with --sites to add your own.")
         Console.WriteLine("  - --app-preset kills a whole category of well-known apps at once (comma-separate several): " & String.Join(", ", Blocker.KnownAppPresetNames()) & ". Combine it with --apps to add your own.")
         Console.WriteLine("  - 'monkmode setup --default-sites a.com,b.com [--default-preset social]' sets an ACCOUNT DEFAULT blocklist that 'monkmode block' inherits when you give it no --sites/--preset/--file; naming any of those overrides the default. Each 'setup' run rewrites these defaults, so pass them again to keep them.")

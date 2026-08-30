@@ -90,10 +90,15 @@ actually has left and the current exit path; the notifier keeps a tray icon and
 raises toasts at block start, periodically during a long block, and at expiry.
 
 That "time left" is **machine-ON time**. A block's end time advances only while
-the service is running, so hours spent shut down or asleep are not served and
-push the end later by the same amount — `status` prints the real remaining
-(`~2h 10m of active time left`) beside the end stamp, and says so under the
-table.
+the service is running, so hours spent shut down or asleep are not served at the
+moment they happen — `status` prints the real remaining (`~2h 10m of active time
+left`) beside the end stamp, and says so under the table. That downtime is then
+**credited back** on the first tick after the machine returns, provided the
+service can confirm the real time online (at least two agreeing HTTPS witnesses):
+shut down at midnight with two hours to go and boot at ten, and the block is
+already over. With no network, or witnesses that disagree, nothing is credited
+and the downtime simply pushes the end later — the clock defence never takes an
+unverified clock's word for it.
 
 Two smaller comforts: while a block is running the notifier serves a small
 "locked in — Xh left" page on `127.0.0.1:80`, so a plain-HTTP visit to a blocked

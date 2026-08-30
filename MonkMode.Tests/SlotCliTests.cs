@@ -1201,35 +1201,59 @@ public class VersionCommandTests
     // honest answer available on a machine with no source repo.
 
     [Fact]
-    public void Version_NamesTheRelease_TheInstallDir_AndTheBuild()
+    public void Version_NamesTheRelease_TheCommit_TheBuild_AndTheInstallDir()
     {
         var built = new DateTime(2026, 8, 22, 18, 11, 0, DateTimeKind.Utc);
-        var lines = MonkMode.Program.FormatVersionLines(@"C:\Program Files\MonkMode", built);
-        Assert.Contains(lines, l => l.Contains("MonkMode " + MonkMode.Program.AppVersion));
-        Assert.Contains(lines, l => l.Contains(@"C:\Program Files\MonkMode"));
+        var line = MonkMode.Program.FormatVersionLine(@"C:\Program Files\MonkMode", "850f1ef", built);
+        Assert.Contains("MonkMode " + MonkMode.Program.AppVersion, line);
+        Assert.Contains("850f1ef", line);
+        Assert.Contains(@"C:\Program Files\MonkMode", line);
         // The product prints the build stamp in LOCAL time, so the old literal "22/08/2026"
         // only held west of ~UTC+6 (18:11 UTC crosses midnight from there). Pin the
         // dd/MM/yyyy rendering of the same conversion, not the test machine's zone.
         var expectedDate = built.ToLocalTime().ToString("dd/MM/yyyy", System.Globalization.CultureInfo.InvariantCulture);
-        Assert.Contains(lines, l => l.Contains(expectedDate));
+        Assert.Contains(expectedDate, line);
+    }
+
+    [Fact]
+    public void Version_TellsTwoInstallsOfTheSameReleaseApart()
+    {
+        // The whole point of the commit + directory: dist\ and Program Files\ are two live
+        // installs of release 1.1.0 with separate state, and a stale one used to be
+        // indistinguishable from a fresh one.
+        var built = new DateTime(2026, 8, 30, 16, 31, 0, DateTimeKind.Utc);
+        var deployed = MonkMode.Program.FormatVersionLine(@"C:\Program Files\MonkMode", "850f1ef", built);
+        var scratch = MonkMode.Program.FormatVersionLine(@"C:\Users\x\repos\monk-mode\dist", "6380f82", built);
+        Assert.NotEqual(deployed, scratch);
     }
 
     [Fact]
     public void Version_StaysUsable_WhenTheMachineCannotBeRead()
     {
         // `version` must never be the command that throws or prints half a line: it is what
-        // someone runs when things already look broken.
-        var lines = MonkMode.Program.FormatVersionLines("", null);
-        Assert.Contains(lines, l => l.Contains("MonkMode " + MonkMode.Program.AppVersion));
-        Assert.Contains(lines, l => l.Contains("(unknown)"));
-        Assert.All(lines, l => Assert.False(string.IsNullOrWhiteSpace(l)));
+        // someone runs when things already look broken. Every unknown is NAMED, not dropped.
+        var line = MonkMode.Program.FormatVersionLine("", "", null);
+        Assert.Contains("MonkMode " + MonkMode.Program.AppVersion, line);
+        Assert.Contains("(unknown)", line);
+        Assert.Contains("built unknown", line);
+        Assert.Contains("dev", line);
+        Assert.False(string.IsNullOrWhiteSpace(line));
+    }
+
+    [Fact]
+    public void Version_CallsAnUnstampedBuildDev()
+    {
+        // Directory.Build.props defaults SourceRevisionId to "dev", but a null/blank one
+        // must read the same way rather than leaving an empty bracket.
+        Assert.Contains("(dev, ", MonkMode.Program.FormatVersionLine(@"C:\x", null, null));
+        Assert.Contains("(dev, ", MonkMode.Program.FormatVersionLine(@"C:\x", "   ", null));
     }
 
     [Fact]
     public void Version_DoesNotDoubleTheTrailingSeparator()
     {
-        var lines = MonkMode.Program.FormatVersionLines(@"C:\Program Files\MonkMode\", null);
-        Assert.Contains(lines, l => l.EndsWith(@"C:\Program Files\MonkMode"));
+        Assert.EndsWith(@"C:\Program Files\MonkMode",
+                        MonkMode.Program.FormatVersionLine(@"C:\Program Files\MonkMode\", "abc1234", null));
     }
 
     [Fact]
@@ -1239,5 +1263,36 @@ public class VersionCommandTests
         // so pin it to something a person would notice: a bare, dotted release number. A
         // CHANGELOG bump that forgets this constant leaves `monkmode version` lying.
         Assert.Matches(@"^\d+\.\d+\.\d+$", MonkMode.Program.AppVersion);
+    }
+
+    // ---- the compile-time build stamp the line prefers over the exe's timestamp ----
+
+    [Fact]
+    public void StampedBuildUtc_ParsesTheIsoInstantBuildDistWrites()
+    {
+        // The exact shape tools\build-dist.ps1 passes: yyyy-MM-ddTHH:mm:ssZ.
+        var parsed = MonkMode.Program.ParseStampedBuildUtc("2026-08-30T16:31:00Z");
+        Assert.True(parsed.HasValue);
+        Assert.Equal(new DateTime(2026, 8, 30, 16, 31, 0, DateTimeKind.Utc), parsed!.Value);
+        Assert.Equal(DateTimeKind.Utc, parsed.Value.Kind);
+    }
+
+    [Fact]
+    public void StampedBuildUtc_IsAbsentOnADeveloperBuild()
+    {
+        // Empty is the Directory.Build.props default: the caller then falls back to the
+        // exe's own last-write time, which is all a developer build has.
+        Assert.Null(MonkMode.Program.ParseStampedBuildUtc(""));
+        Assert.Null(MonkMode.Program.ParseStampedBuildUtc("   "));
+        Assert.Null(MonkMode.Program.ParseStampedBuildUtc(null));
+    }
+
+    [Fact]
+    public void StampedBuildUtc_FallsBackRatherThanThrowing_OnRubbish()
+    {
+        // A hand-edited or mangled stamp must degrade to "no stamp", never throw out of
+        // `version` or the first line of `status`.
+        Assert.Null(MonkMode.Program.ParseStampedBuildUtc("not-a-date"));
+        Assert.Null(MonkMode.Program.ParseStampedBuildUtc("$(MonkModeBuiltUtc)"));
     }
 }

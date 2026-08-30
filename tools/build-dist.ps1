@@ -234,6 +234,35 @@ $dotnet = $candidates | Where-Object { (& $_ --list-sdks) -match '^\d+\.' } |
     Select-Object -First 1
 if (-not $dotnet) { throw "No dotnet with an SDK installed was found. Install the .NET 10 SDK." }
 
+# --- Build identity ------------------------------------------------------------
+# Stamp the COMMIT and the build instant into the CLI, so `monkmode version` and the first
+# line of `monkmode status` can name the exact build an install is running. Without this
+# the release constant (1.1.0) is all there is, and two installs of the same release -
+# dist\ and C:\Program Files\MonkMode\ - are indistinguishable, which is how both sat on a
+# stale build for two days after a fix shipped.
+#
+# Best-effort: no git, a detached/empty repo, or any git error falls back to the
+# Directory.Build.props default ("dev"). A build must never fail because it could not name
+# itself. EAP is relaxed only around the git call: with 'Stop' in force, a native command
+# writing to stderr can be turned into a terminating error by the redirection itself.
+$revision = 'dev'
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $sha = & git -C $root rev-parse --short HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $sha) {
+            $candidate = ($sha | Select-Object -First 1).ToString().Trim()
+            if ($candidate) { $revision = $candidate }
+        }
+    } catch {
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+$builtUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+Write-Host "Build stamp: $revision, built $builtUtc"
+
 # Stash the runtime state before the wipe. Restored in the finally below, so a
 # publish that throws half way cannot strand it.
 $stash = $null
@@ -261,7 +290,11 @@ $projects = @(
 # and bundles the runtime; all four still land in the SAME $dist folder (they share
 # one copy of the runtime DLLs - identical files, so overwriting across the four
 # publishes is harmless, and the four exes keep finding each other by directory).
-$publishArgs = @('-c', 'Release', '-o', $dist, '--nologo')
+#
+# The two -p: stamps are read by MonkMode.vbproj's StampBuildInfo target (defaults and the
+# reasoning live in Directory.Build.props). The other three projects ignore them.
+$publishArgs = @('-c', 'Release', '-o', $dist, '--nologo',
+                 "-p:SourceRevisionId=$revision", "-p:MonkModeBuiltUtc=$builtUtc")
 if ($SelfContained) {
     $publishArgs += @('-r', 'win-x64', '--self-contained', 'true')
 }
@@ -299,3 +332,32 @@ if ($SelfContained) {
     Write-Host "Deployed (framework-dependent) to: $dist"
 }
 Get-ChildItem $dist -Filter *.exe | Select-Object -ExpandProperty Name
+
+# --- Is the DEPLOYED install behind this build? --------------------------------
+# READ-ONLY. This installs nothing and touches nothing in Program Files - it only compares
+# two file timestamps and says so, because nothing used to flag the drift at all and it
+# went unnoticed for two days. install.ps1 copies with Copy-Item, which PRESERVES
+# LastWriteTime, so the deployed exe's timestamp is the time it was BUILT, not deployed -
+# which is exactly the comparison worth making.
+#
+# Deliberately not a refusal and not an auto-install: deploying replaces the binaries of a
+# registered service and must only ever happen in a gap with no block live (install.ps1
+# enforces that itself). Saying so is the whole job.
+$deployedExe = Join-Path 'C:\Program Files\MonkMode' 'monkmode.exe'
+$builtExe = Join-Path $dist 'monkmode.exe'
+if ((Test-Path -LiteralPath $deployedExe) -and (Test-Path -LiteralPath $builtExe)) {
+    try {
+        $deployedAt = (Get-Item -LiteralPath $deployedExe).LastWriteTimeUtc
+        $builtAt = (Get-Item -LiteralPath $builtExe).LastWriteTimeUtc
+        Write-Host ""
+        Write-Host "Deployed install: $deployedExe (built $($deployedAt.ToLocalTime().ToString('dd/MM/yyyy HH:mm')))"
+        if ($deployedAt -lt $builtAt) {
+            Write-Host "  DEPLOYED BUILD IS BEHIND - run tools\install.ps1 in a no-block gap to put this build there." -ForegroundColor Yellow
+        } else {
+            Write-Host "  Deployed build is not behind this one." -ForegroundColor Green
+        }
+    } catch {
+        # A read failure here is worth a word, never a build failure: the build succeeded.
+        Write-Host "NOTE: could not compare '$deployedExe' with this build ($($_.Exception.Message))." -ForegroundColor Yellow
+    }
+}

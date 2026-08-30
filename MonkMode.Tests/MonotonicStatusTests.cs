@@ -145,8 +145,24 @@ public class MonotonicStatusDisplayTests
     [Fact]
     public void TheNote_SaysWhatTheEndStampActuallyMeans()
     {
-        Assert.Equal("  Note: the end time counts machine-ON time only - sleep or shutdown pushes it later by the same amount.",
+        Assert.Equal("  Note: the end time counts machine-ON time; time spent off or asleep is credited back once the service can confirm the real time online (otherwise it pushes the end later).",
                      MonkMode.Program.FormatMonotonicNoteLine());
+    }
+
+    [Fact]
+    public void TheNote_DoesNotStillPromiseF77sDowntimeIsLost()
+    {
+        // Before F77 (v12, deployed 30/08/2026) downtime was simply lost and the note said
+        // so flatly. It is now CREDITED on the next tick that can corroborate the real time
+        // from >= 2 HTTPS witnesses, and only stands as pushed-later while offline. The note
+        // is the one place a user is told which of the two they are getting, so pin BOTH
+        // halves: an F77 rollback that quietly restores the old wording fails here.
+        var note = MonkMode.Program.FormatMonotonicNoteLine();
+        Assert.Contains("machine-ON time", note);
+        Assert.Contains("credited back", note);
+        Assert.Contains("confirm the real time online", note);
+        Assert.Contains("otherwise it pushes the end later", note);
+        Assert.DoesNotContain("machine-ON time only", note);
     }
 
     [Fact]

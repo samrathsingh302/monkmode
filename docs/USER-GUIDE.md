@@ -140,10 +140,16 @@ monkmode version
 You should see something like:
 
 ```
-MonkMode 1.1.0
-  Installed at: C:\Program Files\MonkMode
-  This build:   22/08/2026 14:31
+MonkMode 1.1.0 (850f1ef, built 30/08/2026 16:31) at C:\Program Files\MonkMode
 ```
+
+That one line answers three questions at once: which release, which exact build
+(`850f1ef` is the code revision it was built from), and **which copy of MonkMode
+you are talking to**. The last one matters more than it sounds: a developer
+machine can have a second copy in a `dist\` folder, each with its own settings,
+and without the folder name it is easy to configure one and wonder why the other
+never noticed. `monkmode status` prints the same line first, for the same
+reason.
 
 Two rules about installing:
 
@@ -388,20 +394,34 @@ monkmode status
 ```
 
 ```
+MonkMode 1.1.0 (850f1ef, built 30/08/2026 16:31) at C:\Program Files\MonkMode
 MonkMode: 3 blocks active
  Id  State     Ends / Starts             Sites Apps URLs  Exit
   1  ACTIVE    2026-08-26 22:04             11    0    0  code  (~5h 12m of active time left)
      Exit:  ends at its end time, or earlier with the partner code (shown once at block start): 'monkmode unblock --id 1 --code <CODE>'. There is no other way out.
   2  ACTIVE    2026-08-26 16:04              0    1    0  code  (~1h 42m of active time left)
      ...
-  Note: the end time counts machine-ON time only - sleep or shutdown pushes it later by the same amount.
+  Note: the end time counts machine-ON time; time spent off or asleep is credited back once the service can confirm the real time online (otherwise it pushes the end later).
 ```
 
 The **Ends** column is a wall-clock stamp, but a block's timer only runs while
 the computer is on. So the trailing
-`(~5h 12m of active time left)` is the number that decides when it lifts: shut
-the laptop down for two hours and the block ends two hours later than the stamp
-says. Nothing is lost and nothing is gained by turning the machine off.
+`(~5h 12m of active time left)` is the number that decides when it lifts.
+
+Time spent shut down or asleep is **credited back** on the first check after the
+machine returns — but only once MonkMode can confirm what the real time is,
+which it does by asking several websites what time they think it is and
+requiring at least two of them to agree. So: shut down at midnight with two
+hours left on a block, boot at ten in the morning, and within a couple of
+minutes of the network coming up the block is over. If there is no internet (or
+the answers disagree) nothing is credited and the downtime pushes the end later
+instead, until a connection settles it.
+
+That caution is the whole point. Simply believing your computer's own clock
+about how long it was off would hand you a one-line bypass — set the clock
+forward, turn the machine off and on, and the block is gone. MonkMode never
+takes an unverified clock's word for it, so the worst case is that a block lasts
+*longer* than you expected, never shorter.
 
 When more than one block is running, commands that act on *one* block need
 `--id <number>` (the Id column):
@@ -611,9 +631,10 @@ ending and uninstalls.
 
 ### `monkmode version`
 
-Which release and which build this machine runs, and where it is installed.
-(Don't trust right-click → Properties on the exe — it shows an inherited
-version number from the original upstream project.)
+One line: which release, which exact build (the code revision it was compiled
+from and when), and which folder this copy lives in. (Don't trust right-click →
+Properties on the exe — it shows an inherited version number from the original
+upstream project.) `monkmode status` prints the same line first.
 
 ### The things MonkMode itself puts on screen
 
@@ -753,7 +774,7 @@ Run `monkmode help` any time for the always-current version of this.
 | `monkmode schedule --show` / `--validate ...` / `--clear` | Inspect / dry-run / stop future windows. |
 | `monkmode unblock --code <CODE>` | Submits the partner code; a correct one lifts its block in ~10 s. **The only early exit.** |
 | `monkmode unblock` (bare) | Refused. It starts nothing. |
-| `monkmode version` | Release, build date, install folder. |
+| `monkmode version` | One line: release, build revision + date, install folder. |
 | `monkmode help` | Usage, live preset names, and the troubleshooting list. |
 
 ### `block` flags

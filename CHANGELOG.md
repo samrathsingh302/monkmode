@@ -12,9 +12,12 @@ removed before its timer expires. See [The fork base](#the-fork-base) below.
 
 ## [Unreleased]
 
-Three defects found on and just after tag day, all outside enforcement, plus one usability fix
-— F77, which changes what a block's end time *means*, and a **removal** that changes what
-MonkMode *is*: a block can now only be ended by its partner code or its own end time.
+Defects found on and just after tag day, all outside enforcement, plus one usability fix — F77,
+which changes what a block's end time *means* — and a **removal** that changes what MonkMode
+*is*: a block can now only be ended by its partner code or its own end time. Rounded off by a
+sweep of small honesty fixes: the binary no longer teaches a `--urls` pattern form that cannot
+match, no longer claims sites are blocked when they are not, and now names which install and
+which build is answering.
 
 ### Removed
 
@@ -132,6 +135,27 @@ MonkMode *is*: a block can now only be ended by its partner code or its own end 
   immediately after the header as the code. Still no message is sent anywhere — MonkMode has no
   outbound capability; relaying the code remains a physical act.
 
+### Changed
+
+- **`monkmode version` is one line, and it names the build and the install.** Two installs of
+  the same release — `dist\` and `C:\Program Files\MonkMode\` — keep separate config and setup
+  state and were indistinguishable from each other, which is how both sat on a stale build for
+  two days after a fix shipped with nothing flagging the drift. `version` now prints
+  `MonkMode 1.1.0 (850f1ef, built 30/08/2026 16:31) at C:\Program Files\MonkMode`, and
+  `monkmode status` prints the same line first — including on the "no block has ever been
+  installed" path, which is precisely the message that used to get attributed to the wrong
+  install. The commit and build instant are stamped in at build time by `tools\build-dist.ps1`
+  (properties and their fallbacks in the new `Directory.Build.props`); a developer build reads
+  `dev` and falls back to the exe's own timestamp. `tools\build-dist.ps1` also closes with a
+  **read-only** comparison against the deployed exe and says when the deployed build is behind
+  — it installs nothing, because deploying replaces the binaries of a registered service and
+  may only happen in a gap with no block live.
+- **The monotonic note under `status` no longer says downtime is simply lost.** With F77
+  deployed, "sleep or shutdown pushes the end later by the same amount" is only true
+  *offline*: once the service can corroborate the real time from at least two agreeing HTTPS
+  witnesses, the downtime is credited back on the next tick. The note now states both halves,
+  as do `README.md` and the user guide.
+
 ### Fixed
 
 - **A block that simply ran out left the hosts file read-only.** The read-only attribute is
@@ -186,6 +210,22 @@ MonkMode *is*: a block can now only be ended by its partner code or its own end 
   and HKLM) and a relauncher would put a second process on the arm path for a
   documentation problem. `README.md`, `docs/USER-GUIDE.md` §1a, `docs/RUNBOOK.md` §4.5 and
   the `install.ps1` closing banner now all name the failure mode.
+- **The `--urls` glob footgun, in the exe's own help.** `--urls` patterns are matched as
+  ordinal **substrings** — there are no wildcards, so a `*` is compared literally and, since
+  real addresses never contain one, a pattern carrying `*` matches nothing at all while the
+  block arms and looks perfectly healthy. The docs were fixed on 26/08/2026; the binary's own
+  usage text still shipped `--urls "*/watch*"` as its example and so taught the broken form to
+  anyone without the docs. Every shipped example is now the substring form
+  (`--urls "youtube.com/shorts"`), the help explains the matching rule outright, and an arm
+  carrying an asterisked pattern now prints a **warning** naming the pattern and its rewrite.
+  It is a nudge, not a refusal: the block still arms with the patterns exactly as typed, so a
+  script that has been passing globs keeps working rather than suddenly failing.
+- **The failed-service-install warning overstated what was still blocked.** When the block was
+  armed but the service could not be installed or started, the warning promised that "the
+  blocked sites stay in your hosts file meanwhile" — true in the ordinary case, but a lie in
+  the double failure where the hosts write had *also* failed and nothing whatever was
+  blocking. The two cases now print different sentences. Overstating coverage is the one thing
+  a self-control tool must not do.
 
 ## [1.1.0] — 22/08/2026 (multi-block + URL-level blocking)
 

@@ -1488,6 +1488,49 @@ Module Blocker
         Return True
     End Function
 
+    ' The URL-pattern GLOB FOOTGUN warning (backlog item, 26/08/2026), as text - "" when
+    ' there is nothing to say.
+    '
+    ' The P57 matcher is ORDINAL SUBSTRING by design (MM_notify\UrlWatch.vb
+    ' MatchedPatternFor): there are no wildcards, so a "*" is compared literally, and since
+    ' real addresses never contain one, ANY pattern carrying a "*" matches nothing at all -
+    ' silently. The block arms, the status table shows the patterns, and the nudge simply
+    ' never fires. That cost a live FX8 drill attempt, and the exe's own help used to ship
+    ' the broken form as its example.
+    '
+    ' NUDGE ONLY - this NEVER refuses. The caller prints it to stderr and carries on arming,
+    ' unchanged, with the patterns exactly as typed. Refusing would turn a cosmetic mistake
+    ' into a failed arm, and would break any script that has been passing globs for weeks;
+    ' rewriting the pattern silently would be worse still (it would arm something the user
+    ' did not type). Nothing here touches enforcement.
+    '
+    ' PURE: takes the raw --urls argument text and returns the warning line. Splitting
+    ' mirrors TryBuildUrlPatterns (comma is the only separator, values trimmed, blanks
+    ' skipped) so the patterns named in the warning are the ones actually armed; duplicates
+    ' are reported once.
+    Friend Function UrlGlobWarningLine(ByVal urlsArg As String) As String
+        If urlsArg Is Nothing OrElse urlsArg.Trim() = "" Then Return ""
+        Dim shown As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim rewrites As New List(Of String)
+        For Each raw As String In urlsArg.Split(","c)
+            Dim p As String = raw.Trim()
+            If p = "" OrElse Not p.Contains("*") Then Continue For
+            If Not shown.Add(p) Then Continue For
+            Dim stripped As String = p.Replace("*", "").Trim()
+            If stripped = "" Then
+                ' Nothing survives the strip (e.g. "*" or "**"), so there is no pattern to
+                ' suggest - point at the shape that works instead of printing an empty one.
+                rewrites.Add("""" & p & """ -> nothing usable left; write a site and path, e.g. ""youtube.com/shorts""")
+            Else
+                rewrites.Add("""" & p & """ -> """ & stripped & """")
+            End If
+        Next
+        If rewrites.Count = 0 Then Return ""
+        Return "Warning: --urls patterns are matched as PLAIN TEXT, not wildcards - a '*' is compared literally, " &
+               "so a pattern containing one never matches anything (the block still arms exactly as typed). " &
+               "Rewrite: " & String.Join("; ", rewrites) & "."
+    End Function
+
     ' The section name for a slot POSITION (1-based), matching [Slot1]..[Slot8].
     Private Function SlotSection(ByVal position As Integer) As String
         Return "Slot" & position.ToString(CultureInfo.InvariantCulture)

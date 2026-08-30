@@ -1,0 +1,40 @@
+<Project>
+
+  <!--
+    Build identity for every project in the solution.
+
+    WHY THIS EXISTS: `dist\` and `C:\Program Files\MonkMode\` are two separate live
+    installs, and both sat on a STALE build for two days after a fix shipped with nothing
+    at all flagging the drift. The exes carry the inherited Cold Turkey FileVersion
+    (0.7.0.0), so Windows' own properties dialog answers "which build is this?" wrongly,
+    and `monkmode version` could only offer the release constant plus the file timestamp -
+    which cannot distinguish two builds of the same release.
+
+    So the CLI is stamped with the COMMIT it was built from. Both values are plain
+    properties with safe fallbacks, so a bare `dotnet build` still works and still
+    produces a byte-stable stamp (no incremental-build churn):
+
+      SourceRevisionId    the git short SHA. tools\build-dist.ps1 passes it from
+                          `git rev-parse` on the repo it is building; a developer build
+                          leaves it "dev".
+      MonkModeBuiltUtc    ISO-8601 UTC build instant, passed by the same script. Empty on
+                          a developer build, and `monkmode version` then falls back to the
+                          exe's own last-write time (which Copy-Item preserves, so a
+                          deployed copy still reports when it was BUILT).
+
+    Deliberately NOT a timestamp evaluated here: $([System.DateTime]::UtcNow) would differ
+    on every evaluation, so the generated source would change on every build and force a
+    recompile of the CLI (and the test project through it) every single time.
+
+    The stamp is consumed by MonkMode.vbproj's StampBuildInfo target, which generates the
+    BuildStamp module. These four VB projects set GenerateAssemblyInfo=false (they keep
+    hand-written My Project\AssemblyInfo.vb files), so an AssemblyInformationalVersion /
+    AssemblyMetadata attribute would never be emitted - a generated source file is the one
+    mechanism that works here.
+  -->
+  <PropertyGroup>
+    <SourceRevisionId Condition="'$(SourceRevisionId)' == ''">dev</SourceRevisionId>
+    <MonkModeBuiltUtc Condition="'$(MonkModeBuiltUtc)' == ''"></MonkModeBuiltUtc>
+  </PropertyGroup>
+
+</Project>

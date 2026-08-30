@@ -34,4 +34,39 @@
     <Import Include="System.Diagnostics" />
   </ItemGroup>
 
+  <!--
+    Deploy-gap visibility: generate the BuildStamp module from the SourceRevisionId /
+    MonkModeBuiltUtc properties (defaults + rationale in the repo-root
+    Directory.Build.props). GenerateAssemblyInfo is false in this project, so assembly
+    attributes are not an option; a generated source file is.
+
+    WriteOnlyWhenDifferent keeps incremental builds clean - the content only changes when
+    the commit (or an explicitly passed build instant) changes, so a plain `dotnet build`
+    recompiles this project no more often than it did before.
+
+    No namespace is declared in the generated file: RootNamespace is MonkMode, so a bare
+    module lands at MonkMode.BuildStamp (declaring one would give MonkMode.MonkMode).
+  -->
+  <Target Name="StampBuildInfo" BeforeTargets="BeforeCompile;CoreCompile">
+    <PropertyGroup>
+      <MonkModeBuildStampFile>$(IntermediateOutputPath)MonkModeBuildStamp.g.vb</MonkModeBuildStampFile>
+    </PropertyGroup>
+    <ItemGroup>
+      <MonkModeBuildStampLines Include="' &lt;auto-generated&gt; Written by MonkMode.vbproj's StampBuildInfo target. Do not edit." />
+      <MonkModeBuildStampLines Include="Friend Module BuildStamp" />
+      <MonkModeBuildStampLines Include="    Friend Const Revision As String = &quot;$(SourceRevisionId)&quot;" />
+      <MonkModeBuildStampLines Include="    Friend Const BuiltUtc As String = &quot;$(MonkModeBuiltUtc)&quot;" />
+      <MonkModeBuildStampLines Include="End Module" />
+    </ItemGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteLinesToFile File="$(MonkModeBuildStampFile)"
+                      Lines="@(MonkModeBuildStampLines)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(MonkModeBuildStampFile)" />
+      <FileWrites Include="$(MonkModeBuildStampFile)" />
+    </ItemGroup>
+  </Target>
+
 </Project>
