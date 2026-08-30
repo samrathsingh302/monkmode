@@ -16,7 +16,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# MonkMode B7 fail-closed test (RUN ELEVATED) - standalone, ~1 minute.
+# MonkMode B7 fail-closed test (RUN ELEVATED) - standalone, ~3 minutes.
+# (~1 min before ledger 320; the restore + resume + code-lift teardown adds ~2.)
 #
 # Proves the B7 fail-open FIX (2026-06-13): the service must NOT re-stamp the
 # tamper-evident MAC over a config whose MAC is currently INVALID. The bug was
@@ -38,30 +39,34 @@
 #   So "the MAC value is unchanged after 2 ticks" == the fix is live.
 #
 # ############################################################################
-# # BROKEN BY 319:  THIS DRILL'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
+# # TEARDOWN AFTER F79 (ledger 320) - READ THIS BEFORE RUNNING.
 # #
-# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
-# # tools\smoke\cleanup.ps1. A running block now ends on exactly two events - its
-# # own end time, or a service-verified partner code - so there is no forced
-# # teardown to fall back on and no rescue script behind it.
+# # This drill deliberately drives the config into the FROZEN state, and ledger
+# # 319 made that state absolute: with an invalid MAC, NOTHING lifts the block.
+# # Not the timer (EffectiveBlockHasExpired holds), and not the partner code
+# # either (ClassifyPartnerCodeSignal requires a valid MAC). The old exit was
+# # `unblock --force`, which no longer exists. So the order below is not
+# # optional and not a convenience - it is the only way out of this drill:
 # #
-# # WHAT IT NEEDS (a live, elevated sitting; it cannot be verified from a bench):
-# #   * capture each arm's output and parse the one-time code off the line after
-# #     "Emergency unlock code" (cv-d-smoke.ps1's ParseCode is the pattern), then
-# #     tear down with `unblock --code <CODE>`, wait for Stopped-or-gone
-# #     (RUNBOOK E9 - never poll for 'gone' after a lift), and `sc.exe delete
-# #     MONKMODE` to reach 'gone' for the next section's precondition;
-# #   * or, where a code cannot be threaded through, use a --for short enough that
-# #     natural expiry IS the teardown and say so in the header. `--for 1` is
-# #     always refused, so one minute is the floor.
-# #   * an aborted run now leaves the armed block standing until its timer runs
-# #     out. That is the design, not a bug - say it in the header rather than
-# #     implying a rescue exists.
+# #   corrupt the MAC -> assert fail-closed -> RESTORE THE INI BYTES SAVED
+# #   BEFORE CORRUPTING -> assert the service resumes -> lift with the code.
+# #
+# # The restore is a WHOLE-FILE byte restore, never a "put the old Mac value
+# # back". [Time] HighWater and Now are MAC-COVERED (ConfigIntegrity.Build-
+# # Canonical:261-273) and the heartbeat rewrites them every tick, so the MAC
+# # string read at step 2 goes stale the instant a tick lands: writing it back
+# # over newer content yields a config that is STILL invalid, and the machine
+# # would be frozen with no exit at all. Restoring the file whole keeps content
+# # and MAC mutually consistent by construction. The restored HighWater is a
+# # few seconds behind, which the service re-credits at the honest <=10s/tick
+# # rate (AdvanceHighWater) - i.e. the block ends slightly LATE. Fail-closed,
+# # which is the only direction this repo accepts.
+# #
+# # If this run aborts between the corruption and the restore, the machine is
+# # frozen until B10 (boot elsewhere and edit dist\monkmode_settings.ini back
+# # from $iniBackup, written next to the hosts backup). That is why the arm is
+# # 15 minutes and why you run this WATCHED. There is no rescue script.
 # ############################################################################
-#
-# (It used to exit via 'monkmode unblock --force', which also exercised the B6
-# escape hatch, falling back to cleanup.ps1 if anything was left behind. B6 is no
-# longer a feature: the CLI has no teardown at all.)
 #
 # Usage (ELEVATED):
 #   powershell -ExecutionPolicy Bypass -File C:\Users\samra\monkmode-smoketest\b7-failclosed-test.ps1
@@ -82,12 +87,18 @@ $ini    = Join-Path $dist 'monkmode_settings.ini'
 $setupIni = Join-Path $dist 'monkmode_setup.ini'   # absent on a fresh dist -> arms refuse exit 4
 $hosts  = "$env:SystemRoot\System32\drivers\etc\hosts"
 $backup = 'C:\Users\samra\monkmode-smoketest\hosts.backup.txt'
-# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
+# 320: the pre-corruption snapshot of the whole enforcement ini. Written beside the
+# hosts backup so it survives this process - it is the ONLY way back out of the frozen
+# state this drill creates (see the header).
+$iniBackup = 'C:\Users\samra\monkmode-smoketest\monkmode_settings.pre-b7.ini'
 $pass = 0; $fail = 0
 function Check($name, $cond) {
   if ($cond) { Write-Host "  [PASS] $name" -ForegroundColor Green; $script:pass++ }
   else       { Write-Host "  [FAIL] $name" -ForegroundColor Red;   $script:fail++ }
 }
+$mmLib = if ($PSScriptRoot) { $PSScriptRoot } else { 'C:\Users\samra\repos\monk-mode\tools\smoke' }
+. (Join-Path $mmLib '_lib.ps1')
+MMInit -Monk $monk -Hosts $hosts
 function Resolve-Example { try { [System.Net.Dns]::GetHostAddresses('example.com') | ForEach-Object { $_.ToString() } } catch { @() } }
 
 # Read the [Integrity] Mac value from the ini (raw line scan; the value is Base64,
@@ -101,6 +112,24 @@ function Set-IniMac($value) {
   $t = Get-Content $ini -Raw
   $t = [regex]::Replace($t, '(?m)^(\s*Mac\s*=\s*)\S+\s*$', ('${1}' + $value))
   [IO.File]::WriteAllText($ini, $t)
+}
+# 320: the whole-file snapshot/restore pair that is this drill's only way out of the
+# frozen state (header). Byte-for-byte, never field-by-field: content and MAC must stay
+# mutually consistent, and the heartbeat rewrites MAC-covered [Time] fields every tick.
+# Both retry - the service has the file open on its own 10s cadence and a sharing
+# violation here is transient, not fatal.
+function Save-IniBytes([string]$to) {
+  for ($i = 0; $i -lt 8; $i++) {
+    try { [IO.File]::WriteAllBytes($to, [IO.File]::ReadAllBytes($ini)); return $true } catch { Start-Sleep -Milliseconds 400 }
+  }
+  return $false
+}
+function Restore-IniBytes([string]$from) {
+  if (-not (Test-Path $from)) { return $false }
+  for ($i = 0; $i -lt 12; $i++) {
+    try { [IO.File]::WriteAllBytes($ini, [IO.File]::ReadAllBytes($from)); return $true } catch { Start-Sleep -Milliseconds 400 }
+  }
+  return $false
 }
 
 # 0. preconditions
@@ -120,12 +149,14 @@ if (-not (Test-Path $setupIni)) {
 if (Get-Service MONKMODE -ErrorAction SilentlyContinue) { Write-Host "MONKMODE already exists. Let any block end, then 'sc.exe delete MONKMODE' while idle." -ForegroundColor Yellow; exit 1 }
 if (-not (Test-Path $backup)) { Copy-Item $hosts $backup -Force }
 
+$arm = $null; $corrupted = $false; $restored = $false
 try {
-  # 1. Arm a block long enough that it cannot auto-expire during the test (we
-  #    exit by code, not by waiting - see the BROKEN BY 319 header).
+  # 1. Arm a block long enough that it cannot auto-expire during the test. 320: the arm
+  #    is CAPTURED (MMArm) because the one-time code on its stdout is the only teardown
+  #    that exists - and this drill must not reach its restore without one in hand.
   Write-Host "`n=== 1. Arming a 15-minute block on example.com ===" -ForegroundColor Cyan
-  & $monk block --sites example.com --for 15
-  Start-Sleep -Seconds 3
+  $arm = MMArm "--sites example.com --for 15"
+  Write-Host "    block id $($arm.Id); unlock code captured: $([bool]$arm.Code)"
 
   Write-Host "`n=== 2. Verifying the block is live + B7 wiring present ===" -ForegroundColor Cyan
   $svc = Get-Service MONKMODE -ErrorAction SilentlyContinue
@@ -136,6 +167,16 @@ try {
   Write-Host "    [Integrity] Mac (original) = $macOrig"
   Check "B7 [Integrity] Mac present" ($null -ne $macOrig -and $macOrig.Length -gt 0)
 
+  # 2b. 320: the retired exits, asserted here on a HEALTHY block - before the corruption,
+  #     because once the MAC is invalid every exit refuses for the wrong reason.
+  Write-Host "`n=== 2b. 319/F79 exit surface (on a healthy block) ===" -ForegroundColor Cyan
+  MMCheckRefusedExits $arm.Id
+
+  # 2c. THE SNAPSHOT. Everything below is one-way until this file is written back.
+  Write-Host "`n=== 2c. Snapshotting the ini BEFORE corrupting it (the only way back) ===" -ForegroundColor Cyan
+  Check "pre-corruption ini snapshot written" (Save-IniBytes $iniBackup)
+  Write-Host "    -> $iniBackup"
+
   # 3. Corrupt the MAC (flip the first Base64 char to a different valid one - stays
   #    valid Base64, wrong bytes => ConfigMacIsValid=False, no DecryptData/End risk).
   Write-Host "`n=== 3. Corrupting [Integrity] Mac (tamper -> macValid=False) ===" -ForegroundColor Cyan
@@ -144,6 +185,7 @@ try {
   if ($first -ceq 'A') { $flip = 'B' }
   $macCorrupt = $flip + $macOrig.Substring(1)
   Set-IniMac $macCorrupt
+  $corrupted = $true
   Start-Sleep -Milliseconds 300
   $macNow = Get-IniMac
   Check "MAC corruption written to ini" ($macNow -eq $macCorrupt -and $macNow -ne $macOrig)
@@ -176,23 +218,58 @@ try {
   $macAfterAdd = Get-IniMac
   Write-Host "    [Integrity] Mac (after add) = $macAfterAdd"
   Check "FIX: 'add' did NOT re-stamp over the invalid MAC" ($macAfterAdd -eq $macCorrupt)
+  # NB deliberately NOT drilled here: submitting the partner code while the config is
+  # frozen. It would not lift (ClassifyPartnerCodeSignal requires a valid MAC - that is
+  # the documented cost of B7 and `monkmode help` says so), but it leaves a
+  # monkmode_partner.code.<id> trigger on disk that the restored service could consume
+  # on its very next tick, lifting the block before step 5b could observe the resume.
+  # The frozen-config-never-lifts property is unit-pinned; this drill's job is to prove
+  # the RESUME, and to leave the machine in a state a code can still open.
+
+  # 5. RESTORE. The one-way door closes here (header). Whole file, byte for byte.
+  Write-Host "`n=== 5. Restoring the pre-corruption ini (leaving the frozen state) ===" -ForegroundColor Cyan
+  $restored = Restore-IniBytes $iniBackup
+  Check "pre-corruption ini restored byte-for-byte" $restored
+
+  # 5b. The service must RESUME normal enforcement: with a valid MAC again, the
+  #     heartbeat re-stamps [Integrity] Mac each tick (it covers [Time] Now/HighWater,
+  #     which every tick rewrites - ConfigIntegrity.BuildCanonical:261-273). So the MAC
+  #     MOVING OFF the restored value within ~2 ticks is the proof that the Hold has
+  #     lifted and the writer is live again. The block must still be enforcing while it
+  #     does: resuming is not lifting.
+  Write-Host "`n=== 5b. The service must resume normal enforcement (~2 ticks) ===" -ForegroundColor Cyan
+  $macRestored = Get-IniMac
+  $resumed = $false
+  $u = (Get-Date).AddSeconds(35)
+  while ((Get-Date) -lt $u) {
+    Start-Sleep -Seconds 2
+    if ((Get-IniMac) -ne $macRestored) { $resumed = $true; break }
+  }
+  Check "RESUME: the service re-stamped the MAC once the config was valid again" $resumed
+  Check "RESUME: the block is still enforcing (a resume is not a lift)" (((MMSvcState) -eq 'Running') -and (MMHostsHasMarker))
+
+  # 6. And only now can the code lift it - which is the point of restoring first: a
+  #    frozen config is opened by NOTHING, so a drill that freezes one must unfreeze it.
+  Write-Host "`n=== 6. Partner-code lift + teardown ===" -ForegroundColor Cyan
+  MMTearDown -Code $arm.Code -Id $arm.Id -Label 'B7'
 }
 finally {
-  # 6. Exit via the B6 escape hatch (the documented clean way out of a frozen
-  #    block), then verify.
-  # BROKEN BY 319: `unblock --force` no longer exists, and neither does cleanup.ps1.
-  # This step must become a partner-code lift + `sc.exe delete MONKMODE` (header).
-  Write-Host "`n=== 5. Tearing down ===" -ForegroundColor Cyan
-  throw 'BROKEN BY 319: this teardown step needs rewriting as a partner-code lift (see the header).'
-  Start-Sleep -Seconds 2
-  $gone = -not (Get-Service MONKMODE -ErrorAction SilentlyContinue)
-  $hostsClean = ((Get-Content $hosts -Raw) -notmatch '#### MonkMode Entries ####')
-  Check "the teardown removed the service" $gone
-  Check "the teardown restored hosts"      $hostsClean
-  if (-not $gone -or -not $hostsClean) {
-    Write-Host "  the teardown did not fully clean up - and ledger 319 removed the rescue." -ForegroundColor Yellow
-    Write-Host "  Wait for the block's timer, or lift it with its partner code." -ForegroundColor Yellow
+  # LAST-DITCH RESTORE. If anything above threw between the corruption and step 5, the
+  # machine is frozen and NOTHING lifts it - not the timer, not the code. Put the bytes
+  # back here before doing anything else; without this the only way out is B10.
+  if ($corrupted -and -not $restored) {
+    Write-Host "`n  !! aborted while the config was CORRUPT - restoring the ini snapshot now" -ForegroundColor Yellow
+    if (Restore-IniBytes $iniBackup) {
+      Write-Host "     restored from $iniBackup - the block is enforcing normally again and its code will open it." -ForegroundColor Yellow
+      Start-Sleep -Seconds 12   # let one tick re-stamp before anything submits a code
+    } else {
+      Write-Host "     RESTORE FAILED. The config is frozen: no timer and no code can lift this block." -ForegroundColor Red
+      Write-Host "     Copy $iniBackup back over $ini by hand (B10 territory)." -ForegroundColor Red
+      $fail++
+    }
   }
+  Write-Host "`n=== teardown (this run's minted code) ===" -ForegroundColor Cyan
+  MMEmergencyLift
 }
 
 Write-Host "`n================ B7 RESULT: $pass passed, $fail failed ================" -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})

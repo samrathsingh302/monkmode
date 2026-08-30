@@ -61,7 +61,6 @@ if (-not $Dist) {
 $monk    = Join-Path $Dist 'monkmode.exe'
 $cfg     = Join-Path $Dist 'monkmode_settings.ini'
 $hosts   = "$env:SystemRoot\System32\drivers\etc\hosts"
-# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
 
 $pass = 0; $fail = 0; $void = 0
 function Check($n, $c)  { if ($c) { Write-Host "  [PASS] $n" -ForegroundColor Green; $script:pass++ } else { Write-Host "  [FAIL] $n" -ForegroundColor Red; $script:fail++ } }
@@ -79,35 +78,24 @@ function SlotCount    { $l = $(try { (Get-Content $cfg -Raw) } catch { '' }) -sp
                         if ($l) { [int]($l -replace 'SlotCount=', '') } else { 0 } }
 function Notifiers    { @(Get-Process -Name mm_notify -ErrorAction SilentlyContinue).Count }
 
-# Teardown that always works, in the documented order (the service is CanStop=False and
-# self-restarting).
-# ############################################################################
-# # BROKEN BY 319:  THIS DRILL'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
-# #
-# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
-# # tools\smoke\cleanup.ps1. A running block now ends on exactly two events - its
-# # own end time, or a service-verified partner code - so there is no forced
-# # teardown to fall back on and no rescue script behind it.
-# #
-# # WHAT IT NEEDS (a live, elevated sitting; it cannot be verified from a bench):
-# #   * capture each arm's output and parse the one-time code off the line after
-# #     "Emergency unlock code" (cv-d-smoke.ps1's ParseCode is the pattern), then
-# #     tear down with `unblock --code <CODE>`, wait for Stopped-or-gone
-# #     (RUNBOOK E9 - never poll for 'gone' after a lift), and `sc.exe delete
-# #     MONKMODE` to reach 'gone' for the next section's precondition;
-# #   * or, where a code cannot be threaded through, use a --for short enough that
-# #     natural expiry IS the teardown and say so in the header. `--for 1` is
-# #     always refused, so one minute is the floor.
-# #   * an aborted run now leaves the armed block standing until its timer runs
-# #     out. That is the design, not a bug - say it in the header rather than
-# #     implying a rescue exists.
-# ############################################################################
-function ForceDown {
-    throw 'BROKEN BY 319: ForceDown needs rewriting as a partner-code lift (see the header).'
-    $u = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $u -and (SvcState) -ne 'gone') { Start-Sleep -Milliseconds 500 }
-    if ((SvcState) -ne 'gone') { & powershell -ExecutionPolicy Bypass -File $cleanup -Dist $Dist 2>&1 | Out-Null }
-}
+# TEARDOWN AFTER F79 (ledger 320). The old ForceDown was `unblock --force` with
+# cleanup.ps1 behind it; ledger 319 removed both. Each sub-drill now tears down with the
+# one-time partner code its own arm printed - MMArm captures it, MMTearDown submits it,
+# waits for Stopped-or-gone (RUNBOOK E9: a lift leaves the service REGISTERED and stopped,
+# never 'gone') and `sc.exe delete MONKMODE` for the next sub-drill's precondition. All in
+# tools\smoke\_lib.ps1.
+#
+# Sub-drill 1 arms TWO blocks on purpose (that is the race), so it holds two codes and
+# tears both down; a code only ever opens the slot that minted it, so submitting both is
+# how you end both. Sub-drill 2's block is meant to expire naturally - late, never early -
+# so its code is the backstop for the run where it wedges instead.
+#
+# An abort leaves whatever was armed standing until its own --for timer ends (2, 4 or 7
+# minutes here). There is no escape hatch. As with clock-drill-test.ps1, the thing an
+# abort really costs you is the CLOCK - see the warning above.
+$mmLib = if ($PSScriptRoot) { $PSScriptRoot } else { 'C:\Users\samra\repos\monk-mode\tools\smoke' }
+. (Join-Path $mmLib '_lib.ps1')
+MMInit -Monk $monk -Hosts $hosts
 
 # True clock offset vs an external HTTP Date header, WITHOUT setting the clock. 8s-bounded
 # HTTP HEAD, never w32tm /resync - that can block indefinitely and has hung a drill before.
@@ -132,11 +120,12 @@ Write-Host ("FX6 drill - dist build {0}" -f (Get-Item $monk).LastWriteTime.ToStr
 try {
     # ================= 1. ARM-vs-RETIRE RACE (no clock manipulation) =================
     Write-Host "`n=== 1. arm-vs-retire race ===" -ForegroundColor Cyan
-    # NEVER pipe or capture an arm: the CLI spawns mm_notify.exe, which used to inherit
-    # stdout, so a PS pipeline blocked until block expiry and every later check ran
-    # post-expiry (the 2026-07-10 void drills). Fixed 14/07, but the habit stays.
-    & $monk block --sites example.com --for 2
-    Start-Sleep -Seconds 4
+    # 320: these arms used to be deliberately UNPIPED - on a pre-14/07/2026 dist the CLI
+    # spawned mm_notify.exe with an inherited stdout, so a PS pipeline blocked until block
+    # expiry and every later check ran post-expiry (the 2026-07-10 void drills). Fixed at
+    # the root in source; the capture is now MANDATORY, because the code on that stdout is
+    # the only teardown left. Run against a CURRENT dist - a stale one wedges here.
+    $armA = MMArm "--sites example.com --for 2"
     Check "slot A armed (service Running)" ((SvcState) -eq 'Running')
     Check "slot A: hosts marker present"   (HostsBlocked)
     $countA = SlotCount
@@ -145,7 +134,7 @@ try {
     # Slot A retires at ~120s. Arm B inside the retirement window so the two writers collide.
     Write-Host "  waiting for slot A's retirement window (~110s) ..."
     Start-Sleep -Seconds 110
-    & $monk block --sites example.net --for 4
+    $armB = MMArm "--sites example.net --for 4"
     Start-Sleep -Seconds 20    # let A's retire tick and B's arm both land
 
     $countB = SlotCount
@@ -157,8 +146,15 @@ try {
     Check "race: still enforcing (hosts marker present)"               (HostsBlocked)
     Check "race: service still Running"                               ((SvcState) -eq 'Running')
     & $monk status
-    ForceDown
-    Check "race: torn down cleanly (service gone, hosts clean)" (((SvcState) -eq 'gone') -and -not (HostsBlocked))
+    # 320 (a)+(b): the retired exits, against whichever block survived the race.
+    MMCheckRefusedExits $armB.Id
+    # Two blocks may be armed here, and a code opens ONLY the slot that minted it. So
+    # submit A's without asserting (it matches only if A has not retired yet), then lift
+    # on B's - the last block standing, so that one really does take the service down.
+    # MMResetInstall inside MMTearDown scores the "gone + hosts clean" teardown that the
+    # old `Check "race: torn down cleanly"` line asserted here.
+    MMSubmitCode $armA.Code
+    MMTearDown -Code $armB.Code -Id $armB.Id -Label 'race'
 
     if ($SkipClock) {
         Write-Host "`n-SkipClock given: sub-drills 2 and 3 not run." -ForegroundColor Yellow
@@ -194,7 +190,7 @@ try {
             # watched across the whole hold to prove it never stopped enforcing.
             Write-Host "`n=== 2+3. orphan recovery + gate-site wiring ===" -ForegroundColor Cyan
             $nominal = 7   # minutes; must exceed the 300s bound so the release is observable
-            & $monk block --sites example.com --for $nominal
+            $armOrphan = MMArm "--sites example.com --for $nominal"
             $armed = Get-Date
             Start-Sleep -Seconds 15   # let HighWater seed on real ticks
             Check "orphan: block armed and enforcing" (((SvcState) -eq 'Running') -and (HostsBlocked))
@@ -245,11 +241,11 @@ try {
                 $endBy = $armed.AddSeconds($nominal * 60 + 400)
                 while ((Get-Date) -lt $endBy -and (HostsBlocked)) { Start-Sleep -Seconds 15 }
                 $lifted = ((Get-Date) - $armed).TotalSeconds
-                # Assert the lift BEFORE ForceDown erases the evidence: a wedge after the
+                # Assert the lift BEFORE the teardown erases the evidence: a wedge after the
                 # flag released used to score all-green here, and the timeout below printed
                 # as "lifted at" (the same lie reboot-drill's -Watch told on 25/08).
                 $actuallyLifted = -not (HostsBlocked)
-                Check "orphan: the block ACTUALLY lifted on its own (hosts marker gone before ForceDown)" $actuallyLifted
+                Check "orphan: the block ACTUALLY lifted on its own (hosts marker gone before teardown)" $actuallyLifted
                 Check "orphan: block did NOT lift early (>= its nominal $nominal min)" ($lifted -ge ($nominal * 60))
                 if ($actuallyLifted) {
                     Write-Host ("  lifted at ~{0}s vs nominal {1}s (over-run {2}s, bound 300s)" -f [math]::Round($lifted), ($nominal * 60), [math]::Round($lifted - $nominal * 60))
@@ -257,12 +253,18 @@ try {
                     Write-Host ("  TIMED OUT at ~{0}s: still enforcing past nominal {1}s + 400s grace - nothing lifted" -f [math]::Round($lifted), ($nominal * 60)) -ForegroundColor Yellow
                 }
             }
-            ForceDown
+            # 320: natural expiry is this sub-drill's teardown (that IS the assertion
+            # above). MMLiftWithCode is a no-op when the block has already gone down, and
+            # uses the captured code only in the wedge case - the one where the drill
+            # would otherwise walk away leaving a 7-minute block plus a poked clock.
+            MMTearDown -Code $armOrphan.Code -Id $armOrphan.Id -Label 'orphan'
         }
     }
 } finally {
-    # Belt and braces: never leave this machine armed, whatever happened above.
-    ForceDown
+    # Belt and braces: never leave this machine armed. 320: the only lever left is the
+    # set of codes THIS RUN minted (MMEmergencyLift). If none of them opens what is
+    # standing, the block ends at its own end time - there is nothing else, by design.
+    MMEmergencyLift
     Write-Host "`n--- final state ---"
     Write-Host ("  service: {0}   hosts marker: {1}   notifiers: {2}" -f (SvcState), (HostsBlocked), (Notifiers))
     $o = NtpOffset

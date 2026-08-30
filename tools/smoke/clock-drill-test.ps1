@@ -51,33 +51,27 @@ if (-not $Dist) {
 }
 $monk  = Join-Path $Dist 'monkmode.exe'
 $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
-# BROKEN BY 319: cleanup.ps1 was deleted with the escape hatch it wrapped.
 $pass = 0; $fail = 0
 function Check($n,$c){ if($c){Write-Host "  [PASS] $n" -ForegroundColor Green;$script:pass++}else{Write-Host "  [FAIL] $n" -ForegroundColor Red;$script:fail++} }
 function SvcState { $s=Get-Service MONKMODE -ErrorAction SilentlyContinue; if($s){$s.Status}else{'gone'} }
 function HostsBlocked { $(try{Get-Content $hosts -Raw}catch{''}) -match '#### MonkMode Entries ####' }
-# ############################################################################
-# # BROKEN BY 319:  THIS DRILL'S TEARDOWN NO LONGER EXISTS. DO NOT RUN IT AS-IS.
-# #
-# # Ledger 319 (30/08/2026) removed `monkmode unblock --force` and deleted
-# # tools\smoke\cleanup.ps1. A running block now ends on exactly two events - its
-# # own end time, or a service-verified partner code - so there is no forced
-# # teardown to fall back on and no rescue script behind it.
-# #
-# # WHAT IT NEEDS (a live, elevated sitting; it cannot be verified from a bench):
-# #   * capture each arm's output and parse the one-time code off the line after
-# #     "Emergency unlock code" (cv-d-smoke.ps1's ParseCode is the pattern), then
-# #     tear down with `unblock --code <CODE>`, wait for Stopped-or-gone
-# #     (RUNBOOK E9 - never poll for 'gone' after a lift), and `sc.exe delete
-# #     MONKMODE` to reach 'gone' for the next section's precondition;
-# #   * or, where a code cannot be threaded through, use a --for short enough that
-# #     natural expiry IS the teardown and say so in the header. `--for 1` is
-# #     always refused, so one minute is the floor.
-# #   * an aborted run now leaves the armed block standing until its timer runs
-# #     out. That is the design, not a bug - say it in the header rather than
-# #     implying a rescue exists.
-# ############################################################################
-function ForceDown { throw 'BROKEN BY 319: ForceDown needs rewriting as a partner-code lift (see the header).' }
+# TEARDOWN AFTER F79 (ledger 320). `unblock --force` and cleanup.ps1 are gone, so both
+# drills below tear down with the one-time partner code their own arm printed: MMArm
+# captures it, MMTearDown submits it and waits for Stopped-or-gone (RUNBOOK E9 - a lift
+# leaves the service REGISTERED and stopped, never 'gone'), then `sc.exe delete MONKMODE`
+# for the next drill's precondition. See tools\smoke\_lib.ps1.
+#
+# B1c is the exception and always was: its whole assertion is that the block ends at its
+# own REAL duration, so natural expiry IS its teardown. Its code is captured anyway, as
+# the backstop for the run where the block does NOT lift (which is exactly the failure
+# the drill is looking for - and, before 320, the one that would have stranded the box).
+#
+# If this aborts mid-drill the armed block stands until its own --for timer ends (3 min
+# for B4, 2 for B1c). There is no escape hatch. What actually matters on an abort is the
+# CLOCK, not the block - see the FOREGROUND/WATCHED warning above.
+$mmLib = if ($PSScriptRoot) { $PSScriptRoot } else { 'C:\Users\samra\repos\monk-mode\tools\smoke' }
+. (Join-Path $mmLib '_lib.ps1')
+MMInit -Monk $monk -Hosts $hosts
 # True clock offset (seconds) vs an external HTTP Date header, WITHOUT setting
 # the clock. $null if unreachable. NB: uses an 8s-bounded HTTP HEAD, NOT
 # 'w32tm /stripchart' or '/resync' - those can BLOCK indefinitely on a slow NTP
@@ -121,11 +115,16 @@ Write-Host "  probe held - proceeding with the drills." -ForegroundColor Green
 try {
   # --- B4: forward jump past Until must NOT lift ------------------------------
   Write-Host "`n=== B4: forward clock jump past Until must NOT lift ===" -ForegroundColor Cyan
-  # NEVER pipe/suppress an arm: the CLI's RegisterAndLaunchNotifier spawns mm_notify.exe,
-  # which INHERITS stdout - a PS pipeline (|Out-Null, capture) then blocks until the
-  # notifier exits at block EXPIRY, so every check runs post-expiry (2026-07-10 void drills).
-  & $monk block --sites example.com --for 3; Start-Sleep -Seconds 3
+  # 320: this arm used to be deliberately UNPIPED, because on a pre-14/07/2026 dist the
+  # CLI's RegisterAndLaunchNotifier spawned mm_notify.exe with an INHERITED stdout, so any
+  # PS pipeline reading it blocked until block EXPIRY and every check ran post-expiry (the
+  # 2026-07-10 void drills). That root cause is fixed in source and live-proven, and the
+  # capture is now MANDATORY: the code on that stdout is the only teardown left. Run this
+  # against a CURRENT dist - a stale one wedges here.
+  $armB4 = MMArm "--sites example.com --for 3"
   Check "B4 block armed" ((SvcState) -eq 'Running')
+  # 320 (a)+(b): the retired exits, on a live block, before the clock is touched.
+  MMCheckRefusedExits $armB4.Id
   Start-Sleep -Seconds 12   # let HighWater seed on real ticks
   $anchor=Get-Date; $sw=[Diagnostics.Stopwatch]::StartNew(); $survived=$false
   try {
@@ -137,14 +136,18 @@ try {
   }
   Check "B4 block SURVIVED a +30m forward jump past Until" $survived
   Check "B4 clock restored after drill (within 5s of NTP)" ([math]::Abs(([double](NtpOffset))) -lt 5)
-  ForceDown
+  # 320 (c)+(d): a wrong code leaves the jumped-and-survived block standing; the right one
+  # opens it. Worth the 16s here specifically - this is the block a clock attack failed to
+  # lift, so it is the sharpest place to prove the code path is still the ONLY way out.
+  MMCheckWrongCode $armB4.Code
+  MMTearDown -Code $armB4.Code -Id $armB4.Id -Label 'B4'
 
   # --- B1c: backward roll must NOT over-extend -------------------------------
   if (-not $SkipBackward) {
     Write-Host "`n=== B1c: backward clock roll must NOT over-extend the block ===" -ForegroundColor Cyan
     # --for 2, not 1: the CLI enforces a strict >60s-in-the-future floor (Program.vb
     # 'must end at least a minute in the future'), so a 1-minute block always refuses.
-    & $monk block --sites example.com --for 2; Start-Sleep -Seconds 3   # unpiped - see B4 note
+    $armB1c = MMArm "--sites example.com --for 2"   # captured - see the B4 note
     Check "B1c block armed (--for 2)" ((SvcState) -eq 'Running')
     $anchor=Get-Date; $sw=[Diagnostics.Stopwatch]::StartNew(); $liftedAt=-1
     try {
@@ -165,11 +168,16 @@ try {
     Write-Host ("    block lifted at ~{0}s real (real duration 120s; over-extend bug would exceed 150s)" -f $liftedAt)
     Check "B1c block lifted at its REAL ~120s duration despite the -30m roll (not frozen open)" ($liftedAt -ge 115 -and $liftedAt -le 150)
     Check "B1c clock restored after drill (within 5s of NTP)" ([math]::Abs(([double](NtpOffset))) -lt 5)
-    ForceDown
+    # 320: NATURAL EXPIRY is this drill's teardown - the block ending on its own is the
+    # assertion. MMTearDown is a no-op lift in the passing case (MMLiftWithCode returns
+    # early when the service is already Stopped-or-gone) and uses the captured code only
+    # in the FAILING one, where the block never lifted and would otherwise be left
+    # standing with the clock still being poked. Either way it resets to 'gone'.
+    MMTearDown -Code $armB1c.Code -Id $armB1c.Id -Label 'B1c'
   }
 }
 finally {
-  ForceDown
+  MMEmergencyLift
   $offZ = NtpOffset
   Write-Host ("Post-drill NTP offset: {0}s" -f $offZ)
   Check "clock within 5s of NTP after ALL drills" ($null -ne $offZ -and [math]::Abs($offZ) -lt 5)

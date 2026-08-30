@@ -45,14 +45,30 @@
 #     you are watching the run.
 #   - B7 (does an invalid MAC keep the block past Until?) CANNOT share a run with
 #     the auto-lift test: corrupting the MAC is one-way (we can't recompute it
-#     without the DPAPI key), and fail-closed means the block then never lifts,
-#     which would hang this script. Prove it in a DEDICATED run: block, corrupt
-#     [Integrity] Mac, set --for to ~1 min, confirm it does NOT lift after the
-#     minute, then a partner-code lift. The 310-line ConfigIntegrity unit
-#     tests are the authoritative coverage.
+#     without the DPAPI key), and fail-closed means the block then never lifts -
+#     not on its timer and, since ledger 319, not on the partner code either
+#     (ClassifyPartnerCodeSignal requires a valid MAC) - which would hang this
+#     script with no exit at all. It lives in b7-failclosed-test.ps1, which
+#     snapshots the ini bytes before corrupting and restores them to get back
+#     out. The 310-line ConfigIntegrity unit tests are the authoritative coverage.
 #
-# Expected result: 69 passed, 0 failed (15 original + 12 B2 + 20 B1 + 5 B3 +
-# 7 B5a + 9 B4/B6/B7 + 1 early-lift guard). With -IncludeClockTest: 71 (the B4 clock drill adds 2).
+# Expected result: 83 passed, 0 failed. With -IncludeClockTest: 85 (the B4 clock drill
+# adds 2). 73 of those are `Check` calls in this file; the other 10 are scored by the
+# shared teardown helpers in _lib.ps1 (4 + 1 + 5, itemised below).
+#
+# The pre-320 header claimed 69/71. The file actually held 70/72 scored checks, so that
+# tally had drifted by one before this slice; 83 is a counted number, not 69 + 13. The
+# 13 genuinely new checks are the F79 exit surface and the teardown that replaced
+# `unblock --force`:
+#   2a  F79 exit surface (4): `--force` refused as an unknown option + block still
+#       enforcing; `--id N` with no code refused + block still enforcing.
+#   4b  no-snapshot teardown, rebuilt around a real second block (9): service deleted
+#       before the 2nd arm, 2nd block armed, snapshot deleted, a WRONG code does not
+#       lift, then MMTearDown's five - the right code lifts in <=30s, hosts marker gone,
+#       registration deleted, hosts marker-free, hosts not read-only.
+# No check was removed or renumbered: 2a is inserted before 2b (which keeps its letter)
+# and the 4b additions sit above the surviving
+# "B5a user's own DoH-off survived the no-snapshot teardown".
 # NOTE (B5a, 01/07/2026): the DoH beats are BENCH-UNTESTED (added without an
 # elevated run) - validate them in the batched G1 run. The $dist/$snap paths were
 # repointed Cold-Turkey-Serious -> monk-mode this session.
@@ -96,6 +112,11 @@ function Check($name, $cond) {
   if ($cond) { Write-Host "  [PASS] $name" -ForegroundColor Green; $script:pass++ }
   else       { Write-Host "  [FAIL] $name" -ForegroundColor Red;   $script:fail++ }
 }
+# Ledger 320: the shared partner-code teardown (MMArm / MMTearDown / MMResetInstall and
+# friends). See tools\smoke\_lib.ps1 for the whole API and the reasoning behind it.
+$mmLib = if ($PSScriptRoot) { $PSScriptRoot } else { 'C:\Users\samra\repos\monk-mode\tools\smoke' }
+. (Join-Path $mmLib '_lib.ps1')
+MMInit -Monk $monk -Hosts $hosts
 
 # Clear hosts' read-only attribute and overwrite it with $text. Retries because
 # the service re-asserts read-only every 10s and can race our write.
@@ -257,10 +278,12 @@ foreach ($e in $dohEntries) { $dohPre["$($e.Path)|$($e.Name)"] = DohVal $e.Path 
 # right as the end time lands would tangle the drills with the lift.
 Write-Host "`n=== 1. Starting a 5-minute block on example.com ===" -ForegroundColor Cyan
 $blockStart = Get-Date
-& $monk block --sites example.com --for 5
-Write-Host "(monkmode.exe exit code: $LASTEXITCODE)"
-
-Start-Sleep -Seconds 3   # let the service finish starting
+# 320: the arm is CAPTURED. This block is meant to expire naturally (sections 3-4 ARE
+# that assertion), so the code is not the normal teardown here - it is the backstop for
+# the run where the block does NOT lift. Before 320 that run ended with section 5 killing
+# the service out from under a live block; now the honest exit is available first.
+$armMain = MMArm "--sites example.com --for 5"
+Write-Host "(monkmode.exe exit code: $LASTEXITCODE; block id $($armMain.Id))"
 
 Write-Host "`n=== 2. Verifying the block is LIVE ===" -ForegroundColor Cyan
 $svc = Get-Service MONKMODE -ErrorAction SilentlyContinue
@@ -325,6 +348,17 @@ Start-Sleep -Milliseconds 500
 $addrsF = Resolve-Example
 Write-Host "    after flushdns during block, example.com -> $($addrsF -join ', ')"
 Check "block survives ipconfig /flushdns"     ($addrsF -contains '127.0.0.1' -and -not ($addrsF | Where-Object { $_ -notmatch '^127\.0\.0\.1$|^::1$' }))
+
+# LEDGER 320 - inserted as "2a" so 2b..2g keep their letters and every existing check
+# keeps its position in the tally. Four new checks, ~3 seconds, run here on a freshly
+# armed block rather than at 2h (by 2g the 5-minute block is ~250s in, and the last
+# thing this drill needs is an assertion racing the expiry it is about to measure).
+Write-Host "`n=== 2a. F79 EXIT SURFACE: the retired escapes must be gone ===" -ForegroundColor Cyan
+# `unblock --force` is now an UNKNOWN OPTION, not a withheld one (Program.UnblockOption-
+# Names deliberately omits it rather than accepting-and-ignoring, so the CLI says the flag
+# does not exist); and `unblock --id N` with no code gets the same refusal a bare `unblock`
+# does. Both must leave the block fully enforcing.
+MMCheckRefusedExits $armMain.Id
 
 Write-Host "`n=== 2b. B2 TAMPER-REPAIR: the service must self-heal hosts ===" -ForegroundColor Cyan
 
@@ -616,25 +650,69 @@ $tBye = Wait-Condition { $null -eq (Get-Process mm_notify -ErrorAction SilentlyC
 Check "mm_notify exited after the toast (no stray)"          ($tBye -ge 0)
 
 Write-Host "`n=== 4b. B5a NO-DATA-LOSS: a user's own DoH-off must survive a no-snapshot teardown ===" -ForegroundColor Cyan
-# Regression for the double-teardown clobber (verifier P2, fixed 01/07/2026). The
-# block has lifted and CONSUMED its DoH snapshot. Simulate a security-conscious user
-# who now sets DoH off THEMSELVES, then run the escape hatch: with NO snapshot,
-# RemoveDohPolicy must DO NOTHING (never delete a value it can't prove it created),
-# so the user's own value SURVIVES. Before the fix this deleted it (un-hardening the
-# box). Section 5 below restores the true pre-block state ($dohPre).
+# Regression for the double-teardown clobber (verifier P2, fixed 01/07/2026): with NO
+# snapshot on disk, RemoveDohPolicy must DO NOTHING (never delete a value it cannot prove
+# it created), so a value the USER set survives the teardown. Before the fix it deleted
+# it, un-hardening the box.
+#
+# LEDGER 320 - HOW THIS SECTION IS REPRODUCED NOW. It used to be one line: the block had
+# already lifted and consumed its snapshot, the user set DoH off, and `unblock --force`
+# ran the CLI's copy of RemoveDohPolicy against no snapshot. Ledger 319 deleted the flag,
+# the CLI's RemoveDohPolicy and ClearNotifierAutorun with it (Blocker.vb:3546), so the
+# ONLY teardown that still calls RemoveDohPolicy is the SERVICE's own stopMe(). That
+# means the no-snapshot condition has to be manufactured around a real block:
+#
+#   user sets DoH off -> arm a SECOND short block (writes a fresh snapshot) -> DELETE the
+#   snapshot -> lift with the partner code -> stopMe()'s RemoveDohPolicy finds no snapshot
+#   -> returns without touching a thing (Service1.vb:4497-4512) -> the user's value stands.
+#
+# The snapshot is written ONLY at arm time, by the CLI (Program.vb:502, 931); the service
+# never rewrites it, so deleting it mid-block is stable. Same discriminator as before: a
+# regression in the no-snapshot path shows up as the value being deleted.
 $edge0 = $dohEntries[0]
 New-Item -Path $edge0.Path -Force -ErrorAction SilentlyContinue | Out-Null
 Set-ItemProperty -LiteralPath $edge0.Path -Name $edge0.Name -Value 'off' -Type String -ErrorAction SilentlyContinue
-# BROKEN BY 319: `unblock --force` no longer exists. This teardown must become a
-# partner-code lift (capture the arm output, parse the line after "Emergency unlock
-# code", `unblock --code <CODE>`, wait Stopped-or-gone per RUNBOOK E9, then
-# `sc.exe delete MONKMODE`). Throwing rather than silently continuing, so a run
-# cannot report a clean teardown it did not perform.
-throw 'BROKEN BY 319: this teardown needs rewriting as a partner-code lift.'
+
+# RUNBOOK 3.1: NEVER arm over a stopped-but-REGISTERED service - it freezes instead of
+# fresh-rewriting. Section 4 has just proven this one is stopped and removable (the B6
+# deny-DELETE ACE is gone at a genuine expiry), so delete it before the second arm.
+$u = (Get-Date).AddSeconds(20)
+while ((Get-Date) -lt $u -and (MMSvcState) -ne 'gone') { sc.exe delete MONKMODE 2>&1 | Out-Null; Start-Sleep -Milliseconds 750 }
+Check "4b service deleted before the 2nd arm (RUNBOOK 3.1: never arm over a stopped registration)" ((MMSvcState) -eq 'gone')
+
+# --for 2 is the floor that still arms (`--for 1` is always refused: Program.vb's
+# >60s-in-the-future window check). If this run aborts from here the box carries a
+# 2-minute block, which is the worst case ledger 319 leaves us - there is no rescue.
+$arm4b = MMArm "--sites example.com --for 2"
+Check "4b second block armed (service running)" ((MMSvcState) -eq 'Running')
+Remove-Item $dohSnap -Force -ErrorAction SilentlyContinue
+Check "4b DoH snapshot deleted (the no-snapshot precondition)" (-not (Test-Path $dohSnap))
+# 320 (c): a wrong code leaves this block standing. Cheapest place in the run to prove
+# the KDF verify actually says no - the code is shape-valid, only the bytes are wrong.
+MMCheckWrongCode $arm4b.Code
+# (d) and the teardown: the right code lifts it, the service runs its own stopMe(), and
+# RemoveDohPolicy hits the no-snapshot path on the way out.
+MMTearDown -Code $arm4b.Code -Id $arm4b.Id -Label '4b'
 Check "B5a user's own DoH-off survived the no-snapshot teardown" ((DohVal $edge0.Path $edge0.Name) -ceq 'off')
 
 # 5. teardown ---------------------------------------------------------------
 Write-Host "`n=== 5. Teardown (sc delete + restore hosts + clear notifier) ===" -ForegroundColor Cyan
+# LEDGER 320: the CODE COMES FIRST. Everything below this point is a host-side rescue
+# (kill the service process, strip the ACE, sc delete) and it must never be what takes a
+# LIVE block down - that would put back, in the harness, exactly the unconditional
+# teardown ledger 319 removed from the product. So if anything is still enforcing when we
+# get here (a wedge in section 3/4, or an aborted 4b), submit this run's own minted codes
+# and let the SERVICE lift itself. Unscored on purpose: on a healthy run the block expired
+# long ago and this is a no-op.
+if ((MMSvcState) -eq 'Running') {
+  Write-Host "  a block is still enforcing at teardown - submitting this run's minted codes first..." -ForegroundColor Yellow
+  MMSubmitCode $armMain.Code
+  if ($arm4b) { MMSubmitCode $arm4b.Code }
+  if (-not (MMWaitSvcLifted 45)) {
+    Write-Host "  !! still enforcing. There is no force teardown in the product any more (ledger 319);" -ForegroundColor Red
+    Write-Host "     what follows is a HARNESS rescue on your own machine, not a supported exit." -ForegroundColor Red
+  }
+}
 # B1 made the pair self-restarting: disable SCM recovery and kill the guardian
 # BEFORE (well, alongside) the service so nothing resurrects anything
 # mid-teardown. After a clean expiry these are all already gone — this is the
