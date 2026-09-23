@@ -10,7 +10,7 @@ must NOT spawn each other.
 
 ## Launch
 - [ ] Model/effort: monk-mode sessions launch via the deep-mode profile launcher, per the
-  MODELS block in `~/.claude/CLAUDE.md`. Deep mode only — never the default session model,
+  `~/.claude/docs/v4/MODEL-ROUTING.md`. Deep mode only — never the default session model,
   never a mid-session model switch.
 
 ## Session shape (in order)
