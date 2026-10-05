@@ -307,7 +307,8 @@ Public Class Service1
                     ' back-dating [Time] Until at boot no longer tears down a live slot.
                     ' Fail-closed throughout: an invalid MAC makes slotsHoldAtStart True AND
                     ' EffectiveExit False, so a tampered config can never teardown at boot.
-                    TeardownAll()
+                    ' 05/10 T1 (A1): guarded by the boot slot ids and the Mac at this decision.
+                    TeardownAll(SlotIdsOf(slotsAtStart), ConfigGenerationToken(Application.StartupPath + "\monkmode_settings.ini"))
                 ElseIf ShouldRestampOnStart(macValidAtStart, newHw, storedHw) Then
                     ' CURRENTLY INERT (retained as a guard): since the B4 creep fix,
                     ' OnStart sets newHw = storedHw (it never advances - no monotonic
@@ -845,15 +846,32 @@ Public Class Service1
     ' Spec returns False; the caller keeps the old value and the next tick re-evaluates off
     ' the fresh Spec). Best-effort; never throws (the caller is inside a Try too).
     Private Function PersistScheduleActiveUntil(ByVal newValue As String, ByVal snapshotSpec As String) As Boolean
+        Return PersistScheduleActiveUntilAt(Application.StartupPath + "\monkmode_settings.ini", newValue, snapshotSpec)
+    End Function
+
+    ' The testable core with the config path made explicit (the PersistSlotFieldAt pattern).
+    ' 05/10 bugfix T1 (A4): now also carries the FX6/F9 lost-update guard - a MAC-covered write
+    ' (a CLI arm) landing between the reload and the Save abandons this write, exactly as
+    ' RetireSlotAt/RestampHeartbeatAt do. The caller keeps its old value on False and the next
+    ' tick re-evaluates, so a refusal costs one tick and never lifts anything.
+    Friend Function PersistScheduleActiveUntilAt(ByVal iniPath As String, ByVal newValue As String, ByVal snapshotSpec As String) As Boolean
         Try
             Dim iniFile = New IniFile
-            iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
+            iniFile.Load(iniPath)
             If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            Dim genAtLoad As String = iniFile.GetKeyValue(IntegritySection, IntegrityMacName)
             If Not ScheduleSpecUnchangedSinceSnapshot(snapshotSpec, iniFile.GetKeyValue("Schedule", "Spec")) Then Return False
             iniFile.SetKeyValue("Schedule", "ActiveUntil", If(newValue = "", "", encryptionW.EncryptData(newValue)))
             RestampMacWithExistingKey(iniFile)
-            iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
-            RefreshBackupFromValid(iniFile)
+            If PersistSaveHookForTests IsNot Nothing Then PersistSaveHookForTests(iniPath)
+            If Not ConfigGenerationUnchanged(genAtLoad, ConfigGenerationToken(iniPath)) Then Return False
+            iniFile.Save(iniPath)
+            Try
+                ConfigBackup.CopyIfSourceValid(iniPath,
+                                               System.IO.Path.Combine(System.IO.Path.GetDirectoryName(iniPath), ConfigBackup.BackupFileName),
+                                               ConfigMacIsValidForIni(iniFile))
+            Catch ex As Exception
+            End Try
             Return True
         Catch ex As Exception
             Return False
@@ -934,11 +952,15 @@ Public Class Service1
             Dim iniFile = New IniFile
             iniFile.Load(iniPath)
             If Not ConfigMacIsValidForIni(iniFile) Then Return False
+            ' 05/10 bugfix T1 (A4): the FX6/F9 lost-update guard, as in RetireSlotAt.
+            Dim genAtLoad As String = iniFile.GetKeyValue(IntegritySection, IntegrityMacName)
             Dim pos As Integer = FindSlotPositionById(iniFile, slotId)
             If pos = 0 Then Return False        ' the slot moved or was retired: write NOTHING
             Dim stored As String = If(plainValue = "", "", If(encrypt, encryptionW.EncryptData(plainValue), plainValue))
             iniFile.SetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), key, stored)
             RestampMacWithExistingKey(iniFile)
+            If PersistSaveHookForTests IsNot Nothing Then PersistSaveHookForTests(iniPath)
+            If Not ConfigGenerationUnchanged(genAtLoad, ConfigGenerationToken(iniPath)) Then Return False
             iniFile.Save(iniPath)
             Try
                 ConfigBackup.CopyIfSourceValid(iniPath,
@@ -1010,6 +1032,13 @@ Public Class Service1
     ' <ThreadStatic>, never assigned in production.
     <ThreadStatic>
     Friend Shared RestampSaveHookForTests As Action(Of String)
+
+    ' TEST SEAM (05/10 bugfix T1, A1 + A4) - the same twin for the remaining guarded writers:
+    ' PersistSlotFieldAt, PersistScheduleActiveUntilAt, the guarded PersistZeroSlotConfigAt
+    ' and MarkDoneAt. Fired after the model is built, immediately before the generation probe
+    ' + Save. <ThreadStatic>, never assigned in production.
+    <ThreadStatic>
+    Friend Shared PersistSaveHookForTests As Action(Of String)
 
     ' The heartbeat's Restamp WRITE, lifted out of timer_Elapsed unchanged except for the two
     ' FX6 additions below, and with the config path made explicit so unit tests drive the REAL
@@ -1526,10 +1555,39 @@ Public Class Service1
     ' also what S4 needs: the guardian's raw floor must see zero slot keys AND no v9 hold, or
     ' it never stands down.
     Friend Function PersistZeroSlotConfigAt(ByVal iniPath As String) As Boolean
+        Return PersistZeroSlotConfigCore(iniPath, Nothing, Nothing)
+    End Function
+
+    ' 05/10 bugfix T1 (A1): the GUARDED form, the only one the teardown paths call. The
+    ' teardown is decided off a slot list read hundreds of ms earlier, so an immediate arm that
+    ' confirmed in between used to be deleted here - its MAC re-blessed, hosts stripped, the
+    ' service stopped, its one-time code already printed. This form writes NOTHING and returns
+    ' False when, after its own reload:
+    '   * the MAC does not verify (the decision was taken on a valid one, so the file moved);
+    '   * [Integrity] Mac is not the decisionToken captured when the teardown was decided;
+    '   * any slot at positions 1..SlotCount carries an id outside decidedIds;
+    '   * a MAC-covered write lands between the reload and the Save (the FX6/F9 probe).
+    ' The caller then returns without stopMe() and the next tick decides again - an over-block
+    ' of one tick, never a lift. Same honest residual as FX6: a write landing between the probe
+    ' and IniFile.Save's rename still wins.
+    Friend Function PersistZeroSlotConfigAt(ByVal iniPath As String, ByVal decidedIds As ICollection(Of String), ByVal decisionToken As String) As Boolean
+        If decidedIds Is Nothing Then Return False
+        Return PersistZeroSlotConfigCore(iniPath, decidedIds, decisionToken)
+    End Function
+
+    ' decidedIds = Nothing is the unguarded one-argument behaviour, unchanged.
+    Private Function PersistZeroSlotConfigCore(ByVal iniPath As String, ByVal decidedIds As ICollection(Of String), ByVal decisionToken As String) As Boolean
         Try
             Dim iniFile = New IniFile
             iniFile.Load(iniPath)
             Dim macValid As Boolean = ConfigMacIsValidForIni(iniFile)
+            Dim genAtLoad As String = Nothing
+            If decidedIds IsNot Nothing Then
+                If Not macValid Then Return False
+                genAtLoad = iniFile.GetKeyValue(IntegritySection, IntegrityMacName)
+                If Not ConfigGenerationUnchanged(decisionToken, genAtLoad) Then Return False
+                If Not SlotIdsWithin(iniFile, decidedIds) Then Return False
+            End If
             For p As Integer = 1 To ConfigIntegrity.MaxSlots
                 iniFile.RemoveSection("Slot" & p.ToString(CultureInfo.InvariantCulture))
             Next
@@ -1555,11 +1613,54 @@ Public Class Service1
             ' (ClassifyTick Holds), and if it were reached the stale MAC would freeze the
             ' config rather than bless it - the fail-closed side.
             If macValid Then RestampMacWithExistingKey(iniFile)
+            If decidedIds IsNot Nothing Then
+                If PersistSaveHookForTests IsNot Nothing Then PersistSaveHookForTests(iniPath)
+                If Not ConfigGenerationUnchanged(genAtLoad, ConfigGenerationToken(iniPath)) Then Return False
+            End If
             iniFile.Save(iniPath)
             Return True
         Catch ex As Exception
             Return False
         End Try
+    End Function
+
+    ' PURE over a loaded model: does every slot the readers can see (positions 1..the CLAMPED
+    ' SlotCount - the LoadSlots view, so the next tick re-decides off the same set) carry an id
+    ' in the decided set? A slot outside it is one the caller never decided on.
+    Friend Shared Function SlotIdsWithin(ByVal ini As IniFile, ByVal decidedIds As ICollection(Of String)) As Boolean
+        Dim decided As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each id As String In decidedIds
+            decided.Add(If(id, ""))
+        Next
+        Dim count As Integer = ConfigIntegrity.ParseSlotCount(ini.GetKeyValue("Slots", "SlotCount"))
+        For pos As Integer = 1 To count
+            If Not decided.Contains(If(ini.GetKeyValue("Slot" & pos.ToString(CultureInfo.InvariantCulture), "Id"), "")) Then Return False
+        Next
+        Return True
+    End Function
+
+    ' The teardown's last look before the hosts strip (05/10 bugfix T1, A1): is the PERSISTED
+    ' SlotCount still 0? An arm landing after the zero-slot save makes this False and the strip
+    ' is abandoned. Unreadable or absent answers False - never strip off a file we cannot read.
+    Friend Shared Function PersistedSlotCountIsZero(ByVal iniPath As String) As Boolean
+        Try
+            If Not System.IO.File.Exists(iniPath) Then Return False
+            Dim probe As New IniFile
+            probe.Load(iniPath)
+            Return ConfigIntegrity.ParseSlotCount(probe.GetKeyValue("Slots", "SlotCount")) = 0
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' The ids a teardown decision was taken over, for the guarded PersistZeroSlotConfigAt.
+    Friend Shared Function SlotIdsOf(ByVal slots As List(Of SlotState)) As List(Of String)
+        Dim ids As New List(Of String)
+        If slots Is Nothing Then Return ids
+        For Each s As SlotState In slots
+            ids.Add(If(s.Id, ""))
+        Next
+        Return ids
     End Function
 
     ' FX3 (F3) - PURE: may the [Schedule] pair be cleared, i.e. is the schedule SPENT? Only
@@ -1617,12 +1718,17 @@ Public Class Service1
         End If
     End Sub
 
-    Private Sub TeardownAll()
-        PersistZeroSlotConfigAt(Application.StartupPath + "\monkmode_settings.ini")
+    ' 05/10 bugfix T1 (A1): decidedIds/decisionToken are what the caller decided on (the slot
+    ' ids it read, the [Integrity] Mac at the decision). A refused persist returns BEFORE the
+    ' snapshot delete and stopMe(); so does a non-zero persisted SlotCount just before the
+    ' strip. Either way the next tick re-reads and decides again.
+    Private Sub TeardownAll(ByVal decidedIds As ICollection(Of String), ByVal decisionToken As String)
+        If Not PersistZeroSlotConfigAt(Application.StartupPath + "\monkmode_settings.ini", decidedIds, decisionToken) Then Return
         Try
             System.IO.File.Delete(Application.StartupPath + "\monkmode_hosts.block")
         Catch ex As Exception
         End Try
+        If Not PersistedSlotCountIsZero(Application.StartupPath + "\monkmode_settings.ini") Then Return
         stopMe()
     End Sub
 
@@ -2302,8 +2408,9 @@ Public Class Service1
             Select Case ClassifyTick(macValid, slots.Count, residual)
                 Case TickAction.TeardownAll
                     ' P39: nothing is armed any more - config first, then the snapshot, then
-                    ' the existing stopMe() teardown from the hosts strip onward.
-                    TeardownAll()
+                    ' the existing stopMe() teardown from the hosts strip onward. 05/10 T1 (A1):
+                    ' guarded by the slot ids decided on and the Mac at this decision.
+                    TeardownAll(SlotIdsOf(slots), ConfigGenerationToken(Application.StartupPath + "\monkmode_settings.ini"))
                 Case TickAction.Restamp
                     ' FX6: the write itself lives in RestampHeartbeatAt (the PersistSlotFieldAt/
                     ' RetireSlotAt "testable core with the path made explicit" pattern), so the
@@ -4986,13 +5093,26 @@ Public Class Service1
         Return False
     End Function
 
+    ' stopMe's [User] Done=yes write, lifted out with the config path made explicit. 05/10
+    ' bugfix T1 (A4): it is a whole-file Save, so it carries the FX6/F9 lost-update guard - an
+    ' arm landing between the load and the Save skips the write (best-effort: Done stays
+    ' unset, the notifier keeps running). Returns True iff the config was rewritten. Not
+    ' wrapped in a Try: a load/save throw propagates exactly as the inline code did.
+    Friend Shared Function MarkDoneAt(ByVal iniPath As String) As Boolean
+        Dim iniFile = New IniFile
+        iniFile.Load(iniPath)
+        Dim genAtLoad As String = If(iniFile.GetKeyValue(IntegritySection, IntegrityMacName), "")
+        iniFile.SetKeyValue("User", "Done", "yes")
+        If PersistSaveHookForTests IsNot Nothing Then PersistSaveHookForTests(iniPath)
+        If Not ConfigGenerationUnchanged(genAtLoad, ConfigGenerationToken(iniPath)) Then Return False
+        iniFile.Save(iniPath)
+        Return True
+    End Function
+
     Private Sub stopMe()
 
         If StripHostsBlockAtExpiry(hostDirS) Then
-            Dim iniFile = New IniFile
-            iniFile.Load(Application.StartupPath + "\monkmode_settings.ini")
-            iniFile.SetKeyValue("User", "Done", "yes")
-            iniFile.Save(Application.StartupPath + "\monkmode_settings.ini")
+            MarkDoneAt(Application.StartupPath + "\monkmode_settings.ini")
         End If
 
         ' The block is over - drop the repair snapshot (best effort) so an
