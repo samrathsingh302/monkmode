@@ -422,10 +422,20 @@ public class DurationOverflowTests
     [InlineData("99999999999m")]    // past Integer
     [InlineData("99999999999")]     // bare minutes, past Integer
     [InlineData("2147483647d")]     // an Integer, but past TimeSpan
+    [InlineData("213503983d")]      // round 2: the ctor wraps this to ~16h instead of throwing
+    [InlineData("10675200d")]       // one day past TimeSpan.MaxValue.Days
     public void ForDuration_Overflow_IsFalse(string token)
     {
         TimeSpan span = default;
         Assert.False(MonkMode.Program.TryParseDuration(token, ref span));
+    }
+
+    [Fact]
+    public void ForDuration_MaxValueDays_IsTrue()
+    {
+        TimeSpan span = default;
+        Assert.True(MonkMode.Program.TryParseDuration("10675199d", ref span));
+        Assert.Equal(TimeSpan.FromDays(10675199), span);
     }
 
     [Fact]
@@ -452,6 +462,7 @@ public class DurationOverflowTests
     [InlineData("99999999999m")]
     [InlineData("+2147483647d")]
     [InlineData("+10000000d")]
+    [InlineData("+213503983d")]
     public void StartOverflow_IsFalse_WithTheUsualMessage(string token)
     {
         DateTime start = default; string err = "";
@@ -462,6 +473,7 @@ public class DurationOverflowTests
     [Theory]
     [InlineData("99999999999m")]
     [InlineData("2147483647d")]
+    [InlineData("213503983d")]
     public void CoolOffOverflow_IsFalse(string token)
     {
         long seconds = -1;

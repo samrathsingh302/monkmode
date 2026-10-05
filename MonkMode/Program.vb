@@ -1275,6 +1275,9 @@ Module Program
             matched = True   ' bare number = minutes
         End If
         If Not matched Then Return False
+        ' T5 round 2: the ctor's microsecond maths is unchecked, so "213503983d" wraps to ~16h
+        ' instead of throwing. Bound the total in Long minutes (which cannot wrap) first.
+        If CLng(days) * 1440 + CLng(hours) * 60 + mins > TimeSpan.MaxValue.Ticks \ TimeSpan.TicksPerMinute Then Return False
         Try
             span = New TimeSpan(days, hours, mins, 0)
         Catch ex As ArgumentOutOfRangeException
