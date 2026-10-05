@@ -371,4 +371,53 @@ public class UnblockOptionSurfaceTests
         // ...and `--force` is not smuggled in through the `block` list either.
         Assert.DoesNotContain("--force", MonkMode.Program.BlockOptionNames());
     }
+
+    // ---- T5 (A8, 05/10/2026): `--code=VALUE` reaches the code path ----
+    //
+    // DoUnblock branched on HasFlag's exact-token match, so `unblock --code=XXXXX-XXXXX` fell to
+    // the refusal - whose advice was to run the command just typed. The whole decision is now
+    // UnblockCodeArgument, and DoUnblock's branch is exactly `If UnblockCodeArgument(args, code)`.
+    // A full DoUnblock drive is not possible here: with a correct code it lifts a block.
+
+    // `commandLine` is split on spaces into the args array the CLI receives.
+    private static bool CodeArg(string commandLine, out string code)
+    {
+        string c = "unset";
+        var given = MonkMode.Program.UnblockCodeArgument(commandLine.Split(' '), ref c);
+        code = c;
+        return given;
+    }
+
+    [Theory]
+    [InlineData("unblock --code ABCDE-FGHIJ")]
+    [InlineData("unblock --code=ABCDE-FGHIJ")]
+    [InlineData("unblock --CODE=ABCDE-FGHIJ")]
+    [InlineData("unblock --id 2 --code=ABCDE-FGHIJ")]
+    public void BothForms_GiveTheCode(string commandLine)
+    {
+        Assert.True(CodeArg(commandLine, out var code));
+        Assert.Equal("ABCDE-FGHIJ", code);
+    }
+
+    [Theory]
+    [InlineData("unblock --code")]
+    [InlineData("unblock --code=")]
+    public void ABareCodeFlag_IsGiven_WithAnEmptyCode(string commandLine)
+    {
+        // Given-but-empty takes the "Provide the code" line, not the refusal.
+        Assert.True(CodeArg(commandLine, out var code));
+        Assert.Equal("", code);
+    }
+
+    [Theory]
+    [InlineData("unblock")]
+    [InlineData("unblock --id 2")]
+    [InlineData("unblock --force")]
+    [InlineData("unblock --codex=ABCDE-FGHIJ")]
+    public void NoCodeFlag_IsAbsent(string commandLine)
+    {
+        // Only False reaches the refusal and its "run unblock --code <CODE>" advice.
+        Assert.False(CodeArg(commandLine, out var code));
+        Assert.Equal("", code);
+    }
 }

@@ -204,12 +204,17 @@ Module Program
             domains.AddRange(presetDomains)
         End If
 
+        ' T5 (A6, 05/10/2026): a named --file that is missing or unreadable REFUSES the arm, before
+        ' any side effect - it used to contribute nothing, silently, and the block then armed the
+        ' account defaults (or only --sites) for the whole duration, uncancellable.
         Dim fileArg As String = GetOption(args, "--file")
-        If fileArg <> "" AndAlso File.Exists(fileArg) Then
-            For Each line As String In File.ReadAllLines(fileArg)
-                Dim t As String = line.Trim()
-                If t <> "" AndAlso Not t.StartsWith("#") Then domains.Add(t)
-            Next
+        If fileArg <> "" Then
+            Dim fileDomains As List(Of String) = Nothing, fileErr As String = ""
+            If Not TryReadSiteFile(fileArg, fileDomains, fileErr) Then
+                Console.Error.WriteLine(fileErr)
+                Return 1
+            End If
+            domains.AddRange(fileDomains)
         End If
 
         Dim apps As New List(Of String)
@@ -351,7 +356,11 @@ Module Program
             ' T2: untilDate is the DISPLAY end (and a PENDING slot's duration); an immediate
             ' arm's stored Until is mark + this span, so `--for 11h` is 11h of real time.
             forSpan = span
-            untilDate = windowStart.Add(span)
+            ' T5 (A10): an end past year 9999 is refused like any other unreadable --for.
+            If Not TryAddSpan(windowStart, span, untilDate) Then
+                Console.Error.WriteLine("Could not understand --for '" & forArg & "'. Try 2h, 90m, 1d12h.")
+                Return 1
+            End If
         Else
             Console.Error.WriteLine("Specify a duration with --for or --until.")
             Return 1
@@ -808,6 +817,13 @@ Module Program
             Console.Error.WriteLine(addCtrlErr)
             Return 1
         End If
+        ' T5 (A9): ...and that silent subset is refused here too, naming the value - the service
+        ' bins any whitespace-bearing token (Service1 MergeSiteList), so "Added" would be a lie.
+        Dim addSpaceErr As String = ""
+        If Not TryRejectWhitespaceSites(domains, addSpaceErr) Then
+            Console.Error.WriteLine(addSpaceErr)
+            Return 1
+        End If
         ' P42 (v1.1 S5): `add` is SLOT-ADDRESSED and SERVICE-ADJUDICATED. The CLI validates the
         ' request and drops `monkmode_add.request.<id>`; the service grows THAT slot's
         ' MAC-covered Sites (growth-only) on its next tick and P37 then reconciles the hosts
@@ -1107,8 +1123,8 @@ Module Program
             Return 1
         End If
 
-        If HasFlag(args, "--code") Then
-            Dim code As String = GetOption(args, "--code")
+        Dim code As String = ""
+        If UnblockCodeArgument(args, code) Then
             If code = "" Then
                 Console.Error.WriteLine("Provide the code:  monkmode unblock --code <CODE>")
                 Return 1
@@ -1177,13 +1193,73 @@ Module Program
         Return ""
     End Function
 
+    ' T5 (A8, pure): the WHOLE `unblock --code` decision. True with the code for `--code X` or
+    ' `--code=X`, True with "" for a bare `--code` (or `--code=`), False when it is absent.
+    ' DoUnblock branches on this alone - HasFlag's exact-token match used to send the `=` form
+    ' to the refusal, whose advice was the very command the user had just typed.
+    Friend Function UnblockCodeArgument(ByVal args As String(), ByRef code As String) As Boolean
+        code = GetOption(args, "--code")
+        If code <> "" OrElse HasFlag(args, "--code") Then Return True
+        For Each a As String In args
+            If a.StartsWith("--code=", StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    ' T5 (A6, pure): read a --file site list - one site per line, blank and "#" lines skipped.
+    ' A path that is missing or cannot be read is False with the refusal line in `err`, never
+    ' an empty list: a typo'd file must not quietly arm the defaults instead.
+    Friend Function TryReadSiteFile(ByVal path As String, ByRef domains As List(Of String), ByRef err As String) As Boolean
+        domains = New List(Of String)
+        err = ""
+        Dim lines As String()
+        Try
+            lines = File.ReadAllLines(path)
+        Catch ex As Exception
+            err = "Could not read --file '" & path & "'."
+            Return False
+        End Try
+        For Each line As String In lines
+            Dim t As String = line.Trim()
+            If t <> "" AndAlso Not t.StartsWith("#") Then domains.Add(t)
+        Next
+        Return True
+    End Function
+
+    ' T5 (A9, pure): refuse a site carrying a space or tab, naming it. The service's
+    ' MergeSiteList drops such a token (after trimming), so accepting it would report "Added"
+    ' for a site that is never blocked. Leading/trailing spaces ("a.com, b.com") are fine.
+    Friend Function TryRejectWhitespaceSites(ByVal sites As IEnumerable(Of String), ByRef err As String) As Boolean
+        err = ""
+        For Each raw As String In sites
+            Dim v As String = If(raw, "").Trim()
+            If v.IndexOfAny(New Char() {" "c, ControlChars.Tab}) >= 0 Then
+                err = "Refusing site '" & v & "': contains whitespace."
+                Return False
+            End If
+        Next
+        Return True
+    End Function
+
+    ' T5 (A10, pure): start + span, False instead of a throw when the result would pass year 9999.
+    Friend Function TryAddSpan(ByVal start As DateTime, ByVal span As TimeSpan, ByRef result As DateTime) As Boolean
+        Try
+            result = start.Add(span)
+            Return True
+        Catch ex As ArgumentOutOfRangeException
+            Return False
+        End Try
+    End Function
+
     Private Function SplitList(ByVal value As String) As String()
         If value Is Nothing OrElse value.Trim() = "" Then Return New String() {}
         Return value.Split(New Char() {","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
     End Function
 
     ' Parse "1d2h30m" / "90m" / "2h" / "45" (minutes) into a TimeSpan.
-    Private Function TryParseDuration(ByVal s As String, ByRef span As TimeSpan) As Boolean
+    ' T5 (A10): a number too large for an Integer, or a total too large for a TimeSpan, is
+    ' False (the caller's "Could not understand" line), never an unhandled overflow.
+    Friend Function TryParseDuration(ByVal s As String, ByRef span As TimeSpan) As Boolean
         s = s.Trim().ToLowerInvariant()
         If s = "" Then Return False
         Dim days As Integer = 0, hours As Integer = 0, mins As Integer = 0
@@ -1191,15 +1267,22 @@ Module Program
         Dim m As System.Text.RegularExpressions.Match =
             System.Text.RegularExpressions.Regex.Match(s, "^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$")
         If m.Success AndAlso (m.Groups(1).Success OrElse m.Groups(2).Success OrElse m.Groups(3).Success) Then
-            If m.Groups(1).Success Then days = Integer.Parse(m.Groups(1).Value)
-            If m.Groups(2).Success Then hours = Integer.Parse(m.Groups(2).Value)
-            If m.Groups(3).Success Then mins = Integer.Parse(m.Groups(3).Value)
+            If m.Groups(1).Success AndAlso Not Integer.TryParse(m.Groups(1).Value, days) Then Return False
+            If m.Groups(2).Success AndAlso Not Integer.TryParse(m.Groups(2).Value, hours) Then Return False
+            If m.Groups(3).Success AndAlso Not Integer.TryParse(m.Groups(3).Value, mins) Then Return False
             matched = True
         ElseIf Integer.TryParse(s, mins) Then
             matched = True   ' bare number = minutes
         End If
         If Not matched Then Return False
-        span = New TimeSpan(days, hours, mins, 0)
+        ' T5 round 2: the ctor's microsecond maths is unchecked, so "213503983d" wraps to ~16h
+        ' instead of throwing. Bound the total in Long minutes (which cannot wrap) first.
+        If CLng(days) * 1440 + CLng(hours) * 60 + mins > TimeSpan.MaxValue.Ticks \ TimeSpan.TicksPerMinute Then Return False
+        Try
+            span = New TimeSpan(days, hours, mins, 0)
+        Catch ex As ArgumentOutOfRangeException
+            Return False
+        End Try
         Return span.TotalSeconds > 0
     End Function
 
@@ -1223,8 +1306,8 @@ Module Program
             Dim durationTok As String = If(tok.StartsWith("+"), tok.Substring(1).Trim(), tok)
             Dim span As TimeSpan
             If TryParseDuration(durationTok, span) Then
-                startAt = nowRef.Add(span)
-                Return True
+                ' T5 (A10): a delay past year 9999 falls through to the refusal, never a throw.
+                If TryAddSpan(nowRef, span, startAt) Then Return True
             End If
             Dim absolute As DateTime
             If DateTime.TryParse(tok, CultureInfo.CurrentCulture, DateTimeStyles.None, absolute) _
