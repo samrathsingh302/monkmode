@@ -209,6 +209,7 @@ Public Class Service1
                 ' is never credited and OnStart expiry is decided off the STORED
                 ' mark; live ticks advance it, bounded by real elapsed.
                 lastMonoMs = Environment.TickCount64
+                lastRawMonoMs = lastMonoMs
                 ' F77: kick the trusted-time probe the moment we start, because a boot is
                 ' exactly when a downtime credit is owed. It runs in the BACKGROUND and is
                 ' not read here: OnStart deliberately keeps deciding off the STORED mark,
@@ -1739,6 +1740,13 @@ Public Class Service1
     ' real time. Seeded at OnStart; 0 = not yet seeded (=> credit 0 that tick).
     Private lastMonoMs As Long = 0
 
+    ' A5 round 2: the RAW sibling of lastMonoMs - set to this tick's TickCount64 every
+    ' tick (no carry), so TickIntervalSeconds is this tick's own interval. The schedule
+    ' jump-OVER test compares it with wallDelta over the same interval; the carried
+    ' credit can read 1 s high when a carry is paid out, which would hide a jump right
+    ' at the ceiling (fail-OPEN). Seeded at OnStart with lastMonoMs; 0 = not yet seeded.
+    Private lastRawMonoMs As Long = 0
+
     ' F77: the background trusted-time probe. One per service instance, deliberately
     ' NOT static - it holds nothing worth surviving a restart, and a fresh instance at
     ' every OnStart means a reboot always probes immediately (which is exactly the
@@ -1812,6 +1820,7 @@ Public Class Service1
         Dim prevTickWallNow As String = ""
         Dim tickWallNow As String = ""
         Dim monoElapsedSeconds As Long = 0
+        Dim monoIntervalSeconds As Long = 0
         ' v1.1 S3b: the v9 machine-wide [Commit] Committed read is GONE from the tick. The
         ' cooling-off poll is slot-addressed now and reads each slot's OWN MAC-covered
         ' Committed flag, so a machine-wide one had no consumer left - and keeping a dead read
@@ -1922,9 +1931,12 @@ Public Class Service1
             ' A5: whole seconds only, the sub-second remainder carried in lastMonoMs (see
             ' TakeWholeMonoSeconds) - discarding it lost ~5% of real time per hour.
             monoElapsedSeconds = TakeWholeMonoSeconds(lastMonoMs, nowMono)
+            ' A5 round 2: the schedule jump test needs THIS tick's raw interval, not the
+            ' carried credit (which can read 1 s high) - see lastRawMonoMs.
+            monoIntervalSeconds = TickIntervalSeconds(lastRawMonoMs, nowMono)
             ' C5b (b2): capture this tick's wall 'now' for the schedule jump-OVER detection
-            ' and remember the PREVIOUS tick's now as lastNow. Captured right after lastMonoMs
-            ' so wallDelta (tickWallNow - prevTickWallNow) and monoElapsedSeconds span the SAME
+            ' and remember the PREVIOUS tick's now as lastNow. Captured right after lastRawMonoMs
+            ' so wallDelta (tickWallNow - prevTickWallNow) and monoIntervalSeconds span the SAME
             ' previous-tick->this-tick interval - the whole point of an in-memory anchor over
             ' the stored Now. The anchor is ROLLED only while TimeChanging="no" (the same gate
             ' the schedule poll + heartbeat take below): during the notifier's ~2s clock-change
@@ -1932,8 +1944,8 @@ Public Class Service1
             ' full wallDelta visible on the resume tick - a live forward jump-OVER a window that
             ' coincides with the flag still surfaces (fail-closed, SD4), instead of being hidden
             ' by an anchor that rolled to the post-jump time mid-episode. A no-op flag (no real
-            ' change) leaves wallDelta ~= real elapsed, so it never false-opens. lastMonoMs
-            ' stays ungated (B4 needs it every tick); across a >5min episode the two anchors can
+            ' change) leaves wallDelta ~= real elapsed, so it never false-opens. lastMonoMs/lastRawMonoMs
+            ' stay ungated (B4 needs it every tick); across a >5min episode the two anchors can
             ' diverge by that episode, which only ever OVER-blocks (never lifts).
             prevTickWallNow = lastTickWallNow
             tickWallNow = DateTime.Now.ToString(culture)
@@ -2021,12 +2033,12 @@ Public Class Service1
             ' post-step ActiveUntil so THIS tick's heartbeat + its SD1 schedule-hold arm decide
             ' off it (an open window out-ranks expiry/cooling-off/code). isBoot:=False (a live
             ' tick; OnStart re-evaluates with isBoot:=True). No Spec => inert fast path.
-            iniScheduleActiveUntil = ProcessScheduleWindows(iniScheduleActiveUntil, iniScheduleSpec, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
+            iniScheduleActiveUntil = ProcessScheduleWindows(iniScheduleActiveUntil, iniScheduleSpec, prevTickWallNow, tickWallNow, newHw, monoIntervalSeconds, macValid, False)
             ' v1.1 S3a: the same window->duration conversion, once per SLOT that carries a
             ' rule, persisted through PersistSlotField. Still inert on every slot the CLI can
             ' arm today (WriteSlotSection writes ScheduleSpec=""), so this remains machinery +
             ' tests until `schedule` becomes a slot.
-            ProcessSlotScheduleWindows(slots, prevTickWallNow, tickWallNow, newHw, monoElapsedSeconds, macValid, False)
+            ProcessSlotScheduleWindows(slots, prevTickWallNow, tickWallNow, newHw, monoIntervalSeconds, macValid, False)
             ' P29: PENDING -> ACTIVE, before the retire pass so a slot that starts and a slot
             ' that ends in the same tick are both handled. A just-activated slot has
             ' Until = HighWater + duration, which is strictly in the future, so it can never
@@ -3985,7 +3997,9 @@ Public Class Service1
     '     trustworthy monoElapsed), so it only opens a window it lands INSIDE (#4a).
     '   * BEFORE the window: not open.
     ' lastNowText = the previous tick's [CurrentTime] Now; nowText = this tick's now;
-    ' monoElapsedSeconds = the real B4 creep-anchor elapsed (wall-clock-immune); isBoot
+    ' monoElapsedSeconds = this tick's RAW monotonic interval (TickIntervalSeconds - the
+    ' same previous-tick -> this-tick span as wallDelta, wall-clock-immune; NOT the
+    ' carried B4 credit, which can read 1 s high and hide a jump at the ceiling); isBoot
     ' = OnStart. Fail-closed: an unparseable now opens nothing new this tick (the
     ' existing ScheduleActiveUntil, if any, still holds via ScheduleActive). Pure.
     Friend Shared Function EvaluateWindows(ByVal windows As List(Of ScheduleWindow), ByVal lastNowText As String, ByVal nowText As String, ByVal monoElapsedSeconds As Long, ByVal isBoot As Boolean) As List(Of ScheduleOpen)
@@ -4189,6 +4203,22 @@ Public Class Service1
         Dim whole As Long = deltaMs \ 1000L
         anchorMs += whole * 1000L
         Return whole
+    End Function
+
+    ' A5 round 2: this tick's OWN whole-second monotonic interval, no carry - the
+    ' pre-A5 arithmetic, kept for the schedule jump-OVER test, which must compare
+    ' wallDelta with the real elapsed over the SAME interval. An unseeded anchor
+    ' (<= 0) is seeded to nowMs and reads 0; a zero or backwards delta reads 0 and
+    ' leaves the anchor alone; otherwise delta \ 1000 and the anchor moves to nowMs.
+    Friend Shared Function TickIntervalSeconds(ByRef rawAnchorMs As Long, ByVal nowMs As Long) As Long
+        If rawAnchorMs <= 0 Then
+            rawAnchorMs = nowMs
+            Return 0L
+        End If
+        Dim deltaMs As Long = nowMs - rawAnchorMs
+        If deltaMs <= 0 Then Return 0L
+        rawAnchorMs = nowMs
+        Return deltaMs \ 1000L
     End Function
 
     ' B1 backward-clock fix. The next [Time] HighWater to persist, advancing on the
