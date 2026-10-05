@@ -91,7 +91,9 @@ public class MonoCarryTests
     public void BackwardsNow_CreditsZero_AnchorUnchanged()
     {
         long anchor = Seed;
-        Assert.Equal(0L, Take(ref anchor, Seed - 500L));
+        // -5 000 ms, not -500: VB's \ truncates -500 \ 1000 to 0, so only a delta
+        // <= -1 000 ms proves the delta <= 0 guard (and that the anchor never moves back).
+        Assert.Equal(0L, Take(ref anchor, Seed - 5_000L));
         Assert.Equal(Seed, anchor);
     }
 
@@ -122,5 +124,61 @@ public class MonoCarryTests
                 Assert.True(credited >= floorSeconds - 1L, $"run {run} tick {i}: credited {credited} < floor {floorSeconds} - 1");
             }
         }
+    }
+
+    // A5 round 2: the schedule jump-OVER test reads the RAW per-tick interval
+    // (TickIntervalSeconds), not the carried credit, which can read 1 s high on the
+    // tick a carry is paid out.
+
+    private static long Interval(ref long anchor, long now) =>
+        monkmode.Service1.TickIntervalSeconds(ref anchor, now);
+
+    [Fact]
+    public void CarriedCreditAndRawInterval_SideBySide_DivergeWhenTheCarryPaysOut()
+    {
+        long carryAnchor = 0, rawAnchor = 0;
+        long now = Seed;
+        Assert.Equal(0L, Take(ref carryAnchor, now));
+        Assert.Equal(0L, Interval(ref rawAnchor, now));
+        Assert.Equal(Seed, rawAnchor);
+
+        now += 9_984L;
+        Assert.Equal(9L, Take(ref carryAnchor, now));       // 984 ms carried
+        Assert.Equal(9L, Interval(ref rawAnchor, now));
+        Assert.Equal(now, rawAnchor);
+
+        now += 10_016L;
+        Assert.Equal(11L, Take(ref carryAnchor, now));      // 10 + the paid-out carry
+        Assert.Equal(10L, Interval(ref rawAnchor, now));    // this tick's own interval
+        Assert.Equal(now, rawAnchor);
+    }
+
+    [Fact]
+    public void RawInterval_BackwardsOrZero_ReadsZero_AnchorUnchanged()
+    {
+        long anchor = Seed;
+        Assert.Equal(0L, Interval(ref anchor, Seed - 5_000L));
+        Assert.Equal(Seed, anchor);
+        Assert.Equal(0L, Interval(ref anchor, Seed));
+        Assert.Equal(Seed, anchor);
+    }
+
+    [Fact]
+    public void JumpOverAtTheCeiling_OpensOnTheRawInterval_NotOnTheCarriedCredit()
+    {
+        // One window 09:00-09:01 every day; the wall moves 08:59:59 -> 09:02:10 (131 s)
+        // in the tick above, whose raw interval is 10 s and carried credit 11 s.
+        // 131 - 10 = 121 > 120 is a jump-OVER -> open for the full 60 s; 131 - 11 = 120
+        // is not, and the window would be skipped (fail-OPEN). The tick passes the raw 10.
+        var windows = monkmode.Service1.ParseSchedule("v2;1234567:0900-0901;sites=x.com;apps=").Windows;
+        const string last = "2026-10-05 08:59:59";
+        const string now = "2026-10-05 09:02:10";
+
+        var withRaw = monkmode.Service1.EvaluateWindows(windows, last, now, 10L, false);
+        Assert.Single(withRaw);
+        Assert.Equal(60L, withRaw[0].RemainingSeconds);
+
+        var withCarried = monkmode.Service1.EvaluateWindows(windows, last, now, 11L, false);
+        Assert.Empty(withCarried);
     }
 }
