@@ -333,6 +333,7 @@ Module Program
         Dim windowStart As DateTime = If(startAt.HasValue, startAt.Value, armNow)
 
         Dim untilDate As DateTime
+        Dim forSpan As TimeSpan? = Nothing
         Dim untilArg As String = GetOption(args, "--until")
         Dim forArg As String = GetOption(args, "--for")
         If untilArg <> "" Then
@@ -347,6 +348,9 @@ Module Program
                 Console.Error.WriteLine("Could not understand --for '" & forArg & "'. Try 2h, 90m, 1d12h.")
                 Return 1
             End If
+            ' T2: untilDate is the DISPLAY end (and a PENDING slot's duration); an immediate
+            ' arm's stored Until is mark + this span, so `--for 11h` is 11h of real time.
+            forSpan = span
             untilDate = windowStart.Add(span)
         Else
             Console.Error.WriteLine("Specify a duration with --for or --until.")
@@ -364,6 +368,18 @@ Module Program
                 Console.Error.WriteLine("The block must end at least a minute in the future.")
                 Return 1
         End Select
+
+        ' T2 (A2, 05/10/2026): an IMMEDIATE block carries its REAL span to the arm, which writes
+        ' Until = HighWater mark + span (Blocker.FrameEndFor) - the frame the service's expiry
+        ' reads. `--for` is the parsed TimeSpan itself; `--until` is the UTC difference from
+        ' the arm instant (whole-second, the stamp's precision), so a DST fall-back inside the
+        ' span is honoured. A PENDING block passes none - P29, the service computes its end.
+        Dim realSpan As TimeSpan? = Nothing
+        If Not startAt.HasValue Then
+            realSpan = If(forSpan.HasValue, forSpan.Value,
+                          Blocker.RealSpanUntil(armNow.AddTicks(-(armNow.Ticks Mod TimeSpan.TicksPerSecond)),
+                                                untilDate, TimeZoneInfo.Local))
+        End If
 
         ' Ledger 319 (30/08/2026): there is no cooling-off exit any more, so a per-block
         ' cooling-off DURATION has nothing to configure. `--cooloff` is still ACCEPTED and
@@ -445,7 +461,7 @@ Module Program
         ' returns it ONCE - only a salted, MAC-covered hash is ever persisted.
         Dim arm As Blocker.ArmResult = Blocker.ArmSlot(domains, apps, urlPatterns, startAt, untilDate,
                                                        Blocker.ServiceIsInstalled(),
-                                                       committed, coolOffSeconds, allSessionKill)
+                                                       committed, coolOffSeconds, allSessionKill, realSpan)
         If arm.Outcome = Blocker.ArmOutcome.CapReached Then
             Console.Error.WriteLine("All " & MonkMode.ConfigIntegrity.MaxSlots & " block slots are in use. End or wait out one of these first:")
             For Each line As String In arm.SlotSummaries

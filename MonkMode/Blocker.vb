@@ -1437,6 +1437,62 @@ Module Blocker
         Return String.IsNullOrWhiteSpace(scheduleActiveUntil)
     End Function
 
+    ' T2 (A2, 05/10/2026) (PURE): the REAL span of an `--until` block - the UTC difference
+    ' between the arm instant and the typed end, both read as wall times in `tz`. An
+    ' immediate arm's Until lives in the HighWater frame (Until = mark + span, FrameEndFor
+    ' below), and HighWater credits REAL time through a DST change, so the span has to be
+    ' real time too: armed 24/10/2026 22:00 BST until 25/10 09:00 GMT is 12h, not the 11h a
+    ' wall subtraction gives. (`--for` never comes here - its span IS the parsed TimeSpan.)
+    ' A zone change that happens LATER inside the span is a residual one zone rule can't know.
+    ' Fail-CLOSED on ambiguity: an ambiguous arm instant reads as its EARLIEST UTC reading and
+    ' an ambiguous end as its LATEST, so a guess can only lengthen the block. A Local-kind
+    ' instant in the local zone (DateTime.Now) carries its own DST bit and is converted
+    ' exactly. Never throws: an end too far out to convert falls back to the wall difference.
+    Friend Function RealSpanUntil(ByVal armNowLocal As DateTime, ByVal endsAtLocal As DateTime,
+                                  ByVal tz As TimeZoneInfo) As TimeSpan
+        Try
+            Return WallToUtc(endsAtLocal, tz, earliest:=False) - WallToUtc(armNowLocal, tz, earliest:=True)
+        Catch ex As ArgumentException
+            Return endsAtLocal - armNowLocal
+        End Try
+    End Function
+
+    Private Function WallToUtc(ByVal wall As DateTime, ByVal tz As TimeZoneInfo, ByVal earliest As Boolean) As DateTime
+        If wall.Kind = DateTimeKind.Local AndAlso tz.Equals(TimeZoneInfo.Local) Then Return wall.ToUniversalTime()
+        Dim plain As DateTime = DateTime.SpecifyKind(wall, DateTimeKind.Unspecified)
+        Dim offset As TimeSpan
+        If tz.IsAmbiguousTime(plain) Then
+            ' The larger offset is the earlier UTC instant.
+            Dim first As Boolean = True
+            For Each candidate As TimeSpan In tz.GetAmbiguousTimeOffsets(plain)
+                If first OrElse (earliest AndAlso candidate > offset) OrElse
+                   (Not earliest AndAlso candidate < offset) Then offset = candidate
+                first = False
+            Next
+        Else
+            ' An invalid (spring-forward gap) time reads at the standard offset - the later instant.
+            offset = tz.GetUtcOffset(plain)
+        End If
+        Return DateTime.SpecifyKind(plain - offset, DateTimeKind.Utc)
+    End Function
+
+    ' T2 (A2) (PURE): an immediate arm's Until in the HighWater frame - `mark + span`, where
+    ' `markText` is the en-CA plaintext mark the arm runs against (the stored HighWater on
+    ' the append path, the re-seeded value on the re-seed and fresh paths). This is the frame
+    ' the service's expiry already reads (Until <= HighWater), so a mark AHEAD of the wall (a
+    ' fall-back or westward zone change with a slot running) no longer lifts the new block
+    ' early, and a mark BEHIND it no longer over-runs it. Nothing when the mark can't be
+    ' parsed or the sum would overflow - the caller then falls back to the wall-clock end.
+    Friend Function FrameEndFor(ByVal markText As String, ByVal span As TimeSpan) As DateTime?
+        Dim mark As DateTime = ParseStamp(markText)
+        If mark = DateTime.MinValue Then Return Nothing
+        Try
+            Return mark.Add(span)
+        Catch ex As ArgumentOutOfRangeException
+            Return Nothing
+        End Try
+    End Function
+
     ' P17 (PURE): the id this arm takes. `Id` is the stored [Slots] NextSlotId, but never
     ' below one past the highest id already present, so an id can NEVER be reused even if
     ' NextSlotId were somehow behind (a retire REMOVES its section and lowers the highest
@@ -1785,11 +1841,12 @@ Module Blocker
                             ByVal serviceInstalled As Boolean,
                             Optional ByVal committed As Boolean = False,
                             Optional ByVal coolOffSeconds As Long = 0,
-                            Optional ByVal allSessionKill As Boolean = False) As ArmResult
+                            Optional ByVal allSessionKill As Boolean = False,
+                            Optional ByVal realSpan As TimeSpan? = Nothing) As ArmResult
         Dim last As ArmResult = Nothing
         For attempt As Integer = 1 To ArmAttempts
             last = TryArmSlotOnce(domains, apps, urlPatterns, startAt, endsAt, serviceInstalled,
-                                  committed, coolOffSeconds, allSessionKill)
+                                  committed, coolOffSeconds, allSessionKill, realSpan)
             ' Only a lost write is worth retrying: a cap or a frozen config will say the
             ' same thing every time, and retrying would just delay an honest refusal.
             If last.Outcome <> ArmOutcome.WriteRace Then Return last
@@ -1806,7 +1863,8 @@ Module Blocker
                                     ByVal serviceInstalled As Boolean,
                                     ByVal committed As Boolean,
                                     ByVal coolOffSeconds As Long,
-                                    ByVal allSessionKill As Boolean) As ArmResult
+                                    ByVal allSessionKill As Boolean,
+                                    ByVal realSpan As TimeSpan?) As ArmResult
         Dim result As New ArmResult
 
         ' 0. FX4 (F30) - THE WRITER CHOKEPOINT for control characters. DoBlock refuses first with
@@ -1892,6 +1950,13 @@ Module Blocker
         ' after downtime (the wall clock moves on while the machine is off).
         Dim endsAtOrNothing As DateTime? = If(startAt.HasValue, CType(Nothing, DateTime?), CType(endsAt, DateTime?))
 
+        ' T2 (A2): ONE "now" for this attempt - the seeded/re-seeded mark is also the mark this
+        ' arm's Until is measured from, so both halves of the frame read the same instant.
+        Dim nowText As String = DateTime.Now.ToString(CA)
+        ' The mark this immediate arm's Until is measured from: the stored HighWater on the
+        ' append path, overwritten below by the seeded value on the fresh and re-seed paths.
+        Dim markText As String = DecryptOrEmpty(ini.GetKeyValue("Time", "HighWater"))
+
         If fresh Then
             ' P18 fresh rewrite: nothing trustworthy to preserve, so scaffold from scratch.
             ' This is the ONLY path that seeds the monotonic frame.
@@ -1905,7 +1970,8 @@ Module Blocker
             ' on a clock jump, and decides expiry off it instead of raw DateTime.Now - so
             ' rolling the clock forward past a slot's Until can't lift it early. MAC-covered
             ' by StampFreshMac below, so it can't be forged past Until either.
-            ini.SetKeyValue("Time", "HighWater", enc.EncryptData(DateTime.Now.ToString(CA)))
+            ini.SetKeyValue("Time", "HighWater", enc.EncryptData(nowText))
+            markText = nowText
             ' F77: the mark's UTC anchor is created EMPTY here, and the SERVICE seeds it
             ' from a corroborated reading (TrustedTime.ResolveMarkAndAnchor's no-anchor
             ' branch: seed, credit nothing). The CLI deliberately does NOT seed it from
@@ -1923,7 +1989,7 @@ Module Blocker
             ' which is simply today's behaviour, the fail-closed direction.
             ini.SetKeyValue("Time", "TrustedUtc", "")
             ini.AddSection("CurrentTime")
-            ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(DateTime.Now.ToString(CA)))
+            ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(nowText))
             ' The v9 [Partner] mirror belongs to the ONE block this fresh config holds.
             ini.AddSection("Partner")
             ini.SetKeyValue("Partner", "Salt", saltB64)
@@ -1967,9 +2033,10 @@ Module Blocker
             ' on ActiveUntil <= HighWater (ScheduleWindowElapsed, :2668). Moving the mark
             ' forward under it would close it EARLY, so never re-seed while one is open.
             If ShouldReseedMonotonicFrame(slotCount, ini.GetKeyValue("Schedule", "ActiveUntil")) Then
-                Dim reseed As String = DateTime.Now.ToString(CA)
+                Dim reseed As String = nowText
                 ini.SetKeyValue("Time", "HighWater", enc.EncryptData(reseed))
                 ini.SetKeyValue("CurrentTime", "Now", enc.EncryptData(reseed))
+                markText = reseed
                 ' F77: CLEARING the anchor here is load-bearing, not tidiness. This branch
                 ' jumps the mark forward to "now"; leaving the old anchor behind would
                 ' desynchronise the pair, and the next probe would credit the gap the
@@ -1980,6 +2047,19 @@ Module Blocker
                 ' documented at the fresh-arm seed above.
                 ini.SetKeyValue("Time", "TrustedUtc", "")
             End If
+        End If
+
+        ' T2 (A2, 05/10/2026): an IMMEDIATE arm's Until is `mark + real span` - the frame expiry
+        ' reads it in (Until <= HighWater) - on all three paths: append (the stored mark), re-seed
+        ' and fresh (the value just seeded). The "writes Until off the WALL clock" premise in the
+        ' F76 notes above described the code before this; the re-seed stays (it also resets the
+        ' F77 anchor). DoBlock - the one production caller - always passes the span; a call
+        ' with none (the WriteConfig shim, direct test arms) stores `endsAt` as given, as it
+        ' always did. PENDING slots keep P29.
+        If Not startAt.HasValue AndAlso realSpan.HasValue Then
+            Dim frameEnd As DateTime? = FrameEndFor(markText, realSpan.Value)
+            ' Unparseable mark (or overflow): keep the wall-clock end, the pre-T2 behaviour.
+            If frameEnd.HasValue Then endsAtOrNothing = frameEnd
         End If
 
         ' FX5 (fold-in): .Trim() the URL patterns, because that is what the control-character
