@@ -42,7 +42,8 @@
 //       (MarkDoneAt) and the teardown's zero-slot persist, whose guarded form also refuses
 //       a slot id outside the set the teardown decided on - so a teardown can no longer
 //       delete a block armed after it read the slots. Residual, as FX6 states: a write
-//       landing between the probe and IniFile.Save's rename still wins.
+//       landing between the probe and IniFile.Save's rename still wins. Round 2: MarkDoneAt
+//       checks the MAC first, and a refused Done write halts stopMe before any teardown.
 //   F10 The arm confirmed its own write by POSITION, so a retire compacting a slot out
 //       between the Save and the confirm made it misread its landed write as a lost race
 //       and append a SECOND identical slot with a fresh code. -> confirm the id ANYWHERE.
@@ -586,8 +587,9 @@ public class WriterRaceLiveTests
         {
             Assert.True(Arm("a.com").Ok);
 
+            var svc = Svc();
             monkmode.Service1.PersistSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
-            var wrote = monkmode.Service1.MarkDoneAt(MonkMode.Blocker.IniPath());
+            var wrote = svc.MarkDoneAt(MonkMode.Blocker.IniPath());
             monkmode.Service1.PersistSaveHookForTests = null;
 
             Assert.False(wrote);
@@ -607,10 +609,97 @@ public class WriterRaceLiveTests
         try
         {
             Assert.True(Arm("a.com").Ok);
-            Assert.True(monkmode.Service1.MarkDoneAt(MonkMode.Blocker.IniPath()));
+            Assert.True(Svc().MarkDoneAt(MonkMode.Blocker.IniPath()));
             Assert.Equal("yes", Reload().GetKeyValue("User", "Done"));
         }
         finally { Wipe(); }
+    }
+
+    [Fact]
+    public void MarkDone_RefusesAnInvalidMac_AndWritesNothing()
+    {
+        // Round 2 (Astra P2): the teardown was decided on a valid MAC, so an invalid one at the
+        // Done write means the file moved. Unchanged-but-invalid bytes used to pass the token
+        // check and save; now the MAC is checked before genAtLoad, like the sibling writers.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var ini = Reload();
+            ini.SetKeyValue("Slot1", "Sites", "a.com;tampered.com;");   // no re-stamp
+            ini.Save(MonkMode.Blocker.IniPath());
+            Assert.False(MonkMode.Blocker.ConfigIsMacValid());
+            var before = File.ReadAllBytes(MonkMode.Blocker.IniPath());
+
+            Assert.False(Svc().MarkDoneAt(MonkMode.Blocker.IniPath()));
+
+            Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));
+        }
+        finally { Wipe(); }
+    }
+
+    // ---- 05/10 T1 round 2 (Astra P1): stopMe halts on a refused Done write ----
+
+    private const string HostsMarker = "#### MonkMode Entries ####";
+    private const string HostsUser = "# my hosts\r\n127.0.0.1 my-dev-box\r\n";
+    private const string HostsBlocked = HostsUser + HostsMarker + "\r\n127.0.0.1 a.com\r\n#### MonkMode End ####\r\n";
+
+    [Fact]
+    public void ExpiryStripAndMarkDone_HaltsTheTeardown_WhenAnArmLandsUnderTheDoneWrite()
+    {
+        // stopMe used to discard MarkDoneAt's False and go on to delete the snapshot and the
+        // backup, kill the guardian and Stop - a DETECTED refusal followed by teardown. The seam
+        // is stopMe's first step; False means stopMe returns before any of that.
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            File.WriteAllText(MonkMode.Blocker.SnapshotPath(), "snapshot");
+            File.WriteAllText(MonkMode.Blocker.IniBackupPath(), "backup");
+            var hosts = Path.Combine(dir, "hosts");
+            File.WriteAllText(hosts, HostsBlocked);
+            var svc = Svc();
+
+            monkmode.Service1.PersistSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
+            var mayContinue = svc.ExpiryStripAndMarkDoneAt(hosts, MonkMode.Blocker.IniPath());
+            monkmode.Service1.PersistSaveHookForTests = null;
+
+            Assert.False(mayContinue);
+            var after = Reload();
+            Assert.Equal(2, SlotCount(after));                               // the arm survived
+            Assert.Equal(new[] { "a.com", "b.com" }, Sites(after));
+            Assert.NotEqual("yes", after.GetKeyValue("User", "Done"));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+            Assert.True(File.Exists(MonkMode.Blocker.SnapshotPath()));       // nothing torn down
+            Assert.True(File.Exists(MonkMode.Blocker.IniBackupPath()));
+        }
+        finally { Wipe(); Drop(dir); }
+    }
+
+    [Fact]
+    public void ExpiryStripAndMarkDone_WithNothingRacingIt_LetsTheTeardownGoOn()
+    {
+        // Unchanged paths: a stripped block marks Done and continues; nothing of ours in hosts
+        // writes no Done and continues, exactly as the inline code did.
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var hosts = Path.Combine(dir, "hosts");
+            File.WriteAllText(hosts, HostsUser);
+            var svc = Svc();
+
+            Assert.True(svc.ExpiryStripAndMarkDoneAt(hosts, MonkMode.Blocker.IniPath()));
+            Assert.NotEqual("yes", Reload().GetKeyValue("User", "Done"));
+
+            File.WriteAllText(hosts, HostsBlocked);
+            Assert.True(svc.ExpiryStripAndMarkDoneAt(hosts, MonkMode.Blocker.IniPath()));
+            Assert.DoesNotContain(HostsMarker, File.ReadAllText(hosts));
+            Assert.Equal("yes", Reload().GetKeyValue("User", "Done"));
+        }
+        finally { Wipe(); Drop(dir); }
     }
 
     // ---- 05/10 T1 (A1): the guarded teardown persist ----
