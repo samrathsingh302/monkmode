@@ -1919,8 +1919,9 @@ Public Class Service1
             Dim nowMono As Long = Environment.TickCount64
             ' monoElapsedSeconds is method-scoped (hoisted up top) so the schedule poll
             ' below can read it too; assigned (not re-declared) here.
-            monoElapsedSeconds = If(lastMonoMs <= 0, 0L, (nowMono - lastMonoMs) \ 1000L)
-            lastMonoMs = nowMono
+            ' A5: whole seconds only, the sub-second remainder carried in lastMonoMs (see
+            ' TakeWholeMonoSeconds) - discarding it lost ~5% of real time per hour.
+            monoElapsedSeconds = TakeWholeMonoSeconds(lastMonoMs, nowMono)
             ' C5b (b2): capture this tick's wall 'now' for the schedule jump-OVER detection
             ' and remember the PREVIOUS tick's now as lastNow. Captured right after lastMonoMs
             ' so wallDelta (tickWallNow - prevTickWallNow) and monoElapsedSeconds span the SAME
@@ -4168,6 +4169,26 @@ Public Class Service1
         If advance <= 0 OrElse advance <= budget Then Return candidateHwText
         ' Otherwise the wall ran ahead of real time (creep): credit only the budget.
         Return storedHw.AddSeconds(budget).ToString(ca)
+    End Function
+
+    ' A5 (05/10 audit): the whole seconds of real monotonic time since the anchor, with
+    ' the sub-second remainder CARRIED. The anchor advances by exactly result x 1000 ms,
+    ' so a ~10 016 ms tick credits 10 and the 16 ms stays owed to the next tick, instead
+    ' of being thrown away every tick (a 9 984 ms tick used to credit 9 and lose 984 ms).
+    ' B4 holds: the summed credit is floor(real elapsed since the seed / 1000) - never
+    ' more than real time, and the unclaimed carry is always < 1 s of time already
+    ' elapsed. A zero or backwards delta credits 0 and leaves the anchor alone; an
+    ' unseeded anchor (<= 0) is seeded to nowMs and credits 0, as before.
+    Friend Shared Function TakeWholeMonoSeconds(ByRef anchorMs As Long, ByVal nowMs As Long) As Long
+        If anchorMs <= 0 Then
+            anchorMs = nowMs
+            Return 0L
+        End If
+        Dim deltaMs As Long = nowMs - anchorMs
+        If deltaMs <= 0 Then Return 0L
+        Dim whole As Long = deltaMs \ 1000L
+        anchorMs += whole * 1000L
+        Return whole
     End Function
 
     ' B1 backward-clock fix. The next [Time] HighWater to persist, advancing on the
