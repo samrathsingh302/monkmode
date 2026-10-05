@@ -55,6 +55,14 @@ Module Program
 
         Dim verb As String = args(0).ToLowerInvariant()
         Try
+            ' T5 round 3 (A6): a `block --file` that cannot be read refuses HERE, before the
+            ' restore below can write the primary config - the refusal precedes every side effect.
+            ' The list it read is carried into DoBlock, so the file is read once.
+            Dim fileDomains As List(Of String) = Nothing, fileErr As String = ""
+            If PreDispatchFileRefusal(args, fileDomains, fileErr) Then
+                Console.Error.WriteLine(fileErr)
+                Return 1
+            End If
             ' C1b (R8, CLI side of the restore-on-corrupt path): if the primary
             ' config is corrupt/blanked/short and a MAC-valid backup exists, restore
             ' it before dispatching - so status/add see the real (self-healed) block
@@ -64,7 +72,7 @@ Module Program
             Blocker.RestorePrimaryFromBackupIfCorrupt()
             Select Case verb
                 Case "setup" : Return DoSetup(args)
-                Case "block" : Return DoBlock(args)
+                Case "block" : Return DoBlock(args, fileDomains)
                 Case "status" : Return DoStatus()
                 Case "stats" : Return DoStats()
                 Case "add" : Return DoAdd(args)
@@ -160,7 +168,8 @@ Module Program
         Return 0
     End Function
 
-    Private Function DoBlock(ByVal args As String()) As Integer
+    ' fileDomains: the --file list Main's PreDispatchFileRefusal already read (Nothing = no --file).
+    Private Function DoBlock(ByVal args As String(), ByVal fileDomains As List(Of String)) As Integer
         ' C6a: required first-run setup. Refuse to arm until `monkmode setup` has run, so a
         ' first block always goes through the accountability-model explanation (and can
         ' never be armed by someone who hasn't seen how to exit). Gates only NEW arms -
@@ -206,16 +215,10 @@ Module Program
 
         ' T5 (A6, 05/10/2026): a named --file that is missing or unreadable REFUSES the arm, before
         ' any side effect - it used to contribute nothing, silently, and the block then armed the
-        ' account defaults (or only --sites) for the whole duration, uncancellable.
-        Dim fileArg As String = GetOption(args, "--file")
-        If fileArg <> "" Then
-            Dim fileDomains As List(Of String) = Nothing, fileErr As String = ""
-            If Not TryReadSiteFile(fileArg, fileDomains, fileErr) Then
-                Console.Error.WriteLine(fileErr)
-                Return 1
-            End If
-            domains.AddRange(fileDomains)
-        End If
+        ' account defaults (or only --sites) for the whole duration, uncancellable. The refusal
+        ' lives in Main (PreDispatchFileRefusal), ahead of the config restore; only a read list
+        ' reaches here.
+        If fileDomains IsNot Nothing Then domains.AddRange(fileDomains)
 
         Dim apps As New List(Of String)
         apps.AddRange(SplitList(GetOption(args, "--apps")))
@@ -1223,6 +1226,20 @@ Module Program
             Dim t As String = line.Trim()
             If t <> "" AndAlso Not t.StartsWith("#") Then domains.Add(t)
         Next
+        Return True
+    End Function
+
+    ' T5 round 3 (A6, pure): Main's pre-dispatch gate. True (refuse, the line in `err`) only for
+    ' `block` with a non-empty --file that TryReadSiteFile cannot read; False for every other
+    ' command and every other `block`, with the read list in `fileDomains` (Nothing = no --file).
+    Friend Function PreDispatchFileRefusal(ByVal args As String(), ByRef fileDomains As List(Of String), ByRef err As String) As Boolean
+        fileDomains = Nothing
+        err = ""
+        If args Is Nothing OrElse args.Length = 0 OrElse args(0).ToLowerInvariant() <> "block" Then Return False
+        Dim fileArg As String = GetOption(args, "--file")
+        If fileArg = "" Then Return False
+        If TryReadSiteFile(fileArg, fileDomains, err) Then Return False
+        fileDomains = Nothing
         Return True
     End Function
 
