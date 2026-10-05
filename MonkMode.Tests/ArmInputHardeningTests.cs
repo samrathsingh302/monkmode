@@ -407,3 +407,65 @@ public class ControlCharArmRefusalTests
         finally { Wipe(); }
     }
 }
+
+// ---- T5 (A10, 05/10/2026): an overflowing duration is refused, never thrown ----
+//
+// TryParseDuration used Integer.Parse on an unbounded \d+ and an unguarded New TimeSpan, and
+// DoBlock's windowStart.Add(span) could pass year 9999, so `--for 99999999999m` printed
+// "Error: Value was either too large..." instead of "Could not understand --for". Each of the
+// three duration inputs - --for, --start, --cooloff - now returns False without throwing.
+public class DurationOverflowTests
+{
+    private static readonly DateTime Now = new(2026, 10, 5, 9, 0, 0);
+
+    [Theory]
+    [InlineData("99999999999m")]    // past Integer
+    [InlineData("99999999999")]     // bare minutes, past Integer
+    [InlineData("2147483647d")]     // an Integer, but past TimeSpan
+    public void ForDuration_Overflow_IsFalse(string token)
+    {
+        TimeSpan span = default;
+        Assert.False(MonkMode.Program.TryParseDuration(token, ref span));
+    }
+
+    [Fact]
+    public void ForEnd_PastYear9999_IsFalse()
+    {
+        // 10 000 000 days is a legal TimeSpan, but now + it is not a DateTime.
+        TimeSpan span = default;
+        Assert.True(MonkMode.Program.TryParseDuration("10000000d", ref span));
+        DateTime end = default;
+        Assert.False(MonkMode.Program.TryAddSpan(Now, span, ref end));
+    }
+
+    [Fact]
+    public void ForEnd_InRange_IsUnchanged()
+    {
+        TimeSpan span = default;
+        Assert.True(MonkMode.Program.TryParseDuration("1d2h30m", ref span));
+        DateTime end = default;
+        Assert.True(MonkMode.Program.TryAddSpan(Now, span, ref end));
+        Assert.Equal(Now.AddMinutes(1590), end);
+    }
+
+    [Theory]
+    [InlineData("99999999999m")]
+    [InlineData("+2147483647d")]
+    [InlineData("+10000000d")]
+    public void StartOverflow_IsFalse_WithTheUsualMessage(string token)
+    {
+        DateTime start = default; string err = "";
+        Assert.False(MonkMode.Program.TryParseStart(token, Now, ref start, ref err));
+        Assert.StartsWith("Could not understand --start '", err, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("99999999999m")]
+    [InlineData("2147483647d")]
+    public void CoolOffOverflow_IsFalse(string token)
+    {
+        long seconds = -1;
+        Assert.False(MonkMode.Program.TryParseCoolOffArg(new[] { "block", "--cooloff", token }, ref seconds));
+        Assert.Equal(0, seconds);
+    }
+}

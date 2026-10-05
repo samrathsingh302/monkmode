@@ -1296,3 +1296,39 @@ public class VersionCommandTests
         Assert.Null(MonkMode.Program.ParseStampedBuildUtc("$(MonkModeBuiltUtc)"));
     }
 }
+
+// ---- T5 (A9, 05/10/2026): `add` refuses a site the service would bin ----
+//
+// SplitList splits only on , and ; so `add --sites "a.com b.com"` reached RequestAdd as ONE
+// token, the CLI printed "Added to block N", and the service's MergeSiteList dropped it for its
+// whitespace. DoAdd now refuses it first through TryRejectWhitespaceSites, naming the value.
+
+public class AddWhitespaceRefusalTests
+{
+    private static bool Check(IEnumerable<string> sites, out string err)
+    {
+        string e = "unset";
+        var ok = MonkMode.Program.TryRejectWhitespaceSites(sites, ref e);
+        err = e;
+        return ok;
+    }
+
+    [Theory]
+    [InlineData("a.com b.com", "a.com b.com")]
+    [InlineData("  a.com b.com  ", "a.com b.com")]
+    [InlineData("a.com\tb.com", "a.com\tb.com")]
+    public void AWhitespaceEntry_IsRefused_NamingIt(string site, string named)
+    {
+        Assert.False(Check(new[] { "x.com", site }, out var err));
+        Assert.Equal("Refusing site '" + named + "': contains whitespace.", err);
+    }
+
+    [Fact]
+    public void CleanEntries_Pass_IncludingTheSpaceAfterAComma()
+    {
+        // `--sites "a.com, b.com"` splits to "a.com" and " b.com": the service trims before its
+        // whitespace test, so a leading/trailing space is not a refusal.
+        Assert.True(Check(new[] { "a.com", " b.com", "c.com  " }, out var err));
+        Assert.Equal("", err);
+    }
+}
