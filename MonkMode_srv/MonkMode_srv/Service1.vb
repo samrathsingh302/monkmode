@@ -5098,9 +5098,13 @@ Public Class Service1
     ' arm landing between the load and the Save skips the write (best-effort: Done stays
     ' unset, the notifier keeps running). Returns True iff the config was rewritten. Not
     ' wrapped in a Try: a load/save throw propagates exactly as the inline code did.
-    Friend Shared Function MarkDoneAt(ByVal iniPath As String) As Boolean
+    ' Round 2: genAtLoad is captured AFTER a MAC check, like the sibling writers. The teardown
+    ' that reached here was decided on a valid MAC, so an invalid one now means the file moved:
+    ' False, and stopMe abandons the teardown (fail-closed - the next tick Holds).
+    Friend Function MarkDoneAt(ByVal iniPath As String) As Boolean
         Dim iniFile = New IniFile
         iniFile.Load(iniPath)
+        If Not ConfigMacIsValidForIni(iniFile) Then Return False
         Dim genAtLoad As String = If(iniFile.GetKeyValue(IntegritySection, IntegrityMacName), "")
         iniFile.SetKeyValue("User", "Done", "yes")
         If PersistSaveHookForTests IsNot Nothing Then PersistSaveHookForTests(iniPath)
@@ -5109,11 +5113,21 @@ Public Class Service1
         Return True
     End Function
 
+    ' stopMe's first step (05/10 bugfix T1 round 2): strip hosts, then mark Done. Returns True
+    ' iff the teardown may go on. A REFUSED Done write is a DETECTED move of the config (a racing
+    ' arm, or a MAC that no longer verifies) - stopMe then returns at once: no snapshot or backup
+    ' delete, no guardian kill, no Stop. Order kept (Done is only ever written after a successful
+    ' strip), so hosts may already be stripped: the next tick reads the armed slot and the B2
+    ' self-heal re-holds hosts and rebuilds the snapshot - at most one tick under-blocked, never a
+    ' dead service. Nothing stripped => no Done write, the teardown goes on exactly as before.
+    Friend Function ExpiryStripAndMarkDoneAt(ByVal hostsPath As String, ByVal iniPath As String) As Boolean
+        If Not StripHostsBlockAtExpiry(hostsPath) Then Return True
+        Return MarkDoneAt(iniPath)
+    End Function
+
     Private Sub stopMe()
 
-        If StripHostsBlockAtExpiry(hostDirS) Then
-            MarkDoneAt(Application.StartupPath + "\monkmode_settings.ini")
-        End If
+        If Not ExpiryStripAndMarkDoneAt(hostDirS, Application.StartupPath + "\monkmode_settings.ini") Then Return
 
         ' The block is over - drop the repair snapshot (best effort) so an
         ' expired block leaves nothing behind to self-heal back in.
