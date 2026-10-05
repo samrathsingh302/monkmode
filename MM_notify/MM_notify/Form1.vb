@@ -150,18 +150,33 @@ Public Class Form1
 
         Dim done As String = "", needsAlerted As String = ""
         Dim isScheduleArmed As Boolean = False
+        Dim macValid As Boolean = False
+        Dim rawSlotCount As Integer = 0
+        Dim scheduleHeld As Boolean = False
         Dim launchMsg As String = ""
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
-            Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
+            macValid = ConfigMacIsValidForIni(ini)
             done = ini.GetKeyValue("User", "Done")
             needsAlerted = ini.GetKeyValue("User", "NeedsAlerted")
             iniProcessList = ini.GetKeyValue("Process", "List")
-            If StrComp(iniProcessList, "null") <> 0 Then iniProcessList = enc.DecryptData(iniProcessList)
+            ' A3 (c): an undecryptable [Process] List is NOT a reason to exit - it sits outside
+            ' the canonical, so garbling it used to kill app-kill, the URL watcher and the block
+            ' page for the rest of the block. Treat it as empty and keep running; the slot Apps
+            ' union in appKillTimer_Tick still kills, and the service restores the file.
+            If StrComp(iniProcessList, "null") <> 0 Then
+                Try
+                    iniProcessList = enc.DecryptData(iniProcessList)
+                Catch ex As Exception
+                    iniProcessList = ""
+                End Try
+            End If
             ' C5b (c3): don't announce "block ended" while a schedule is armed (design §6.4) - a
             ' schedule-only block's past-Until sentinel + between-windows idle must not toast.
             isScheduleArmed = ScheduleArmed(macValid, ini.GetKeyValue("Schedule", "Spec"))
+            rawSlotCount = RawSlotBlockCount(ini)
+            scheduleHeld = isScheduleArmed OrElse ScheduleWindowOpenInIni(ini)
             ' D4: build the launch toast for an ACTIVE MANUAL block (shown once below, after we
             ' decide to run). MAC-valid + not-a-schedule + not-already-ended only: a tampered/garbage
             ' config must announce nothing, a schedule's per-window toast is deferred, and an ended
@@ -174,7 +189,7 @@ Public Class Form1
             Return
         End Try
 
-        If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
+        If ShouldExitOnDone(done, macValid, rawSlotCount, scheduleHeld) Then
             If StrComp(needsAlerted, "no") = 0 Then
                 ExitNotifier()
             Else
@@ -199,16 +214,21 @@ Public Class Form1
     Private Sub pollTimer_Tick(ByVal sender As Object, ByVal e As EventArgs) Handles pollTimer.Tick
         Dim done As String = "", needsAlerted As String = ""
         Dim isScheduleArmed As Boolean = False
+        Dim macValid As Boolean = False
+        Dim rawSlotCount As Integer = 0
+        Dim scheduleHeld As Boolean = False
         Dim reminderToast As String = ""
         Try
             Dim ini As New IniFile
             ini.Load(IniPath())
-            Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
+            macValid = ConfigMacIsValidForIni(ini)
             done = ini.GetKeyValue("User", "Done")
             needsAlerted = ini.GetKeyValue("User", "NeedsAlerted")
             ' C5b (c3): suppress the manual-expiry toast while a schedule is armed (design §6.4);
             ' announce only once the schedule is genuinely cleared (not armed -> stopMe -> Done=yes).
             isScheduleArmed = ScheduleArmed(macValid, ini.GetKeyValue("Schedule", "Spec"))
+            rawSlotCount = RawSlotBlockCount(ini)
+            scheduleHeld = isScheduleArmed OrElse ScheduleWindowOpenInIni(ini)
             ' D4: the periodic active reminder. MAC-valid + not-a-schedule + not-already-ended
             ' only. Built here inside the single ini load, but SHOWN below AFTER the Catch so a
             ' toast can never disturb the expiry logic. Ledger 319 removed its cooling-off sibling.
@@ -235,7 +255,7 @@ Public Class Form1
         ' own swallow, and no ability to change what the expiry branch below reads.
         RefreshBlockPage()
 
-        If StrComp("yes", done) = 0 AndAlso Not isScheduleArmed Then
+        If ShouldExitOnDone(done, macValid, rawSlotCount, scheduleHeld) Then
             pollTimer.Stop()
             If StrComp(needsAlerted, "no") = 0 Then
                 ExitNotifier()
@@ -1266,9 +1286,9 @@ Public Class Form1
     End Function
 
     ' How many blocks the config NAMES, by the same raw floor the guardian holds on (P44): a
-    ' position counts once its ScheduleSpec / StartAt / Until is non-empty. DISPLAY-ONLY - it
-    ' picks the toast wording and nothing else - so an over-count is cosmetic and can never
-    ' touch enforcement. Pure; never throws.
+    ' position counts once its ScheduleSpec / StartAt / Until is non-empty. It picks the toast
+    ' wording and (A3) feeds ShouldExitOnDone, where an over-count only keeps the notifier
+    ' running - so an over-count can never under-block. Pure; never throws.
     Friend Shared Function RawSlotBlockCount(ByVal ini As IniFile) As Integer
         If ini Is Nothing Then Return 0
         Dim n As Integer = 0
@@ -1292,6 +1312,43 @@ Public Class Form1
     ' fires byte-identically to today. Byte-for-byte Service1.ScheduleArmed.
     Friend Shared Function ScheduleArmed(ByVal macValid As Boolean, ByVal specText As String) As Boolean
         Return macValid AndAlso ParseSchedule(specText).Windows.Count > 0
+    End Function
+
+    ' A3: may [User] Done=yes end this notifier? Done sits OUTSIDE the canonical, so one text
+    ' edit used to stop app-kill, the URL watcher and the block page for the rest of a block -
+    ' and the guardian's relaunch hit the same exit every 10s. Done is now honoured only when
+    ' the config itself agrees nothing is armed: MAC valid, no slot section names a block (the
+    ' raw RawSlotBlockCount floor, bound by MaxSlots, not the forgeable SlotCount) and no
+    ' schedule is held. The genuine teardown (stopMe zeroes the slots, then writes Done=yes)
+    ' still passes. done compares exactly as the old StrComp("yes", done) did. Pure.
+    Friend Shared Function ShouldExitOnDone(ByVal done As String, ByVal macValid As Boolean, ByVal rawSlotCount As Integer, ByVal scheduleArmed As Boolean) As Boolean
+        Return StrComp("yes", done) = 0 AndAlso macValid AndAlso rawSlotCount = 0 AndAlso Not scheduleArmed
+    End Function
+
+    ' A3 (Decision 7 iii): is a scheduled window still open by its own deadline? `schedule
+    ' --clear` empties Spec but keeps an open window's [Schedule] ActiveUntil, so ScheduleArmed
+    ' alone misses it. True only when both texts parse (en-CA, as ScheduleElapsed) and
+    ' ActiveUntil is still ahead of HighWater; "" or unparseable => False. Pure.
+    Friend Shared Function ScheduleWindowOpen(ByVal activeUntilText As String, ByVal highWaterText As String) As Boolean
+        Dim ca As New CultureInfo("en-CA")
+        Dim activeUntil As DateTime, highWater As DateTime
+        If Not DateTime.TryParse(activeUntilText, ca, DateTimeStyles.None, activeUntil) Then Return False
+        If Not DateTime.TryParse(highWaterText, ca, DateTimeStyles.None, highWater) Then Return False
+        Return activeUntil > highWater
+    End Function
+
+    ' Reads the two ENCRYPTED fields ScheduleWindowOpen needs, decrypted as the service does.
+    ' Empty ActiveUntil => no window. A decrypt that THROWS reads as open (hold): it can only
+    ' keep the notifier running, never end it.
+    Private Function ScheduleWindowOpenInIni(ByVal ini As IniFile) As Boolean
+        Try
+            Dim activeEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
+            If String.IsNullOrEmpty(activeEnc) Then Return False
+            Dim highWaterEnc As String = ini.GetKeyValue("Time", "HighWater")
+            Return ScheduleWindowOpen(enc.DecryptData(activeEnc), If(String.IsNullOrEmpty(highWaterEnc), "", enc.DecryptData(highWaterEnc)))
+        Catch ex As Exception
+            Return True
+        End Try
     End Function
 
     ' One recurring window (parity copy of Service1.ScheduleWindow).
