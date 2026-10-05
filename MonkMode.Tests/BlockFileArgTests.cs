@@ -113,4 +113,51 @@ public class BlockFileArgTests : IDisposable
             Assert.Empty(domains);
         }
     }
+
+    // T5 round 3: Main refuses an unreadable --file BEFORE the config restore it runs ahead of
+    // every dispatch (a write), through the pure PreDispatchFileRefusal.
+    private static bool PreDispatch(string[] args, out List<string>? domains, out string err)
+    {
+        List<string>? d = null; string e = "";
+        var refused = MonkMode.Program.PreDispatchFileRefusal(args, ref d, ref e);
+        domains = d; err = e;
+        return refused;
+    }
+
+    [Fact]
+    public void PreDispatch_BlockWithAnAbsentFile_IsRefused()
+    {
+        var path = Path.Combine(_dir, "exam-seasn.txt");
+
+        Assert.True(PreDispatch(new[] { "block", "--file", path, "--for", "2h" }, out var domains, out var err));
+        Assert.Equal("Could not read --file '" + path + "'.", err);
+        Assert.Null(domains);
+        Assert.True(PreDispatch(new[] { "BLOCK", "--for", "2h", "--file=" + path }, out _, out err));
+        Assert.Equal("Could not read --file '" + path + "'.", err);
+    }
+
+    [Fact]
+    public void PreDispatch_BlockWithAPresentFile_PassesAndCarriesItsSites()
+    {
+        var path = Path.Combine(_dir, "sites.txt");
+        File.WriteAllLines(path, new[] { "# exam season", "reddit.com", "x.com" });
+
+        Assert.False(PreDispatch(new[] { "block", "--file", path, "--for", "2h" }, out var domains, out var err));
+        Assert.Equal(new[] { "reddit.com", "x.com" }, domains);
+        Assert.Equal("", err);
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("add", "--sites", "c.com")]
+    [InlineData("block", "--sites", "reddit.com", "--for", "2h")]
+    [InlineData("block", "--file", "", "--for", "2h")]
+    [InlineData("add", "--file", "C:\\no-such-dir-mm\\absent.txt")]
+    [InlineData("unblock", "--code", "X")]
+    public void PreDispatch_EveryOtherCall_PassesThroughUntouched(params string[] args)
+    {
+        Assert.False(PreDispatch(args, out var domains, out var err));
+        Assert.Null(domains);
+        Assert.Equal("", err);
+    }
 }
