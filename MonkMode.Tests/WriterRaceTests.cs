@@ -37,6 +37,12 @@
 //       check, so they could delete a slot a CLI arm had already CONFIRMED - i.e. a block
 //       the user was told was armed, whose ONE-TIME partner code was printed and is now
 //       unrecoverable. -> both abandon the save if the config moved under them.
+//       05/10/2026 bugfix T1 (audit A1 + A4) widened the guard to EVERY whole-file service
+//       writer: PersistSlotFieldAt, PersistScheduleActiveUntilAt, stopMe's Done=yes save
+//       (MarkDoneAt) and the teardown's zero-slot persist, whose guarded form also refuses
+//       a slot id outside the set the teardown decided on - so a teardown can no longer
+//       delete a block armed after it read the slots. Residual, as FX6 states: a write
+//       landing between the probe and IniFile.Save's rename still wins.
 //   F10 The arm confirmed its own write by POSITION, so a retire compacting a slot out
 //       between the Save and the confirm made it misread its landed write as a lost race
 //       and append a SECOND identical slot with a fresh code. -> confirm the id ANYWHERE.
@@ -181,6 +187,7 @@ public class WriterRaceLiveTests
     {
         monkmode.Service1.RetireSaveHookForTests = null;
         monkmode.Service1.RestampSaveHookForTests = null;
+        monkmode.Service1.PersistSaveHookForTests = null;
         MonkMode.Blocker.ArmConfirmHookForTests = null;
         mm_notify.Form1.SharedConfigWriteHookForTests = null;
         foreach (var p in new[] { MonkMode.Blocker.IniPath(), MonkMode.Blocker.IniBackupPath(), MonkMode.Blocker.SnapshotPath() })
@@ -494,6 +501,222 @@ public class WriterRaceLiveTests
             Assert.True(svc.PersistSlotFieldAt(MonkMode.Blocker.IniPath(), "1", "PartnerUnlockedAt", "", false));
         }
         finally { Wipe(); }
+    }
+
+    // ---- 05/10 T1 (A4): the remaining whole-file service writers ----
+
+    private static string Token() => monkmode.Service1.ConfigGenerationToken(MonkMode.Blocker.IniPath());
+
+    [Fact]
+    public void PersistSlotField_AbandonsItsWrite_WhenAnArmLandsUnderIt()
+    {
+        // A partner-code verify, an applied `add` or a PENDING activation, followed straight
+        // away by `monkmode block`: the per-slot write used to save its stale whole-file model
+        // over the confirmed arm - code shown, slot gone.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var svc = Svc();
+
+            monkmode.Service1.PersistSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
+            var wrote = svc.PersistSlotFieldAt(MonkMode.Blocker.IniPath(), "1", "PartnerUnlockedAt", "2026-10-05 01:00:00", false);
+            monkmode.Service1.PersistSaveHookForTests = null;
+
+            Assert.False(wrote);
+            var after = Reload();
+            Assert.Equal(2, SlotCount(after));                               // the arm survived
+            Assert.Equal(new[] { "a.com", "b.com" }, Sites(after));
+            Assert.Equal("", after.GetKeyValue("Slot1", "PartnerUnlockedAt"));  // nothing was written
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+
+            // ...and the write is deferred, not lost: the retry against fresh bytes lands.
+            Assert.True(svc.PersistSlotFieldAt(MonkMode.Blocker.IniPath(), "1", "PartnerUnlockedAt", "2026-10-05 01:00:00", false));
+            Assert.Equal(2, SlotCount(Reload()));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void PersistScheduleActiveUntil_AbandonsItsWrite_WhenAnArmLandsUnderIt()
+    {
+        // The window-clear write: same whole-file Save, same clobber. Spec "" both sides, so
+        // the issue-#2 Spec re-check passes and only the generation guard can refuse.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var svc = Svc();
+
+            monkmode.Service1.PersistSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
+            var wrote = svc.PersistScheduleActiveUntilAt(MonkMode.Blocker.IniPath(), "", "");
+            monkmode.Service1.PersistSaveHookForTests = null;
+
+            Assert.False(wrote);
+            var after = Reload();
+            Assert.Equal(2, SlotCount(after));
+            Assert.Equal(new[] { "a.com", "b.com" }, Sites(after));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void PersistScheduleActiveUntil_WithNothingRacingIt_IsUnchanged()
+    {
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            const string until = "2027-01-01 10:00:00";
+            Assert.True(Svc().PersistScheduleActiveUntilAt(MonkMode.Blocker.IniPath(), until, ""));
+            Assert.Equal(until,
+                new monkmode.Simple3Des("mm_textbox").DecryptData(Reload().GetKeyValue("Schedule", "ActiveUntil")));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void MarkDone_AbandonsItsWrite_WhenAnArmLandsUnderIt()
+    {
+        // stopMe's Done=yes save: rolling an arm back here also silenced the notifier for it.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+
+            monkmode.Service1.PersistSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
+            var wrote = monkmode.Service1.MarkDoneAt(MonkMode.Blocker.IniPath());
+            monkmode.Service1.PersistSaveHookForTests = null;
+
+            Assert.False(wrote);
+            var after = Reload();
+            Assert.Equal(2, SlotCount(after));
+            Assert.Equal(new[] { "a.com", "b.com" }, Sites(after));
+            Assert.NotEqual("yes", after.GetKeyValue("User", "Done"));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void MarkDone_WithNothingRacingIt_WritesDone()
+    {
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            Assert.True(monkmode.Service1.MarkDoneAt(MonkMode.Blocker.IniPath()));
+            Assert.Equal("yes", Reload().GetKeyValue("User", "Done"));
+        }
+        finally { Wipe(); }
+    }
+
+    // ---- 05/10 T1 (A1): the guarded teardown persist ----
+
+    [Fact]
+    public void ZeroSlotPersist_DecidedOnNothing_KeepsASlotArmedSinceTheDecision()
+    {
+        // THE A1 SHAPE. The tick decided TeardownAll off an empty slot list; an immediate arm
+        // confirmed before the persist reloaded. The old persist deleted every [SlotN] and
+        // re-blessed the MAC. Decided set {} + a slot on disk = refuse and write nothing.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var before = File.ReadAllBytes(MonkMode.Blocker.IniPath());
+
+            Assert.False(Svc().PersistZeroSlotConfigAt(MonkMode.Blocker.IniPath(), new List<string>(), Token()));
+
+            Assert.Equal(before, File.ReadAllBytes(MonkMode.Blocker.IniPath()));
+            var after = Reload();
+            Assert.Equal(1, SlotCount(after));
+            Assert.Equal(new[] { "a.com" }, Sites(after));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ZeroSlotPersist_DecidedOnTheSlotsItFinds_TearsDown()
+    {
+        // The guard is inert when the decision matches the file: the OnStart shape (expired
+        // slots never retired) still converges to SlotCount = 0 with a valid MAC.
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            Assert.True(Svc().PersistZeroSlotConfigAt(MonkMode.Blocker.IniPath(), new List<string> { "1" }, Token()));
+
+            var after = Reload();
+            Assert.Equal(0, SlotCount(after));
+            Assert.Equal("", after.GetKeyValue("Slot1", "Id"));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+            Assert.True(monkmode.Service1.PersistedSlotCountIsZero(MonkMode.Blocker.IniPath()));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ZeroSlotPersist_AbandonsItsWrite_WhenAnArmLandsUnderIt()
+    {
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var svc = Svc();
+
+            monkmode.Service1.PersistSaveHookForTests = Once(() => Assert.True(Arm("b.com").Ok));
+            var wrote = svc.PersistZeroSlotConfigAt(MonkMode.Blocker.IniPath(), new List<string> { "1" }, Token());
+            monkmode.Service1.PersistSaveHookForTests = null;
+
+            Assert.False(wrote);
+            var after = Reload();
+            Assert.Equal(2, SlotCount(after));
+            Assert.Equal(new[] { "a.com", "b.com" }, Sites(after));
+            Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+            Assert.False(monkmode.Service1.PersistedSlotCountIsZero(MonkMode.Blocker.IniPath()));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void ZeroSlotPersist_RefusesWhenTheConfigMovedSinceTheDecision()
+    {
+        // The decision token: a MAC-covered write between the decision and the persist's
+        // reload (here a heartbeat moving HighWater - no new slot, so only the token sees it).
+        Wipe();
+        try
+        {
+            Assert.True(Arm("a.com").Ok);
+            var svc = Svc();
+            var atDecision = Token();
+            Assert.True(svc.RestampHeartbeatAt(MonkMode.Blocker.IniPath(), "2026-10-05 01:00:00", "", false));
+            Assert.NotEqual(atDecision, Token());
+
+            Assert.False(svc.PersistZeroSlotConfigAt(MonkMode.Blocker.IniPath(), new List<string> { "1" }, atDecision));
+            Assert.Equal(1, SlotCount(Reload()));
+            // An unreadable decision probe (Nothing) refuses too, as does a missing decided set.
+            Assert.False(svc.PersistZeroSlotConfigAt(MonkMode.Blocker.IniPath(), new List<string> { "1" }, null!));
+            Assert.False(svc.PersistZeroSlotConfigAt(MonkMode.Blocker.IniPath(), null!, Token()));
+            Assert.Equal(1, SlotCount(Reload()));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void PersistedSlotCountIsZero_AbortsTheStripOnAnArmedOrUnreadableConfig()
+    {
+        Wipe();
+        var dir = TempDir();
+        try
+        {
+            Assert.False(monkmode.Service1.PersistedSlotCountIsZero(Path.Combine(dir, "absent.ini")));
+            Assert.True(Arm("a.com").Ok);
+            Assert.False(monkmode.Service1.PersistedSlotCountIsZero(MonkMode.Blocker.IniPath()));
+        }
+        finally { Wipe(); Drop(dir); }
     }
 
     // ---- F8: the notifier's writes ----
