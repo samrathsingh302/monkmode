@@ -1438,7 +1438,8 @@ Module Blocker
     End Function
 
     ' T2 (A2, 05/10/2026) (PURE): the REAL span of an `--until` block - the UTC difference
-    ' between the arm instant and the typed end, both read as wall times in `tz`. An
+    ' between the arm instant (or, since 12/10, a PENDING block's start) and the typed end,
+    ' both read as wall times in `tz`. An
     ' immediate arm's Until lives in the HighWater frame (Until = mark + span, FrameEndFor
     ' below), and HighWater credits REAL time through a DST change, so the span has to be
     ' real time too: armed 24/10/2026 22:00 BST until 25/10 09:00 GMT is 12h, not the 11h a
@@ -1458,7 +1459,8 @@ Module Blocker
     End Function
 
     Private Function WallToUtc(ByVal wall As DateTime, ByVal tz As TimeZoneInfo, ByVal earliest As Boolean) As DateTime
-        If wall.Kind = DateTimeKind.Local AndAlso tz.Equals(TimeZoneInfo.Local) Then Return wall.ToUniversalTime()
+        If wall.Kind = DateTimeKind.Local AndAlso tz.Equals(TimeZoneInfo.Local) AndAlso
+           Not tz.IsInvalidTime(wall) Then Return wall.ToUniversalTime()
         Dim plain As DateTime = DateTime.SpecifyKind(wall, DateTimeKind.Unspecified)
         Dim offset As TimeSpan
         If tz.IsAmbiguousTime(plain) Then
@@ -1469,8 +1471,15 @@ Module Blocker
                    (Not earliest AndAlso candidate < offset) Then offset = candidate
                 first = False
             Next
+        ElseIf tz.IsInvalidTime(plain) Then
+            ' A spring-forward gap time never shows on the wall; the offsets either side of the
+            ' gap give two readings. An end reads the later instant (the standard offset, as it
+            ' always did); a start - a pending block's typed --start can land here (T2, 12/10)
+            ' - the earlier, so a guess can only lengthen the block.
+            Dim a As TimeSpan = tz.GetUtcOffset(plain)
+            Dim b As TimeSpan = tz.GetUtcOffset(DateTime.SpecifyKind(plain - a, DateTimeKind.Utc))
+            offset = If(earliest, If(a > b, a, b), If(a < b, a, b))
         Else
-            ' An invalid (spring-forward gap) time reads at the standard offset - the later instant.
             offset = tz.GetUtcOffset(plain)
         End If
         Return DateTime.SpecifyKind(plain - offset, DateTimeKind.Utc)
@@ -1944,10 +1953,19 @@ Module Blocker
         Dim saltB64 As String = Convert.ToBase64String(partnerSalt)
         Dim hashB64 As String = ConfigIntegrity.ComputePartnerHash(partnerSalt, partnerCodePlain)
         Dim durationSeconds As Long = 0
-        If startAt.HasValue Then durationSeconds = CLng(Math.Round((endsAt - startAt.Value).TotalSeconds))
+        If startAt.HasValue AndAlso realSpan.HasValue Then
+            durationSeconds = CLng(Math.Round(realSpan.Value.TotalSeconds))
+        ElseIf startAt.HasValue Then
+            durationSeconds = CLng(Math.Round((endsAt - startAt.Value).TotalSeconds))
+        End If
         ' P29: a PENDING slot stores StartAt + DurationSeconds and NO Until - the SERVICE
         ' computes Until at activation. Storing an absolute Until here would UNDER-BLOCK
         ' after downtime (the wall clock moves on while the machine is off).
+        ' T2 (12/10/2026): the service activates at HighWater + DurationSeconds, and HighWater
+        ' credits REAL time, so the duration is the real span DoBlock passes: a pending window
+        ' across the 25/10 fall-back (22:00 -> 09:00) is 12h, where the wall difference stored
+        ' 11h and lifted an hour early. A call with no span (the WriteConfig shim, direct test
+        ' arms) keeps the wall difference, as it always did.
         Dim endsAtOrNothing As DateTime? = If(startAt.HasValue, CType(Nothing, DateTime?), CType(endsAt, DateTime?))
 
         ' T2 (A2): ONE "now" for this attempt - the seeded/re-seeded mark is also the mark this
