@@ -2653,8 +2653,8 @@ Module Blocker
     ' C5b (c3): is a schedule currently armed? MAC-valid AND a non-empty [Schedule] Spec (the cheap
     ' over-approximation the guardian uses, NOT a 4th ParseSchedule copy - the CLI only ever writes a
     ' validated Spec or "", so non-empty <=> has windows here). Used for the SD-c1 mutual exclusion
-    ' (`block`/`add` refuse while a schedule is armed) and to pick the arm path (edit-in-place vs
-    ' fresh scaffold) in WriteScheduleConfig. Fail-safe: any read failure / no config / invalid MAC
+    ' (`block`/`add` refuse while a schedule is armed); WriteScheduleConfig picks its arm path
+    ' with ShouldEditScheduleInPlace, which also counts an open window (bug 1253). Fail-safe: any read failure / no config / invalid MAC
     ' reads as NOT armed - a tampered running block is still caught by the manual path's own fail-
     ' closed BlockIsActive (service running + bad MAC => active => refused). Never throws.
     Public Function ScheduleIsArmed() As Boolean
@@ -2668,22 +2668,62 @@ Module Blocker
         End Try
     End Function
 
+    ' Bug 1253 (audit N1, 12/10/2026) (PURE): does WriteScheduleConfig edit the existing config
+    ' in place, or build the fresh scaffold? In place when the MAC is valid AND either a Spec is
+    ' armed OR a window is open ([Schedule] ActiveUntil non-blank). The second term is the fix:
+    ' `schedule --clear` blanks the Spec but leaves an open window's ActiveUntil to run to its
+    ' end, and the next fresh arm used to see "not armed", take the scaffold and erase that
+    ' window - with a NEW HighWater, closing it early. Same guard and same fail-closed wording
+    ' as ShouldReseedMonotonicFrame: an unparseable deadline still reads as "a window may be
+    ' open", so anything non-blank counts. Editing in place over a window that has in fact
+    ' closed is harmless (the service blanks ActiveUntil at the close). MAC-invalid stays the
+    ' fresh scaffold - P18's recovery hatch; nothing trusts a window under a bad MAC.
+    Friend Function ShouldEditScheduleInPlace(ByVal macValid As Boolean,
+                                              ByVal specText As String,
+                                              ByVal activeUntilText As String) As Boolean
+        Return macValid AndAlso (Not String.IsNullOrWhiteSpace(specText) OrElse
+                                 Not String.IsNullOrWhiteSpace(activeUntilText))
+    End Function
+
     ' C5b (c3): arm / re-arm / clear a schedule-only block. `spec` = a validated compact Spec (>=1
     ' window) to arm, or "" to clear. Mirrors WriteConfig's fresh scaffold when nothing is armed yet,
     ' and AppendAddToHosts's edit-in-place (RestampMacWithExistingKey, preserve every other field)
     ' when re-arming/clearing an armed one - so a re-arm/clear can NEVER reset the monotonic frame
     ' ([Time] HighWater) or shorten a currently-open window ([Schedule] ActiveUntil is left
-    ' untouched; C5a §7). The CLI never writes the hosts snapshot (the service creates
+    ' untouched; C5a §7). Bug 1253: an open window is carried forward across a clear + re-arm
+    ' too - a cleared Spec with ActiveUntil still set edits in place (ShouldEditScheduleInPlace),
+    ' never the scaffold. The CLI never writes the hosts snapshot (the service creates
     ' monkmode_hosts.block on window-open, c1). Public so the CLI-writer end-to-end test drives it.
     Public Sub WriteScheduleConfig(ByVal spec As String)
-        If ScheduleIsArmed() Then
+        ' Load ONCE; a missing/unreadable file reads macValid=False (the old ScheduleIsArmed catch)
+        ' and so takes the fresh scaffold, whose AnySlotArmed backstop then decides.
+        Dim existing As New IniFile
+        Dim existingMacValid As Boolean = False
+        Try
+            existing.Load(IniPath())
+            existingMacValid = ConfigMacIsValidForIni(existing)
+        Catch
+            existingMacValid = False
+        End Try
+        ' The open-window term makes edit-in-place reachable with SLOTS armed (`block` may arm
+        ' beside a cleared schedule's open window), which a Spec never could (both arm paths
+        ' refuse while a Spec is armed). Writing the schedule sentinel over the slots' v9 [Time]
+        ' Until mirror is not this writer's to do, so with slots armed fall through to the
+        ' scaffold branch, whose backstop refuses. The slot count is read from the SAME loaded
+        ' snapshot (no second read whose transient failure could disagree with the first); it
+        ' is only reached under a proved-valid MAC, which covers SlotCount. An unreadable config
+        ' never gets here - it reads macValid=False, takes the Else, and AnySlotArmed's own
+        ' fail-closed read (unreadable = ARMED) decides there.
+        If ShouldEditScheduleInPlace(existingMacValid,
+                                     existing.GetKeyValue("Schedule", "Spec"),
+                                     existing.GetKeyValue("Schedule", "ActiveUntil")) AndAlso
+           ConfigIntegrity.ParseSlotCount(existing.GetKeyValue("Slots", "SlotCount")) = 0 Then
             ' Edit an existing armed schedule-only config in place: change only the Spec, keep the
             ' monotonic frame + any open window. Re-stamp with the EXISTING key, and ONLY if the MAC
             ' was valid before the edit (never re-bless a tampered/frozen config - the B7 `add` fix).
             Try
-                Dim ini As New IniFile
-                ini.Load(IniPath())
-                Dim macValid As Boolean = ConfigMacIsValidForIni(ini)
+                Dim ini As IniFile = existing
+                Dim macValid As Boolean = existingMacValid
                 ini.SetKeyValue("Schedule", "Spec", spec)
                 ' Re-affirm the schedule-only sentinel (idempotent - an armed schedule-only config
                 ' already carries it; keeps the invariant explicit).
@@ -2738,7 +2778,9 @@ Module Blocker
             ini.SetKeyValue("Commit", "Committed", "no")
 
             ' C5b: the schedule rule (plaintext, MAC-covered). ActiveUntil is OMITTED (absent = "" =
-            ' no window open); the SERVICE is its sole writer (sets it on window-open, c1/c2).
+            ' no window open); the SERVICE is its sole writer (sets it on window-open, c1/c2). Bug
+            ' 1253: a window still open under a valid MAC never reaches here - it is carried
+            ' forward by the edit-in-place branch above.
             ini.AddSection("Schedule")
             ini.SetKeyValue("Schedule", "Spec", spec)
 
@@ -3639,8 +3681,15 @@ Module Blocker
     ' already have forced DoH off. Sampled by the CLI BEFORE it arms - once ArmSlot has
     ' appended this block's own slot, AnySlotArmed() is unconditionally True and the gate
     ' could never fire.
+    '
+    ' Bug 1253: OR a scheduled window still OPEN. `schedule --clear` blanks the Spec but the
+    ' open window runs to its end, with DoH forced off and the window's hosts snapshot live -
+    ' so a clear + re-arm (or a `block` beside it) is not a fresh arm either. Re-snapshotting
+    ' DoH there would capture our own forced-off policy, and deleting the hosts snapshot would
+    ' strip the window's sites from the B2 repair source. ScheduleWindowIsOpen is MAC-gated,
+    ' fail-closed on a garbage deadline and False once elapsed; this term only ever does LESS.
     Public Function AnythingArmed() As Boolean
-        Return AnySlotArmed() OrElse ScheduleIsArmed()
+        Return AnySlotArmed() OrElse ScheduleIsArmed() OrElse ScheduleWindowIsOpen()
     End Function
 
     Public Function WriteDohSnapshot() As Boolean

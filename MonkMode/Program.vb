@@ -983,6 +983,11 @@ Module Program
         ' re-snapshot bug the manual path did. Both changes only ever do LESS: one fewer DoH
         ' overwrite, and one fewer hosts-snapshot deletion (deleting it while a slot is armed would
         ' strip that slot's sites out of the B2 repair source, which nothing would put back).
+        '
+        ' Bug 1253: and a window still OPEN after `schedule --clear`. The Spec is blank but the
+        ' window runs to its end with DoH forced off and its hosts snapshot live, so arming again
+        ' inside it is a re-arm (WriteScheduleConfig carries the window forward in place), not a
+        ' fresh arm - AnythingArmed counts it.
         Dim alreadyArmed As Boolean = Blocker.AnythingArmed()
         If Blocker.ShouldSnapshotDohPolicy(alreadyArmed, Blocker.DohSnapshotExists()) Then
             If Not Blocker.WriteDohSnapshot() Then
