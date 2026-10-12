@@ -27,6 +27,10 @@
 //   - ArmSlot writes Until = HighWater + span on the APPEND path: a mark 1h AHEAD of the wall (a
 //     fall-back or westward zone change with a slot running) no longer lifts a new 45m block on
 //     its first tick, and a mark 1h BEHIND no longer over-runs it by the lag.
+//   - (T2, 12/10/2026) a PENDING arm's DurationSeconds is the real span: 24/10 22:00 -> 25/10
+//     09:00 stores 43200, not the 39600 the wall difference gave (the service activates at
+//     HighWater + DurationSeconds, so the old value lifted an hour early); a typed start inside
+//     a spring-forward gap reads as the earlier instant, so a guess only lengthens the block.
 //
 // Fences honoured: zones by id, never the machine's current zone in an assertion; the only
 // files touched are the test-bin ini/backup/snapshot (wiped in finally). Nothing is ever armed
@@ -247,7 +251,111 @@ public class ArmFrameTests
         finally { Wipe(); }
     }
 
-    // ---- 4. the existing refusals are unchanged ----
+    // ---- 4. PENDING arms store a REAL duration (T2, 12/10/2026) ----
+    //
+    // The service activates a pending slot at HighWater + DurationSeconds, and HighWater credits
+    // real time, so the stored duration is the real span DoBlock passes - never the wall
+    // difference, which across the 25/10/2026 fall-back stored 11h for a 12h window.
+
+    private static MonkMode.IniFile ArmPending(DateTime start, DateTime end, TimeSpan? realSpan)
+    {
+        var r = MonkMode.Blocker.ArmSlot(new[] { "reddit.com" }, Array.Empty<string>(), "", start,
+                                         end, false, realSpan: realSpan);
+        Assert.True(r.Ok);
+        Assert.True(MonkMode.Blocker.ConfigIsMacValid());
+        return Load();
+    }
+
+    [Fact]
+    public void PendingArm_FallBackInsideWindow_StoresTwelveHours()
+    {
+        var start = new DateTime(2026, 10, 24, 22, 0, 0);   // BST
+        var end = new DateTime(2026, 10, 25, 9, 0, 0);      // GMT
+        Wipe();
+        try
+        {
+            var ini = ArmPending(start, end, MonkMode.Blocker.RealSpanUntil(start, end, Uk));
+            Assert.Equal("43200", ini.GetKeyValue("Slot1", "DurationSeconds"));
+            Assert.Equal("", ini.GetKeyValue("Slot1", "Until"));             // P29: still no Until
+            Assert.Equal(start, Stamp(ini, "Slot1", "StartAt"));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void PendingArm_WithNoSpan_KeepsTheWallDifference()
+    {
+        // The back-compat line: the WriteConfig shim and span-less test arms store end - start.
+        var start = new DateTime(2026, 10, 24, 22, 0, 0);
+        var end = new DateTime(2026, 10, 25, 9, 0, 0);
+        Wipe();
+        try
+        {
+            var ini = ArmPending(start, end, null);
+            Assert.Equal("39600", ini.GetKeyValue("Slot1", "DurationSeconds"));
+            Assert.Equal("", ini.GetKeyValue("Slot1", "Until"));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void PendingArm_ForSpan_IsTheTimeSpanItself()
+    {
+        // `--start "2026-10-25 00:30" --for 2h`: the window holds 01:00-02:00 twice, so the real
+        // span to the wall end would be 3h - the arm must carry the 2h that was asked for.
+        var start = new DateTime(2026, 10, 25, 0, 30, 0);
+        var forSpan = TimeSpan.FromHours(2);
+        Assert.Equal(TimeSpan.FromHours(3), MonkMode.Blocker.RealSpanUntil(start, start.Add(forSpan), Uk));
+        Wipe();
+        try
+        {
+            var ini = ArmPending(start, start.Add(forSpan), forSpan);
+            Assert.Equal("7200", ini.GetKeyValue("Slot1", "DurationSeconds"));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void PendingArm_SpringForwardInsideWindow_StoresTwoHours()
+    {
+        var start = new DateTime(2027, 3, 28, 0, 30, 0);    // GMT
+        var end = new DateTime(2027, 3, 28, 3, 30, 0);      // BST (clocks went forward at 01:00)
+        Wipe();
+        try
+        {
+            var ini = ArmPending(start, end, MonkMode.Blocker.RealSpanUntil(start, end, Uk));
+            Assert.Equal("7200", ini.GetKeyValue("Slot1", "DurationSeconds"));
+        }
+        finally { Wipe(); }
+    }
+
+    [Fact]
+    public void RealSpanUntil_StartInsideTheSpringForwardGap_ReadsTheEarlierInstant()
+    {
+        // 01:30 on 28/03/2027 never shows on a UK wall. A typed pending start there reads as
+        // 00:30 UTC (the earlier reading), so the guess lengthens the block; an end there keeps
+        // reading as the later instant, 01:30 UTC.
+        var gap = new DateTime(2027, 3, 28, 1, 30, 0);
+        Assert.Equal(TimeSpan.FromHours(2), MonkMode.Blocker.RealSpanUntil(gap, new DateTime(2027, 3, 28, 3, 30, 0), Uk));
+        Assert.Equal(TimeSpan.FromHours(1.5), MonkMode.Blocker.RealSpanUntil(new DateTime(2027, 3, 28, 0, 0, 0), gap, Uk));
+    }
+
+    [Fact]
+    public void RealSpanUntil_UnspecifiedKindStart_AgreesWithTheLocalKindReading()
+    {
+        // TryParseStart yields an Unspecified-kind start for a typed date, a Local-kind one for
+        // `+90m` (DateTime.Now + span). DoBlock reads both in TimeZoneInfo.Local; the two must
+        // agree. No machine-zone value is asserted - only that the two readings match.
+        var start = new DateTime(2026, 10, 24, 22, 0, 0);
+        var end = new DateTime(2026, 10, 25, 9, 0, 0);
+        foreach (var tz in new[] { Uk, TimeZoneInfo.Local })
+        {
+            Assert.Equal(MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(start, DateTimeKind.Local), end, tz),
+                         MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(start, DateTimeKind.Unspecified), end, tz));
+        }
+    }
+
+    // ---- 5. the existing refusals are unchanged ----
 
     [Fact]
     public void UntilInThePast_IsStillRefused()

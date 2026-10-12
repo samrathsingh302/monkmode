@@ -385,12 +385,19 @@ Module Program
         ' Until = HighWater mark + span (Blocker.FrameEndFor) - the frame the service's expiry
         ' reads. `--for` is the parsed TimeSpan itself; `--until` is the UTC difference from
         ' the arm instant (whole-second, the stamp's precision), so a DST fall-back inside the
-        ' span is honoured. A PENDING block passes none - P29, the service computes its end.
-        Dim realSpan As TimeSpan? = Nothing
-        If Not startAt.HasValue Then
-            realSpan = If(forSpan.HasValue, forSpan.Value,
-                          Blocker.RealSpanUntil(armNow.AddTicks(-(armNow.Ticks Mod TimeSpan.TicksPerSecond)),
-                                                untilDate, TimeZoneInfo.Local))
+        ' span is honoured.
+        ' T2 (12/10/2026): a PENDING block carries its real span too - P29 still has the
+        ' service compute its end (HighWater + DurationSeconds at activation), so the stored
+        ' duration must be real time: `--start "2026-10-24 22:00" --until "2026-10-25 09:00"`
+        ' is 12h, not the 11h the wall difference gave. Measured from the window's own start.
+        Dim realSpan As TimeSpan?
+        If forSpan.HasValue Then
+            realSpan = forSpan.Value
+        ElseIf startAt.HasValue Then
+            realSpan = Blocker.RealSpanUntil(windowStart, untilDate, TimeZoneInfo.Local)
+        Else
+            realSpan = Blocker.RealSpanUntil(armNow.AddTicks(-(armNow.Ticks Mod TimeSpan.TicksPerSecond)),
+                                             untilDate, TimeZoneInfo.Local)
         End If
 
         ' Ledger 319 (30/08/2026): there is no cooling-off exit any more, so a per-block
