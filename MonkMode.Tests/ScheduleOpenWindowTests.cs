@@ -223,9 +223,12 @@ public class ScheduleOpenWindowTests
         finally { Wipe(); }
     }
 
-    // The writer's slot backstop still holds on the path the open-window term opened: with a
-    // slot armed beside a cleared schedule's open window, a direct schedule arm refuses and
-    // leaves the config byte-identical (the [Time] Until slot mirror is not overwritten).
+    // The writer's slot guard holds on the path the open-window term opened: with a slot armed
+    // beside an open window and the Spec blank, a direct schedule arm refuses and leaves the
+    // config byte-identical (the [Time] Until slot mirror is not overwritten). ArmSlot with the
+    // service absent takes the P18 fresh rewrite, which erases ActiveUntil - so the window is
+    // staged AGAIN after it, and both preconditions are asserted before the writer runs; only
+    // then is it the edit-in-place condition's slot term (not the scaffold backstop) refusing.
     [Fact]
     public void SlotArmedBesideOpenWindow_WriterRefuses()
     {
@@ -236,7 +239,10 @@ public class ScheduleOpenWindowTests
             var r = MonkMode.Blocker.ArmSlot(new[] { "reddit.com" }, Array.Empty<string>(),
                                              "", null, DateTime.Now.AddHours(2), false, false, 0, false);
             Assert.True(r.Ok);
+            StageOpenWindow();
             Assert.True(MonkMode.Blocker.AnySlotArmed());
+            Assert.True(MonkMode.Blocker.ScheduleWindowIsOpen());
+            Assert.False(MonkMode.Blocker.ScheduleIsArmed());
             var bytes = File.ReadAllBytes(MonkMode.Blocker.IniPath());
 
             MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Sun 03:00-03:05", "repro-b.example"));

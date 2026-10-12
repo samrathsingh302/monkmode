@@ -2709,11 +2709,15 @@ Module Blocker
         ' beside a cleared schedule's open window), which a Spec never could (both arm paths
         ' refuse while a Spec is armed). Writing the schedule sentinel over the slots' v9 [Time]
         ' Until mirror is not this writer's to do, so with slots armed fall through to the
-        ' scaffold branch, whose backstop refuses.
+        ' scaffold branch, whose backstop refuses. The slot count is read from the SAME loaded
+        ' snapshot (no second read whose transient failure could disagree with the first); it
+        ' is only reached under a proved-valid MAC, which covers SlotCount. An unreadable config
+        ' never gets here - it reads macValid=False, takes the Else, and AnySlotArmed's own
+        ' fail-closed read (unreadable = ARMED) decides there.
         If ShouldEditScheduleInPlace(existingMacValid,
                                      existing.GetKeyValue("Schedule", "Spec"),
                                      existing.GetKeyValue("Schedule", "ActiveUntil")) AndAlso
-           Not AnySlotArmed() Then
+           ConfigIntegrity.ParseSlotCount(existing.GetKeyValue("Slots", "SlotCount")) = 0 Then
             ' Edit an existing armed schedule-only config in place: change only the Spec, keep the
             ' monotonic frame + any open window. Re-stamp with the EXISTING key, and ONLY if the MAC
             ' was valid before the edit (never re-bless a tampered/frozen config - the B7 `add` fix).
