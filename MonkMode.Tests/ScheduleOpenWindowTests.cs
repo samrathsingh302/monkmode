@@ -129,12 +129,12 @@ public class ScheduleOpenWindowTests
     // Steps 1-4 of the audit repro: arm, the service opens a window, then `schedule --clear`.
     private static void ArmOpenThenClear()
     {
-        MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Sun 00:00-23:59", "repro-a.example"));
+        Assert.True(MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Sun 00:00-23:59", "repro-a.example")));
         Assert.True(MonkMode.Blocker.ScheduleIsArmed());
         StageOpenWindow();
         Assert.True(MonkMode.Blocker.ScheduleWindowIsOpen());
 
-        MonkMode.Blocker.WriteScheduleConfig("");                // schedule --clear
+        Assert.True(MonkMode.Blocker.WriteScheduleConfig(""));   // schedule --clear (in place)
         Assert.False(MonkMode.Blocker.ScheduleIsArmed());
         Assert.True(MonkMode.Blocker.ScheduleWindowIsOpen());
         Assert.False(MonkMode.Blocker.AnySlotArmed());
@@ -157,7 +157,7 @@ public class ScheduleOpenWindowTests
             Assert.NotEqual("", activeUntil);
 
             var spec = BuildSpec("Mon-Sun 03:00-03:05", "repro-b.example");
-            MonkMode.Blocker.WriteScheduleConfig(spec);
+            Assert.True(MonkMode.Blocker.WriteScheduleConfig(spec));   // the in-place edit reports it wrote
 
             var after = Reload();
             Assert.Equal(activeUntil, after.GetKeyValue("Schedule", "ActiveUntil"));
@@ -187,7 +187,7 @@ public class ScheduleOpenWindowTests
             var oldKey = Reload().GetKeyValue("Integrity", "Key");
 
             var spec = BuildSpec("Mon-Sun 03:00-03:05", "repro-b.example");
-            MonkMode.Blocker.WriteScheduleConfig(spec);
+            Assert.True(MonkMode.Blocker.WriteScheduleConfig(spec));   // the fresh scaffold reports it wrote
 
             var after = Reload();
             Assert.Equal("", after.GetKeyValue("Schedule", "ActiveUntil"));
@@ -245,7 +245,7 @@ public class ScheduleOpenWindowTests
             Assert.False(MonkMode.Blocker.ScheduleIsArmed());
             var bytes = File.ReadAllBytes(MonkMode.Blocker.IniPath());
 
-            MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Sun 03:00-03:05", "repro-b.example"));
+            Assert.False(MonkMode.Blocker.WriteScheduleConfig(BuildSpec("Mon-Sun 03:00-03:05", "repro-b.example")));
 
             Assert.Equal(bytes, File.ReadAllBytes(MonkMode.Blocker.IniPath()));
             Assert.False(MonkMode.Blocker.ScheduleIsArmed());
@@ -286,6 +286,111 @@ public class ScheduleOpenWindowTests
 
             Assert.False(MonkMode.Blocker.ScheduleWindowIsOpen());
             Assert.False(MonkMode.Blocker.AnythingArmed());
+        }
+        finally { Wipe(); }
+    }
+
+    // ---- 13/10 T1 (a): what ScheduleWindowIsOpen reads a garbage deadline as ----
+
+    // Valid Base64 that is not our ciphertext but still decrypts (its last block happens to
+    // carry valid padding): the first 8-byte counter value Simple3Des decrypts without throwing.
+    private static string NonThrowingGarbage()
+    {
+        var enc = new MonkMode.Simple3Des("mm_textbox");
+        for (ulong i = 1; i < 100000; i++)
+        {
+            var text = Convert.ToBase64String(BitConverter.GetBytes(i));
+            try { enc.DecryptData(text); return text; } catch { }
+        }
+        throw new InvalidOperationException("no non-throwing 8-byte block found");
+    }
+
+    // Under a VALID MAC with the Spec blank (so only the window term can answer), a deadline
+    // that decrypts to garbage reads as OPEN - as the service and the notifier hold it - and
+    // AnythingArmed counts it, so DoSchedule keeps the snapshot and never re-snapshots DoH.
+    [Fact]
+    public void GarbageActiveUntil_UnderARestampedValidMac_ReadsOpen()
+    {
+        Wipe();
+        try
+        {
+            ArmOpenThenClear();
+            var ini = Reload();
+            ini.SetKeyValue("Schedule", "ActiveUntil", NonThrowingGarbage());
+            RestampAndSave(ini);
+            Assert.True(MacValid(Reload()));
+
+            Assert.True(MonkMode.Blocker.ScheduleWindowIsOpen());
+            Assert.False(MonkMode.Blocker.ScheduleIsArmed());
+            Assert.False(MonkMode.Blocker.AnySlotArmed());
+            Assert.True(MonkMode.Blocker.AnythingArmed());
+        }
+        finally { Wipe(); }
+    }
+
+    // A deadline (or mark) whose decrypt THROWS cannot sit under a valid MAC at all: the
+    // canonical decrypts the same field, so the MAC itself cannot be computed or verified.
+    // Such a config is MAC-invalid and reads "no window" - nothing trusts a window under a bad
+    // MAC (the service's P18 freeze/recovery owns it).
+    [Theory]
+    [InlineData("Schedule", "ActiveUntil")]
+    [InlineData("Time", "HighWater")]
+    public void ThrowingDecrypt_CannotCarryAValidMac_ReadsClosed(string section, string key)
+    {
+        Wipe();
+        try
+        {
+            ArmOpenThenClear();
+            var enc = new MonkMode.Simple3Des("mm_textbox");
+            const string garbage = "AAAAAAA=";   // valid Base64, 5 bytes: not a whole 3DES block
+            Assert.ThrowsAny<Exception>(() => enc.DecryptData(garbage));
+
+            var ini = Reload();
+            ini.SetKeyValue(section, key, garbage);
+            Assert.ThrowsAny<Exception>(() => MonkMode.Blocker.CanonicalFromIni(ini));
+            ini.Save(MonkMode.Blocker.IniPath());
+            Assert.False(MonkMode.Blocker.ScheduleWindowIsOpen());
+
+            ini.SetKeyValue("Integrity", "Mac", "AAAA");                 // and under a plainly invalid MAC
+            ini.Save(MonkMode.Blocker.IniPath());
+            Assert.False(MonkMode.Blocker.ScheduleWindowIsOpen());
+        }
+        finally { Wipe(); }
+    }
+
+    // Garbage under an INVALID MAC: no window, exactly as before.
+    [Fact]
+    public void GarbageActiveUntil_UnderAnInvalidMac_ReadsClosed()
+    {
+        Wipe();
+        try
+        {
+            ArmOpenThenClear();
+            var ini = Reload();
+            ini.SetKeyValue("Schedule", "ActiveUntil", NonThrowingGarbage());
+            RestampAndSave(ini);
+            ini.SetKeyValue("Integrity", "Mac", "AAAA");
+            ini.Save(MonkMode.Blocker.IniPath());
+
+            Assert.False(MonkMode.Blocker.ScheduleWindowIsOpen());
+        }
+        finally { Wipe(); }
+    }
+
+    // A blank ActiveUntil under a valid MAC: no window.
+    [Fact]
+    public void BlankActiveUntil_UnderAValidMac_ReadsClosed()
+    {
+        Wipe();
+        try
+        {
+            ArmOpenThenClear();
+            var ini = Reload();
+            ini.SetKeyValue("Schedule", "ActiveUntil", "");
+            RestampAndSave(ini);
+            Assert.True(MacValid(Reload()));
+
+            Assert.False(MonkMode.Blocker.ScheduleWindowIsOpen());
         }
         finally { Wipe(); }
     }

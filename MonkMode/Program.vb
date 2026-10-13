@@ -928,7 +928,10 @@ Module Program
                 Console.WriteLine("No schedule is armed. Nothing to clear.")
                 Return 0
             End If
-            Blocker.WriteScheduleConfig("")
+            If Not Blocker.WriteScheduleConfig("") Then
+                Console.Error.WriteLine("Could not clear the schedule: a block slot is armed or the config could not be written. Nothing was changed.")
+                Return 3
+            End If
             Console.WriteLine("Schedule cleared. No future windows will open.")
             Console.WriteLine("If a window is open now it runs to its end; MonkMode then tears down within ~10s.")
             Return 0
@@ -1005,7 +1008,10 @@ Module Program
             Blocker.DeleteSnapshot()
         End If
 
-        Blocker.WriteScheduleConfig(spec)
+        If Not Blocker.WriteScheduleConfig(spec) Then
+            Console.Error.WriteLine("Could not write the schedule: a block slot is armed or the config could not be written. Nothing was changed.")
+            Return 3
+        End If
         ServiceTools.ServiceInstaller.InstallAndStart(Blocker.ServiceName, Blocker.ServiceDisplay, serviceExe)
         ' D4d rider: a schedule arm/re-arm can land during an OPEN window with a healthy
         ' notifier running - never kill it for tidiness (Blocker.ScheduleArmKillsLeftovers).

@@ -1475,7 +1475,11 @@ Module Blocker
             ' A spring-forward gap time never shows on the wall; the offsets either side of the
             ' gap give two readings. An end reads the later instant (the standard offset, as it
             ' always did); a start - a pending block's typed --start can land here (T2, 12/10)
-            ' - the earlier, so a guess can only lengthen the block.
+            ' - the earlier. Not for HighWater's sake (it never credits the jump, so either
+            ' reading gives an exact span): the later reading can turn a start inside the gap
+            ' and an end just after it into a <= 0 span the service never activates. On
+            ' 28/03/2027 (UK) `--start 01:30 --until 02:10` reads 01:30 UTC -> 01:10 UTC = -20
+            ' min under the later reading, +40 min under the earlier.
             Dim a As TimeSpan = tz.GetUtcOffset(plain)
             Dim b As TimeSpan = tz.GetUtcOffset(DateTime.SpecifyKind(plain - a, DateTimeKind.Utc))
             offset = If(earliest, If(a > b, a, b), If(a < b, a, b))
@@ -2712,7 +2716,10 @@ Module Blocker
     ' too - a cleared Spec with ActiveUntil still set edits in place (ShouldEditScheduleInPlace),
     ' never the scaffold. The CLI never writes the hosts snapshot (the service creates
     ' monkmode_hosts.block on window-open, c1). Public so the CLI-writer end-to-end test drives it.
-    Public Sub WriteScheduleConfig(ByVal spec As String)
+    ' Returns True once the config was written (the in-place save or the fresh scaffold), False
+    ' when it refused (the slots backstop) or the in-place write threw - so a caller never reports
+    ' a refusal as success. The writer's behaviour is otherwise unchanged.
+    Public Function WriteScheduleConfig(ByVal spec As String) As Boolean
         ' Load ONCE; a missing/unreadable file reads macValid=False (the old ScheduleIsArmed catch)
         ' and so takes the fresh scaffold, whose AnySlotArmed backstop then decides.
         Dim existing As New IniFile
@@ -2750,7 +2757,9 @@ Module Blocker
                 If macValid Then RestampMacWithExistingKey(ini)
                 ini.Save(IniPath())
                 RefreshBackup(ini)
+                Return True
             Catch
+                Return False
             End Try
         Else
             ' v1.1 S3b - THE STRUCTURAL BACKSTOP FOR A LIVE BYPASS. The fresh-scaffold branch
@@ -2762,7 +2771,7 @@ Module Blocker
             ' Fail-SAFE: AnySlotArmed reads an unreadable config as ARMED, so a read failure
             ' costs the user a re-run rather than costing them their blocks.
             ' (The real fix is making a schedule a SLOT of its own - deferred; see the handback.)
-            If AnySlotArmed() Then Return
+            If AnySlotArmed() Then Return False
             ' Fresh schedule-only scaffold (WriteConfig's field set, minus the manual duration +
             ' partner code): the past-Until sentinel, a seeded HighWater/Now, empty manual site/app
             ' lists (the schedule's own live in the Spec), and the Spec. StampFreshMac mints the key
@@ -2809,8 +2818,9 @@ Module Blocker
             StampFreshMac(ini)
             ini.Save(IniPath())
             RefreshBackup(ini)
+            Return True
         End If
-    End Sub
+    End Function
 
     ' v1.1 S5 (pure): the [Guard] ArmedCount a SCHEDULE-ONLY config carries - "1" while a Spec
     ' is armed, "0" once it is cleared.
@@ -2859,20 +2869,29 @@ Module Blocker
     ' D5 (rich status): is a scheduled window OPEN right now? Reads the service-maintained
     ' [Schedule] ActiveUntil (encrypted datetime; "" between windows - the service is its sole
     ' writer, set on window-open) vs the monotonic [Time] HighWater, macValid-gated. Display-only:
-    ' ZERO enforcement authority (like BlockIsCommitted). Fail-CLOSED to match the service (an
-    ' unreadable/tampered config or a set-but-unparseable deadline reads as NOT elapsed = held/open),
-    ' so `status` never claims "no window" while the service is in fact still holding one. False on
-    ' no config / absent ActiveUntil / any read failure.
+    ' ZERO enforcement authority (like BlockIsCommitted). False on no config / an unreadable config
+    ' / an invalid MAC / a blank ActiveUntil - nothing trusts a window under a bad MAC (a tampered
+    ' config is the service's P18 freeze, not a window). Under a VALID MAC with ActiveUntil set, a
+    ' decrypt of ActiveUntil or HighWater that THROWS reads as OPEN, as the service (the garbled
+    ' ciphertext throws -> RecoverPrimaryConfig, fail-closed) and the notifier (a throwing decrypt
+    ' holds) both read it; a set-but-unparseable deadline reads as not elapsed = open likewise.
+    ' Both consumers only ever do LESS with True: `status` shows "window open" exactly where the
+    ' service holds, and AnythingArmed skips one hosts-snapshot delete and one DoH re-snapshot.
     Public Function ScheduleWindowIsOpen() As Boolean
+        Dim ini As New IniFile
+        Dim activeEnc As String = ""
         Try
-            Dim ini As New IniFile
             ini.Load(IniPath())
             If Not ConfigMacIsValidForIni(ini) Then Return False
-            Dim activeEnc As String = ini.GetKeyValue("Schedule", "ActiveUntil")
-            If activeEnc = "" Then Return False
-            Return Not ScheduleWindowElapsed(enc.DecryptData(activeEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+            activeEnc = ini.GetKeyValue("Schedule", "ActiveUntil")
         Catch
             Return False
+        End Try
+        If activeEnc = "" Then Return False
+        Try
+            Return Not ScheduleWindowElapsed(enc.DecryptData(activeEnc), enc.DecryptData(ini.GetKeyValue("Time", "HighWater")))
+        Catch
+            Return True
         End Try
     End Function
 
