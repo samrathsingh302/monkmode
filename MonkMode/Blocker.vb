@@ -1200,11 +1200,27 @@ Module Blocker
     ' says no; every other shape keeps the pre-FX4 per-dimension inheritance exactly as it was, so a
     ' bare `block --for 2h` still inherits both lists. Narrowing what a NEW arm inherits can never
     ' lift, shorten or unblock anything already running - the defaults only ever fed new arms.
+    '
+    ' T4 (13/10/2026): a NAMED site source that produced nothing (an existing but empty or
+    ' comment-only --file) is the same false premise as URL-only - the user named what to block,
+    ' so `block --file empty.txt --for 1h` inherits nothing and the emptiness gate refuses it,
+    ' instead of quietly arming every default site and app. `namedSiteSource` is optional so the
+    ' pre-T4 three-argument callers read exactly as before (no named source).
     Friend Function ShouldInheritDefaults(ByVal explicitDomainCount As Integer,
                                          ByVal explicitAppCount As Integer,
-                                         ByVal hasUrlPatterns As Boolean) As Boolean
+                                         ByVal hasUrlPatterns As Boolean,
+                                         Optional ByVal namedSiteSource As Boolean = False) As Boolean
         If explicitDomainCount > 0 OrElse explicitAppCount > 0 Then Return True
-        Return Not hasUrlPatterns
+        Return Not hasUrlPatterns AndAlso Not namedSiteSource
+    End Function
+
+    ' T4 (13/10/2026): the SITE dimension of the inheritance, once ShouldInheritDefaults says yes.
+    ' The default sites fill in only when the arm produced no site AND named no site source, so
+    ' `block --file empty.txt --apps x --for 1h` arms the apps and no default site ("an explicit
+    ' source OVERRIDES the default"). With no named source this is the pre-T4 `domains.Count = 0`.
+    Friend Function ShouldInheritDefaultSites(ByVal explicitDomainCount As Integer,
+                                             ByVal namedSiteSource As Boolean) As Boolean
+        Return explicitDomainCount = 0 AndAlso Not namedSiteSource
     End Function
 
     ' HasNothingToBlock: the emptiness refusal, now counting --urls as a thing to block. Evaluated
@@ -1455,6 +1471,26 @@ Module Blocker
             Return WallToUtc(endsAtLocal, tz, earliest:=False) - WallToUtc(armNowLocal, tz, earliest:=True)
         Catch ex As ArgumentException
             Return endsAtLocal - armNowLocal
+        End Try
+    End Function
+
+    ' T4 (13/10/2026) (PURE, DISPLAY ONLY): the wall clock a `--for` block ends at - the local
+    ' wall time in `tz` of the start's UTC instant plus the span. The span is real time (an
+    ' immediate arm's Until is mark + span, a pending one stores it as DurationSeconds), so a
+    ' wall sum misprints across a DST change: 2h armed 00:30 on 25/10/2026 (UK) ends at 01:30
+    ' GMT, not "02:30". The start reads as its earliest instant, as RealSpanUntil reads a
+    ' start. Nothing stored comes from this. Never throws: an unconvertible end falls back to
+    ' the wall sum (and that, past year 9999, to DateTime.MaxValue).
+    Friend Function WallEndFor(ByVal startLocal As DateTime, ByVal span As TimeSpan,
+                               ByVal tz As TimeZoneInfo) As DateTime
+        Try
+            Return TimeZoneInfo.ConvertTimeFromUtc(WallToUtc(startLocal, tz, earliest:=True) + span, tz)
+        Catch ex As ArgumentException
+            Try
+                Return startLocal + span
+            Catch ex2 As ArgumentException
+                Return DateTime.MaxValue
+            End Try
         End Try
     End Function
 

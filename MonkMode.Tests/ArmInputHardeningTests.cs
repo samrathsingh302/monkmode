@@ -481,3 +481,55 @@ public class DurationOverflowTests
         Assert.Equal(0, seconds);
     }
 }
+
+// ---- T4 (13/10/2026): `block` refuses a site the service would bin, as `add` does ----
+//
+// `add --sites "a b.com"` was refused (T5/A9) but `block --sites "a b.com" --for 1h` armed it:
+// SplitList splits only on , and ; so the inner-space value reached the slot as ONE site, and
+// the service's MergeSiteList dropped it - an under-block reported as success. DoBlock's
+// chokepoint now runs the same TryRejectWhitespaceSites over its converged site list (--sites,
+// --preset, --file lines and the inherited defaults) before any side effect. DoBlock arms, so
+// the refusal is driven here with the list DoBlock hands it; the wiring is review-proven.
+
+public class BlockWhitespaceRefusalTests
+{
+    private static bool Check(IEnumerable<string> sites, out string err)
+    {
+        string e = "unset";
+        var ok = MonkMode.Program.TryRejectWhitespaceSites(sites, ref e);
+        err = e;
+        return ok;
+    }
+
+    [Fact]
+    public void BlockSitesWithAnInnerSpace_IsRefused_NamingIt()
+    {
+        // `block --sites "x.com, a b.com"` -> SplitList -> { "x.com", " a b.com" }.
+        Assert.False(Check(new[] { "x.com", " a b.com" }, out var err));
+        Assert.Equal("Refusing site 'a b.com': contains whitespace.", err);
+    }
+
+    [Fact]
+    public void AFileLineWithAnInnerSpace_IsRefused_NamingIt()
+    {
+        // TryReadSiteFile trims each line but keeps an inner space, so the file path reaches the
+        // same chokepoint carrying it.
+        var path = Path.Combine(Path.GetTempPath(), "mm-blockspace-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            File.WriteAllLines(path, new[] { "reddit.com", "  a b.com  " });
+            List<string>? domains = null; string readErr = "";
+            Assert.True(MonkMode.Program.TryReadSiteFile(path, ref domains, ref readErr));
+            Assert.False(Check(domains!, out var err));
+            Assert.Equal("Refusing site 'a b.com': contains whitespace.", err);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void BlockSitesWithoutInnerWhitespace_PassUntouched()
+    {
+        Assert.True(Check(new[] { "x.com", " a.com ", "b.com" }, out var err));
+        Assert.Equal("", err);
+    }
+}
