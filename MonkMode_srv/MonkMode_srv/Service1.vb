@@ -1971,9 +1971,15 @@ Public Class Service1
             ' every expiry, cooling-off, schedule and slot gate below reads, so the credit
             ' has to be in the mark by the time it is taken. A boot that lands after a
             ' block's real end therefore lifts on the FIRST tick that carries a reading.
+            '
+            ' A7: the reading's age (against this tick's nowMono) goes in with it, so an
+            ' anchor SEEDED from it is the UTC of this tick's mark rather than of the
+            ' earlier instant the witnesses answered at - see ResolveMarkAndAnchor.
             trustedProbe.RequestIfDue(nowMono, storedTrustedUtc = "")
+            Dim readingAgeSeconds As Long = 0
+            Dim trustedReading As String = trustedProbe.TryTakeReading(nowMono, readingAgeSeconds)
             TrustedTime.ResolveMarkAndAnchor(storedHw, newHw, storedTrustedUtc,
-                                             trustedProbe.TryTakeReading(),
+                                             trustedReading, readingAgeSeconds,
                                              TrustedTime.MaxCreditSeconds,
                                              newHw, newTrustedUtc)
             Dim parsedHw As DateTime
@@ -2105,12 +2111,18 @@ Public Class Service1
         ' The one gate the five per-tick self-heals take: the v9 BlockHeld (kept as the
         ' widening disjunct - the mirror is still written, and S3b/S8 own its removal) OR the
         ' slot OR-fold. macValid=False makes BOTH arms True, so a frozen config still freezes.
-        Dim enforcementHeld As Boolean = BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw) OrElse slotsHeld
+        Dim mirrorHeld As Boolean = BlockHeld(iniUntil, newHwAsOf, ExpiryGraceSeconds, macValid, iniScheduleActiveUntil, newHw)
+        Dim enforcementHeld As Boolean = mirrorHeld OrElse slotsHeld
 
-        ' Re-assert the read-only lock on hosts every tick (cheap tamper-resist;
-        ' we no longer hold the file open, so this is how the lock is maintained).
+        ' Re-assert the read-only lock on hosts every tick while something is HELD (cheap
+        ' tamper-resist; we no longer hold the file open, so this is how the lock is
+        ' maintained). 05/10 A11: only while held - the gate takes the same two terms
+        ' enforcementHeld folds above, so macValid=False still re-locks. Unconditionally,
+        ' a schedule-only config BETWEEN windows (service alive, nothing held) kept the
+        ' user's hosts read-only for every other writer - the leftover 313(b)/F78 removed
+        ' at teardown. Inside a held tick nothing changes.
         Try
-            If My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbReadOnly)
+            If ShouldReassertHostsReadOnly(mirrorHeld, slotsHeld) AndAlso My.Computer.FileSystem.FileExists(hostDirS) Then SetAttr(hostDirS, vbReadOnly)
         Catch ex As Exception
         End Try
 
@@ -3035,6 +3047,18 @@ Public Class Service1
     ' changes no enforcement behaviour. Pure + Shared.
     Friend Shared Function BlockHeld(ByVal untilText As String, ByVal asOf As DateTime, ByVal graceSeconds As Long, ByVal macValid As Boolean, ByVal scheduleActiveUntilText As String, ByVal highWaterText As String) As Boolean
         Return (Not EffectiveBlockHasExpired(untilText, asOf, graceSeconds, macValid)) OrElse (macValid AndAlso ScheduleActive(scheduleActiveUntilText, highWaterText))
+    End Function
+
+    ' 05/10 A11: may the tick re-assert hosts' read-only attribute? Only while something is
+    ' held - the SAME two terms the tick folds into enforcementHeld (the v9 mirror's BlockHeld
+    ' and the slot OR-fold), so macValid=False (both True) still re-locks, fail-closed. The
+    ' read-only bit is enforcement (the DNS-client lock); with nothing held - a schedule-only
+    ' config between windows - re-asserting it every tick kept every other hosts writer
+    ' failing, the leftover 313(b)/F78 removed at teardown. Only ever does LESS than the old
+    ' unconditional re-assert. Pure + Shared so the rule is pinned; the tick wiring is
+    ' review-proven (the tick is not unit-drivable).
+    Friend Shared Function ShouldReassertHostsReadOnly(ByVal blockHeld As Boolean, ByVal slotsHeld As Boolean) As Boolean
+        Return blockHeld OrElse slotsHeld
     End Function
 
     ' ============ v1.1 S3a: the SLOT enforcement layer (folds + unions) ============
@@ -4098,14 +4122,16 @@ Public Class Service1
     ' reads it. These gates are the pure, unit-tested core; the live wiring (read
     ' the ini, persist the new value, re-stamp the MAC) is the per-tick seam.
     '
-    ' DELIBERATE SEMANTIC: because HighWater only advances while the service is
-    ' running, genuine machine-OFF downtime is NOT credited toward expiry - the
-    ' block extends by the downtime. That is the fail-closed cost of defeating
-    ' clock-forward (the block measures real ON-machine elapsed time). At OnStart
-    ' the boot gap is a big delta => ForwardJump => not advanced => not credited.
-    ' Intended. A spring-DST forward shift is likewise a >ceiling jump => refused
-    ' => the only cost is a rare ~1h block-extension, the safe direction (LOCAL
-    ' time on purpose, so a DST/timezone forward shift never lifts a block early).
+    ' DELIBERATE SEMANTIC: the monotonic rule itself credits only real ON-machine
+    ' elapsed time - at OnStart the boot gap is a big delta => ForwardJump => not
+    ' advanced by this rule, and a spring-DST forward shift is likewise a >ceiling
+    ' jump that credits only the real monotonic seconds, never the hour.
+    ' CORRECTED 13/10/2026: machine-OFF/asleep downtime IS now credited, but only by
+    ' F77 against an externally corroborated UTC clock (TrustedTime.vb), never by
+    ' this rule or DateTime.Now; and since B1b a backward roll (a DST fall-back, a
+    ' rolled clock) credits the real monotonic elapsed (AdvanceHighWater) instead of
+    ' freezing, so after a fall-back the mark runs AHEAD of the local wall - it is a
+    ' real-elapsed counter in the local frame, not "LOCAL time on purpose".
 
     ' The classifier results for ClassifyTimeAdvance. Plain Integer (not an Enum)
     ' so the service-copy and guardian-copy results compare directly in the

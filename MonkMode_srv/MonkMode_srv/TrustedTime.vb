@@ -101,9 +101,9 @@ Namespace Global.monkmode
         ' averaged in.
         Friend Const WitnessSpreadCeilingSeconds As Long = 300
 
-        ' A ceiling on a single credit, purely to bound the arithmetic - a year is far
-        ' beyond any block this tool can arm (7 days), so it never binds in practice.
-        ' It is a cap and not a refusal on purpose: refusing an over-large credit would
+        ' A ceiling on a single credit, purely to bound the arithmetic - a bound on the
+        ' arithmetic, not on a block: no cap on a block's duration exists (`--for` and
+        ' `--until` take any span short of the year-9999 overflow refusal). It is a cap and not a refusal on purpose: refusing an over-large credit would
         ' punish a genuinely long shutdown by never lifting the block, while capping at
         ' a year lifts every real block just the same. It changes no attack outcome,
         ' because an attacker who has fooled the whole quorum already has more than
@@ -191,13 +191,28 @@ Namespace Global.monkmode
             Return delta
         End Function
 
+        ' A7 (05/10 audit): how old a reading is by the time a tick consumes it - whole
+        ' seconds of Environment.TickCount64 between the reading landing and this tick,
+        ' rounded UP. A reading is asked for on one tick and taken on a later one, so it
+        ' describes an instant at least one tick before the mark it is paired with.
+        ' Rounding up and never clamping from above are both deliberate: an age read too
+        ' LARGE seeds the anchor past the true UTC and so can only under-credit (the block
+        ' over-blocks); an age read too SMALL is the early lift A7 was. A negative interval
+        ' (TickCount64 should never go backwards) reads as 0 - today's behaviour.
+        Friend Function ReadingAgeSeconds(ByVal nowMono As Long, ByVal landedMono As Long) As Long
+            Dim elapsedMs As Long = nowMono - landedMono
+            If elapsedMs <= 0 Then Return 0
+            Return (elapsedMs + 999L) \ 1000L
+        End Function
+
         ' THE WHOLE DECISION, in one pure place so the regressions can pin it.
         '
         ' Inputs: the mark as stored at the top of this tick (storedHwText), the mark
         ' the existing B4 monotonic rule already produced for this tick (tickHwText -
-        ' AdvanceHighWater's output, untouched), the stored anchor, and the corroborated
+        ' AdvanceHighWater's output, untouched), the stored anchor, the corroborated
         ' reading for this tick ("" when there is none, which is the overwhelmingly
-        ' common case - probes are minutes apart).
+        ' common case - probes are minutes apart), and that reading's age in whole
+        ' seconds (ReadingAgeSeconds; 0 when there is no reading, a negative reads as 0).
         '
         ' Outputs: the mark and the anchor to persist. BOTH are monotonic - the max of
         ' what the two independent rules would give - so neither can ever be walked
@@ -209,6 +224,7 @@ Namespace Global.monkmode
                                         ByVal tickHwText As String,
                                         ByVal storedAnchorUtcText As String,
                                         ByVal trustedNowUtcText As String,
+                                        ByVal readingAgeSeconds As Long,
                                         ByVal maxCreditSeconds As Long,
                                         ByRef outHwText As String,
                                         ByRef outAnchorUtcText As String)
@@ -237,11 +253,29 @@ Namespace Global.monkmode
             ' A reading with no usable anchor cannot credit anything - there is no
             ' instant to measure from - but it CAN seed the anchor so the next probe
             ' works. Seeding earns zero credit, which is the point.
+            '
+            ' A7: the seed is paired with THIS tick's mark (tickHw), but the reading was
+            ' taken readingAgeSeconds earlier. Stored as-is, the anchor would sit that
+            ' many seconds BEFORE the mark's true UTC, and every later credit measured
+            ' from it would over-credit by the same amount - a ~10 s early lift once per
+            ' seed (each fresh arm, each re-seed). So the seed is moved forward by the
+            ' age, to the UTC instant the mark actually stands at. An unparseable reading
+            ' is stored verbatim as before (it reads as "no anchor" next tick).
             If Not haveAnchor Then
                 outAnchorUtcText = trustedNowUtcText
+                Dim seedReading As DateTime
+                If TryParseUtc(trustedNowUtcText, seedReading) Then
+                    outAnchorUtcText = FormatUtc(seedReading.AddSeconds(Math.Max(0L, readingAgeSeconds)))
+                End If
                 Return
             End If
 
+            ' The credited path does NOT use the age, and needs no fix: the mark is
+            ' credited up to the reading's instant (storedHw + reading - anchor) and the
+            ' anchor becomes that same reading, so the pair is self-consistent, both
+            ' lagging the true instant by the age. The only effect is an UNDER-credit of
+            ' at most the latest reading's age, which never accumulates (the next reading
+            ' measures from this one) - the safe direction, named rather than "fixed".
             Dim realElapsed As Long = ElapsedSinceAnchor(storedAnchorUtcText, trustedNowUtcText, maxCreditSeconds)
 
             ' The mark: storedHw + the REAL elapsed, but never behind what the tick
@@ -319,6 +353,9 @@ Namespace Global.monkmode
         Private attempted As Boolean = False
         Private everSucceeded As Boolean = False
         Private pending As String = ""
+        ' A7: Environment.TickCount64 when `pending` landed, so the consuming tick can
+        ' tell how old the reading is (ReadingAgeSeconds).
+        Private pendingLandedMono As Long = 0
 
         ' Start a probe if none is running and one is due. Never blocks, never throws.
         '
@@ -354,6 +391,7 @@ Namespace Global.monkmode
                         SyncLock gate
                             If reading <> "" Then
                                 pending = reading
+                                pendingLandedMono = Environment.TickCount64
                                 everSucceeded = True
                             End If
                             inFlight = False
@@ -369,10 +407,13 @@ Namespace Global.monkmode
         End Sub
 
         ' Take and clear the last completed reading; "" when there is none. Consumed
-        ' once, so a stale reading can never be credited twice.
-        Friend Function TryTakeReading() As String
+        ' once, so a stale reading can never be credited twice. ageSeconds is the
+        ' reading's age against the caller's nowMono (ReadingAgeSeconds), 0 when there
+        ' is no reading. (A7 replaced the parameterless form; the tick is its one caller.)
+        Friend Function TryTakeReading(ByVal nowMono As Long, ByRef ageSeconds As Long) As String
             SyncLock gate
                 Dim r As String = pending
+                ageSeconds = If(r = "", 0L, TrustedTime.ReadingAgeSeconds(nowMono, pendingLandedMono))
                 pending = ""
                 Return r
             End SyncLock

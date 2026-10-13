@@ -59,13 +59,14 @@ public class TrustedTimeTests
     private const long Cap = monkmode.TrustedTime.MaxCreditSeconds;
 
     // VB ByRef surfaces as C# ref, so the outputs are collected through this shim
-    // rather than out-vars.
+    // rather than out-vars. ageSeconds defaults to 0 - a reading consumed the instant it
+    // landed - so every pre-A7 case below runs exactly as it always did.
     private static (string Hw, string Anchor) Resolve(
-        string storedHw, string tickHw, string anchor, string reading)
+        string storedHw, string tickHw, string anchor, string reading, long ageSeconds = 0)
     {
         string hw = "", outAnchor = "";
         monkmode.TrustedTime.ResolveMarkAndAnchor(
-            storedHw, tickHw, anchor, reading, Cap, ref hw, ref outAnchor);
+            storedHw, tickHw, anchor, reading, ageSeconds, Cap, ref hw, ref outAnchor);
         return (hw, outAnchor);
     }
 
@@ -356,6 +357,117 @@ public class TrustedTimeTests
                      monkmode.TrustedTime.ProbeIntervalMs(false, false));  // no probe yet
         Assert.Equal(monkmode.TrustedTime.ProbeRetryFastMs,
                      monkmode.TrustedTime.ProbeIntervalMs(false, true));   // neither
+    }
+
+    // ------------- A7 (05/10 audit): the seed is labelled by the reading's age -------------
+    //
+    // A reading is asked for on one tick and consumed on a later one, so by the time it
+    // SEEDS the anchor it describes an instant at least a tick before the mark it is paired
+    // with. Seeding the anchor at the raw reading therefore put the anchor's UTC behind the
+    // mark's, and the next credit measured from it over-credited by exactly that age - an
+    // early lift of ~10 s once per seed. The seed is now reading + age.
+
+    // The A7 sequence. The true UTC of tick k's mark is 09:00:12 (local is UTC+1), but the
+    // reading in hand landed 12 s earlier: 09:00:00.
+    private static string SeedStoredHw => L(2026, 8, 28, 10, 0, 2);
+    private static string SeedTickHw => L(2026, 8, 28, 10, 0, 12);
+    private static string SeedReading => U(2026, 8, 28, 9, 0, 0);
+    // Tick k+1, ten real monotonic seconds later.
+    private static string NextStoredHw => SeedTickHw;
+    private static string NextTickHw => L(2026, 8, 28, 10, 0, 22);
+    // An honest reading on tick k+1 consumed the moment it landed: the seed reading plus
+    // exactly the real seconds since it was taken (12 before tick k + the 10 to tick k+1).
+    private static string NextReading => U(2026, 8, 28, 9, 0, 22);
+    // A block whose real end is 10:00:30 in the mark's frame - 8 s after tick k+1.
+    private static string UntilJustAfterNextTick => L(2026, 8, 28, 10, 0, 30);
+
+    [Fact]
+    public void A7_ASeedAtAge12_AnchorsTheMarkAtTheReadingPlus12s()
+    {
+        var r = Resolve(SeedStoredHw, SeedTickHw, "", SeedReading, 12);
+
+        Assert.Equal(U(2026, 8, 28, 9, 0, 12), r.Anchor);
+        Assert.Equal(SeedTickHw, r.Hw);   // seeding still credits nothing
+    }
+
+    [Fact]
+    public void A7_TheNextHonestReading_CreditsNothingBeyondTheTicksOwnMark_NoEarlyLift()
+    {
+        // THE FIX. Seed at age 12 on tick k, then an honest reading on tick k+1: the real
+        // elapsed since the anchor is exactly the 10 s the monotonic rule already credited,
+        // so the mark is the tick's own and the block (8 s still to run) holds.
+        var seeded = Resolve(SeedStoredHw, SeedTickHw, "", SeedReading, 12);
+        var next = Resolve(NextStoredHw, NextTickHw, seeded.Anchor, NextReading, 0);
+
+        Assert.Equal(NextTickHw, next.Hw);
+        Assert.Equal(NextReading, next.Anchor);
+        Assert.False(monkmode.Service1.BlockHasExpired(UntilJustAfterNextTick, ParseLocal(next.Hw), 5));
+    }
+
+    [Fact]
+    public void A7_Contrast_TheSameSequenceSeededAtAge0_IsTheOld12sOverCredit()
+    {
+        // The repro, kept as the named contrast. Age 0 is the pre-A7 call: the anchor is
+        // the raw reading, so the k+1 credit is storedHw + (R2 - R1) = 22 s against a tick
+        // that really lasted 10 - the OLD arithmetic, computed here inline. It is 12 s past
+        // the tick's own mark, and through the real gate it reads the 10:00:30 block as
+        // expired at 10:00:22: the ~10 s early lift A7 described. The product is only ever
+        // right to do this when the reading really was fresh; age is what tells it apart.
+        var seeded = Resolve(SeedStoredHw, SeedTickHw, "", SeedReading, 0);
+        var next = Resolve(NextStoredHw, NextTickHw, seeded.Anchor, NextReading, 0);
+
+        var oldCredit = ParseLocal(NextStoredHw).AddSeconds(
+            (DateTime.Parse(NextReading, CultureInfo.InvariantCulture)
+             - DateTime.Parse(SeedReading, CultureInfo.InvariantCulture)).TotalSeconds);
+        Assert.Equal(oldCredit, ParseLocal(next.Hw));
+        Assert.Equal(TimeSpan.FromSeconds(12), ParseLocal(next.Hw) - ParseLocal(NextTickHw));
+        Assert.True(monkmode.Service1.BlockHasExpired(UntilJustAfterNextTick, ParseLocal(next.Hw), 5));
+    }
+
+    [Fact]
+    public void A7_TheAgeTouchesOnlyTheSeed_TheCreditedAndNoReadingPathsAreUnchanged()
+    {
+        // With an anchor in hand the pair is self-consistent without the age (the mark is
+        // credited to the reading's instant and the anchor becomes that reading), so the
+        // age must not move either output there - and with no reading it has nothing to act
+        // on. Byte-identical to age 0 in both.
+        Assert.Equal(Resolve(StoredHw, TickHw, Anchor, U(2026, 8, 28, 9, 0), 0),
+                     Resolve(StoredHw, TickHw, Anchor, U(2026, 8, 28, 9, 0), 12));
+        Assert.Equal(Resolve(StoredHw, TickHw, Anchor, "", 0),
+                     Resolve(StoredHw, TickHw, Anchor, "", 12));
+    }
+
+    [Fact]
+    public void A7_ANegativeAge_ReadsAsZero_NeverPullsTheSeedBackwards()
+    {
+        // A seed moved BACKWARDS is exactly the over-credit A7 removed, so whatever a caller
+        // passes, a negative age seeds at the raw reading - today's behaviour, never earlier.
+        Assert.Equal(Resolve(SeedStoredHw, SeedTickHw, "", SeedReading, 0),
+                     Resolve(SeedStoredHw, SeedTickHw, "", SeedReading, -30));
+        // And the probe's own age arithmetic clamps a backwards TickCount64 the same way.
+        Assert.Equal(0, monkmode.TrustedTime.ReadingAgeSeconds(1_000, 5_000));
+    }
+
+    [Fact]
+    public void A7_AnUnparseableSeedReading_IsStoredVerbatimAsBefore()
+    {
+        // Unchanged from the shipped seed: the garbage is stored and reads as "no anchor"
+        // next tick (TryParseUtc fails => no credit). The age never manufactures a value.
+        var r = Resolve(SeedStoredHw, SeedTickHw, "", "garbage", 12);
+
+        Assert.Equal("garbage", r.Anchor);
+        Assert.Equal(SeedTickHw, r.Hw);
+    }
+
+    [Theory]
+    [InlineData(50_000, 50_000, 0)]    // consumed the instant it landed
+    [InlineData(62_000, 50_000, 12)]   // a whole 12 s
+    [InlineData(62_001, 50_000, 13)]   // rounded UP: a too-large age only under-credits
+    [InlineData(50_500, 50_000, 1)]
+    [InlineData(49_000, 50_000, 0)]    // TickCount64 behind the landing: 0, never negative
+    public void A7_ReadingAgeSeconds_IsWholeSecondsRoundedUp_NeverNegative(long nowMono, long landedMono, long expected)
+    {
+        Assert.Equal(expected, monkmode.TrustedTime.ReadingAgeSeconds(nowMono, landedMono));
     }
 
     // ------------------------------ format + consts ------------------------------
