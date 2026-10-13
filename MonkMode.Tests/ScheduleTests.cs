@@ -867,17 +867,35 @@ public class ScheduleTickDecisionEndToEndTests
     }
 
     [Fact]
-    public void DstFallBackInsideAWindow_OverWaits_NeverEndsEarly()
+    public void DstFallBackInsideAWindow_CreditsRealSeconds_EndsAtItsRealDuration()
     {
-        // A -1h DST-like backward shift: NextHighWater classifies Backward and keeps the
-        // stored mark (HighWater freezes until the wall catches up) -> the window over-waits
-        // its real duration, never ends early.
+        // A -1h DST-like backward shift, through the rule the live tick runs (Service1.vb
+        // calls AdvanceHighWater, not HonestTick's pre-B1b pair): a Backward roll credits the
+        // real monotonic elapsed - the mark advances by exactly the 10 real seconds (not 0,
+        // not -1h) - so the window stays held and closes at its REAL 30-minute duration across
+        // the roll, neither early nor over-waiting.
         var t0 = T0();
         string hw = t0.ToString(EnCa);
         string activeUntil = monkmode.Service1.ComputeScheduleEnd(hw, 1800);
-        var rolledBack = HonestTick(hw, t0.AddHours(-1));
-        Assert.Equal(hw, rolledBack);   // frozen (backward roll not credited)
-        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, rolledBack));   // over-waits, still held
+
+        hw = monkmode.Service1.AdvanceHighWater(hw, t0.AddHours(-1).ToString(EnCa), 10, Ceiling);
+        Assert.Equal(t0.AddSeconds(10).ToString(EnCa), hw);   // +10 real seconds, not frozen
+        Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));   // still held
+
+        // The wall keeps running an hour behind; every tick is a Backward roll crediting 10s.
+        for (int i = 2; i <= 179; i++)
+        {
+            hw = monkmode.Service1.AdvanceHighWater(hw, t0.AddSeconds(i * 10).AddHours(-1).ToString(EnCa), 10, Ceiling);
+            Assert.True(monkmode.Service1.ScheduleActive(activeUntil, hw));   // never early
+        }
+        Assert.Equal(t0.AddSeconds(1790).ToString(EnCa), hw);
+
+        // Tick 180 reaches the stored ActiveUntil by real seconds: elapsed, no longer held
+        // (never over-waiting the hour). The guardian agrees.
+        hw = monkmode.Service1.AdvanceHighWater(hw, t0.AddSeconds(1800).AddHours(-1).ToString(EnCa), 10, Ceiling);
+        Assert.True(monkmode.Service1.ScheduleElapsed(activeUntil, hw));
+        Assert.False(monkmode.Service1.ScheduleActive(activeUntil, hw));
+        Assert.False(mm_guard.Guardian.ScheduleActive(activeUntil, hw));
     }
 
     [Fact]

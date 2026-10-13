@@ -187,14 +187,17 @@ Friend Module Guardian
     ' here so the guardian could reason about an advance identically if needed
     ' and so the two halves can be parity-pinned exactly like BlockHasExpired.
     '
-    ' DELIBERATE SEMANTIC: because HighWater only advances while the service is
-    ' running, genuine machine-OFF downtime is NOT credited toward expiry - the
-    ' block extends by the downtime. That is the fail-closed cost of defeating
-    ' clock-forward (the block measures real ON-machine elapsed time). At OnStart
-    ' the boot gap is a big delta => ForwardJump => not advanced => not credited.
-    ' Intended. A spring-DST forward shift is likewise a >ceiling jump => refused
-    ' => the only cost is a rare ~1h block-extension, the safe direction (LOCAL
-    ' time on purpose, so a DST/timezone forward shift never lifts a block early).
+    ' DELIBERATE SEMANTIC: the monotonic rule itself credits only real ON-machine
+    ' elapsed time - at OnStart the boot gap is a big delta => ForwardJump => not
+    ' advanced by this rule, and a spring-DST forward shift is likewise a >ceiling
+    ' jump that credits only the real monotonic seconds, never the hour.
+    ' CORRECTED 13/10/2026: machine-OFF/asleep downtime IS now credited, but only by
+    ' F77 against an externally corroborated UTC clock (TrustedTime.vb), never by
+    ' this rule or DateTime.Now; and since B1b a backward roll (a DST fall-back, a
+    ' rolled clock) credits the real monotonic elapsed (Service1.AdvanceHighWater -
+    ' the guardian only reads the persisted mark) instead of freezing, so after a
+    ' fall-back the mark runs AHEAD of the local wall - it is a real-elapsed counter
+    ' in the local frame, not "LOCAL time on purpose".
 
     ' The classifier results for ClassifyTimeAdvance. Plain Integer (not an Enum)
     ' so the service-copy and guardian-copy results compare directly in the
