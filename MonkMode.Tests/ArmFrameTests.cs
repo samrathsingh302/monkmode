@@ -409,4 +409,57 @@ public class ArmFrameTests
         Assert.Equal(MonkMode.Program.WindowRefusal.TooShort,
                      MonkMode.Program.ClassifyBlockWindow(false, now, now.AddHours(-1)));
     }
+
+    // ---- 6. WallEndFor: the wall clock a `--for` block really ends at (T4, 13/10/2026) ----
+    //
+    // DoBlock printed `start + span` as a `--for` block's end, a wall sum, while the span runs in
+    // real time: 2h armed 00:30 on 25/10/2026 printed "until 02:30" for a block that ends at 01:30
+    // GMT. Display only - the stored Until/DurationSeconds are pinned by sections 3 and 4.
+
+    [Fact]
+    public void WallEndFor_FallBackInside_EndsAnHourEarlierOnTheWall()
+    {
+        var start = new DateTime(2026, 10, 25, 0, 30, 0);   // BST; clocks go back at 02:00
+        Assert.Equal(new DateTime(2026, 10, 25, 1, 30, 0), MonkMode.Blocker.WallEndFor(start, TimeSpan.FromHours(2), Uk));
+    }
+
+    [Fact]
+    public void WallEndFor_SpringForwardInside_EndsAnHourLaterOnTheWall()
+    {
+        var start = new DateTime(2027, 3, 28, 0, 30, 0);    // GMT; clocks go forward at 01:00
+        Assert.Equal(new DateTime(2027, 3, 28, 3, 30, 0), MonkMode.Blocker.WallEndFor(start, TimeSpan.FromHours(2), Uk));
+    }
+
+    [Fact]
+    public void WallEndFor_OrdinaryDay_IsTheWallSum()
+    {
+        var start = new DateTime(2026, 7, 14, 21, 15, 0);
+        var span = TimeSpan.FromMinutes(150);
+        Assert.Equal(start + span, MonkMode.Blocker.WallEndFor(start, span, Uk));
+    }
+
+    [Fact]
+    public void WallEndFor_UnspecifiedKindStart_AgreesWithTheLocalKindReading()
+    {
+        // The immediate print's start is DateTime.Now (Local kind), a typed pending start is
+        // Unspecified; read in the same zone they must give the same end. No machine-zone value
+        // is asserted - only that the two readings match.
+        var start = new DateTime(2026, 10, 25, 0, 30, 0);
+        foreach (var tz in new[] { Uk, TimeZoneInfo.Local })
+        {
+            Assert.Equal(MonkMode.Blocker.WallEndFor(DateTime.SpecifyKind(start, DateTimeKind.Local), TimeSpan.FromHours(2), tz),
+                         MonkMode.Blocker.WallEndFor(DateTime.SpecifyKind(start, DateTimeKind.Unspecified), TimeSpan.FromHours(2), tz));
+        }
+    }
+
+    [Fact]
+    public void WallEndFor_PastTheLastConvertibleInstant_FallsBackWithoutThrowing()
+    {
+        // UTC-5: 20:00 on the last day has no UTC instant (01:00 on 01/01/10000), so the
+        // conversion throws and the wall sum is printed; past the wall's own range, MaxValue.
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        var start = new DateTime(9999, 12, 31, 20, 0, 0);
+        Assert.Equal(start + TimeSpan.FromHours(1), MonkMode.Blocker.WallEndFor(start, TimeSpan.FromHours(1), eastern));
+        Assert.Equal(DateTime.MaxValue, MonkMode.Blocker.WallEndFor(start, TimeSpan.FromDays(2), eastern));
+    }
 }

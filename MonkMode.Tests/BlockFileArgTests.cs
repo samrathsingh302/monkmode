@@ -160,4 +160,59 @@ public class BlockFileArgTests : IDisposable
         Assert.Null(domains);
         Assert.Equal("", err);
     }
+
+    // ---- T4 (13/10/2026): a named --file that read NO site still overrides the defaults ----
+    //
+    // ShouldInheritDefaults saw only counts, so an existing but empty or comment-only --file
+    // looked like "no site source named" and the arm inherited every default site and app -
+    // against DoBlock's own rule that an explicit source overrides the default. DoBlock passes
+    // `namedSiteSource = fileDomains IsNot Nothing`; the composition below is DoBlock's
+    // (inherit gate -> site dimension -> emptiness gate), driven on the pure functions.
+
+    [Fact]
+    public void CommentOnlyFile_ReadsAsANamedSourceWithNoSites()
+    {
+        var path = Path.Combine(_dir, "comments.txt");
+        File.WriteAllLines(path, new[] { "# nothing yet", "", "   ", "  # still nothing" });
+
+        Assert.False(PreDispatch(new[] { "block", "--file", path, "--for", "1h" }, out var domains, out var err));
+        Assert.NotNull(domains);           // named: DoBlock's namedSiteSource is True
+        Assert.Empty(domains);
+        Assert.Equal("", err);
+    }
+
+    [Fact]
+    public void EmptyFileAlone_InheritsNothing_AndIsRefusedAsNothingToBlock()
+    {
+        // `block --file empty.txt --for 1h` with default sites and apps configured.
+        Assert.False(MonkMode.Blocker.ShouldInheritDefaults(0, 0, false, true));
+        Assert.True(MonkMode.Blocker.HasNothingToBlock(0, 0, false));
+        Assert.StartsWith("Nothing to block.", MonkMode.Blocker.NothingToBlockMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EmptyFileWithApps_ArmsTheAppsAndNoDefaultSite()
+    {
+        // `block --file empty.txt --apps x --for 1h`: the inherit gate is open (an app source
+        // produced something), but the site dimension stays closed - the file named it.
+        Assert.True(MonkMode.Blocker.ShouldInheritDefaults(0, 1, false, true));
+        Assert.False(MonkMode.Blocker.ShouldInheritDefaultSites(0, true));
+        Assert.False(MonkMode.Blocker.HasNothingToBlock(0, 1, false));
+    }
+
+    [Fact]
+    public void NoSiteSourceNamed_StillInheritsExactlyAsBefore()
+    {
+        // A bare `block --for 2h` and an --apps-only block: the pre-T4 answers, by both the
+        // four-argument form and the three-argument one existing callers use.
+        Assert.True(MonkMode.Blocker.ShouldInheritDefaults(0, 0, false, false));
+        Assert.True(MonkMode.Blocker.ShouldInheritDefaults(0, 0, false));
+        Assert.True(MonkMode.Blocker.ShouldInheritDefaultSites(0, false));
+        Assert.True(MonkMode.Blocker.ShouldInheritDefaults(0, 1, false, false));
+        // URL-only (FX4) is unchanged with or without a named empty file.
+        Assert.False(MonkMode.Blocker.ShouldInheritDefaults(0, 0, true, false));
+        Assert.False(MonkMode.Blocker.ShouldInheritDefaults(0, 0, true, true));
+        // A file that read sites never takes the default sites.
+        Assert.False(MonkMode.Blocker.ShouldInheritDefaultSites(2, true));
+    }
 }

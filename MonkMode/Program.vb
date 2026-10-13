@@ -280,8 +280,13 @@ Module Program
         ' your defaults" premise is simply false; honouring it turns a page-level block into a
         ' machine-wide one the user never asked for and cannot cut short. This narrows only what a NEW
         ' arm inherits - it can never lift, shorten or unblock anything already running.
-        If Blocker.ShouldInheritDefaults(domains.Count, apps.Count, urlPatterns <> "") Then
-            If domains.Count = 0 Then domains.AddRange(Blocker.SetupDefaultSites())
+        '
+        ' T4 (13/10/2026): a named --file is a named site source even when it read no site (an
+        ' empty or comment-only file), so it overrides the default sites - and with nothing else
+        ' named the arm inherits nothing and the gate below refuses it.
+        Dim namedSiteSource As Boolean = fileDomains IsNot Nothing
+        If Blocker.ShouldInheritDefaults(domains.Count, apps.Count, urlPatterns <> "", namedSiteSource) Then
+            If Blocker.ShouldInheritDefaultSites(domains.Count, namedSiteSource) Then domains.AddRange(Blocker.SetupDefaultSites())
             If apps.Count = 0 Then apps.AddRange(Blocker.SetupDefaultApps())
         End If
 
@@ -304,6 +309,15 @@ Module Program
         If Not Blocker.TryRejectControlChars("site", domains, ctrlErr) OrElse
            Not Blocker.TryRejectControlChars("app", apps, ctrlErr) Then
             Console.Error.WriteLine(ctrlErr)
+            Return 1
+        End If
+        ' T4 (13/10/2026): ...and a site with a space or tab inside it, as `add` refuses one
+        ' (T5/A9): the service's MergeSiteList bins any whitespace-bearing token, so arming
+        ' "a b.com" would report a block that never blocks it. Sites only - apps and --urls
+        ' keep their own rules.
+        Dim spaceErr As String = ""
+        If Not TryRejectWhitespaceSites(domains, spaceErr) Then
+            Console.Error.WriteLine(spaceErr)
             Return 1
         End If
 
@@ -579,10 +593,15 @@ Module Program
         ' so a delayed block's planned time is the block, not the wait before it.
         Stats.RecordBlockStart(windowStart, untilDate, domains.Count, apps.Count, committed, coolOffSeconds)
 
+        ' T4 (13/10/2026): a `--for` end is printed as the wall clock it really ends at
+        ' (Blocker.WallEndFor - the span is real time, so a DST change inside it moves the wall
+        ' end); `--until` prints its typed end. Display only - the spans below are unchanged.
+        Dim shownEnd As DateTime = untilDate
+        If forSpan.HasValue Then shownEnd = Blocker.WallEndFor(windowStart, forSpan.Value, TimeZoneInfo.Local)
         If startAt.HasValue Then
-            Console.WriteLine("Block #" & arm.Id & " is scheduled to start " & startAt.Value.ToString() & " and run until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(startAt.Value)) & ").")
+            Console.WriteLine("Block #" & arm.Id & " is scheduled to start " & startAt.Value.ToString() & " and run until " & shownEnd.ToString() & " (" & Humanize(untilDate.Subtract(startAt.Value)) & ").")
         Else
-            Console.WriteLine("Block #" & arm.Id & " is now active until " & untilDate.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
+            Console.WriteLine("Block #" & arm.Id & " is now active until " & shownEnd.ToString() & " (" & Humanize(untilDate.Subtract(DateTime.Now)) & ").")
         End If
         If domains.Count > 0 Then Console.WriteLine("  Sites: " & String.Join(", ", domains))
         If apps.Count > 0 Then Console.WriteLine("  Apps:  " & String.Join(", ", apps))
