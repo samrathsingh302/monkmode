@@ -37,12 +37,16 @@
 // for real - the service is treated as ABSENT (injected, never queried).
 
 using System.Globalization;
+using Xunit.Abstractions;
 
 namespace MonkMode.Tests;
 
 [Collection("CliIniWriters")]
 public class ArmFrameTests
 {
+    private readonly ITestOutputHelper _output;
+    public ArmFrameTests(ITestOutputHelper output) => _output = output;
+
     private static readonly CultureInfo EnCa = new("en-CA");
     private static readonly TimeZoneInfo Uk = TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time");
     private static readonly MonkMode.Simple3Des Enc = new("mm_textbox");
@@ -353,6 +357,47 @@ public class ArmFrameTests
             Assert.Equal(MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(start, DateTimeKind.Local), end, tz),
                          MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(start, DateTimeKind.Unspecified), end, tz));
         }
+    }
+
+    [Fact]
+    public void RealSpanUntil_LocalKindStartInsideTheMachineZonesGap_ReadsTheEarlierInstant()
+    {
+        // WallToUtc short-circuits a Local-kind wall through ToUniversalTime() only OUTSIDE the
+        // machine zone's spring-forward gap: inside it ToUniversalTime() applies the standard
+        // offset (the LATER reading), so a `--start +Nm` landing in the gap would disagree with
+        // the typed-date path. The gap is found from TimeZoneInfo.Local's own rules (no zone or
+        // offset is asserted): the first invalid wall time within three years.
+        var tz = TimeZoneInfo.Local;
+        var probe = DateTime.SpecifyKind(DateTime.Today, DateTimeKind.Unspecified);
+        var limit = probe.AddYears(3);
+        while (probe < limit && !tz.IsInvalidTime(probe)) probe = probe.AddMinutes(30);
+        if (probe >= limit)
+        {
+            // No gap in this zone: the branch is unreachable here. Pin the ordinary agreement and
+            // say so in the output - this is not a proof of the gap clause.
+            var ordinary = new DateTime(2026, 10, 24, 22, 0, 0);
+            Assert.Equal(MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(ordinary, DateTimeKind.Local), ordinary.AddHours(2), tz),
+                         MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(ordinary, DateTimeKind.Unspecified), ordinary.AddHours(2), tz));
+            _output.WriteLine($"GAP BRANCH NOT REACHABLE: {tz.Id} has no spring-forward gap within three years; only the ordinary Local/Unspecified agreement was checked.");
+            return;
+        }
+        var gapStart = probe;
+        while (tz.IsInvalidTime(gapStart.AddMinutes(-1))) gapStart = gapStart.AddMinutes(-1);
+        var gapEnd = probe;
+        while (tz.IsInvalidTime(gapEnd)) gapEnd = gapEnd.AddMinutes(1);
+        var inside = gapStart.AddTicks((gapEnd - gapStart).Ticks / 2);
+        var end = gapEnd.AddHours(2);
+
+        // The two candidate offsets either side of the gap; the larger is the earlier instant.
+        var before = tz.GetUtcOffset(gapStart.AddMinutes(-1));
+        var after = tz.GetUtcOffset(gapEnd);
+        var earliestUtc = inside - (before > after ? before : after);
+        var expected = TimeZoneInfo.ConvertTimeToUtc(end, tz) - earliestUtc;
+
+        var local = MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(inside, DateTimeKind.Local), end, tz);
+        var unspecified = MonkMode.Blocker.RealSpanUntil(DateTime.SpecifyKind(inside, DateTimeKind.Unspecified), end, tz);
+        Assert.Equal(expected, unspecified);
+        Assert.Equal(expected, local);
     }
 
     // ---- 5. the existing refusals are unchanged ----
