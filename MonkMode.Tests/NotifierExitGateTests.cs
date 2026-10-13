@@ -64,6 +64,18 @@ public class NotifierExitGateTests
     }
 
     [Fact]
+    public void LoadReadFailure_FailClosedLocals_DoesNotExit()
+    {
+        // Form1_Load's Catch: a launch-time config read that throws resets the locals to
+        // ("", macValid=False, 0 slots, not held) and falls through to this decision instead
+        // of exiting - the notifier stays and the 5s poll re-reads.
+        Assert.False(mm_notify.Form1.ShouldExitOnDone("", false, 0, false));
+        // A partial read that had already seen Done=yes before the throw is held by the
+        // macValid reset alone.
+        Assert.False(mm_notify.Form1.ShouldExitOnDone("yes", false, 0, false));
+    }
+
+    [Fact]
     public void Done_WithScheduleArmed_DoesNotExit()
     {
         Assert.False(mm_notify.Form1.ShouldExitOnDone("yes", true, 0, true));

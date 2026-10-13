@@ -185,8 +185,18 @@ Public Class Form1
                 launchMsg = BuildManualLaunchToast(ini)
             End If
         Catch ex As Exception
-            ExitNotifier()
-            Return
+            ' A launch-time read that THROWS (a mid-write ini, a DPAPI hiccup) is no reason to
+            ' exit: the guardian relaunched into the same exit every 10s, so app-kill, the URL
+            ' watcher and the block page were gone while it lasted. Fail closed is to STAY:
+            ' reset every local a partial read may have set back to its fail-closed value
+            ' (macValid=False makes ShouldExitOnDone False below), skip the launch toast, and
+            ' let the 5s poll re-read the config.
+            done = ""
+            needsAlerted = ""
+            macValid = False
+            rawSlotCount = 0
+            scheduleHeld = False
+            launchMsg = ""
         End Try
 
         If ShouldExitOnDone(done, macValid, rawSlotCount, scheduleHeld) Then
